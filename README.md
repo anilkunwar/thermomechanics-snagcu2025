@@ -12,6 +12,9 @@
 
    This data is computed from a TDB file using pycalphad software.  A webapp (https://enthalpydatafromtdbfile.streamlit.app/) has been constructed to make this computational task easier.
 
-   (b) computing the specific enthalpy (h) data
-   As h (J/kg) is utilized in the finite element analysis, it is necessary to compute the h-T data. 
+   (b) computation of specific enthalpy of Sn-3.0Ag0.5Cu alloy from the molar enthalpy values
+   
+   As h (J/kg) is utilized in the finite element analysis, it is necessary to compute the h-T data.
+   (i) code : specific_enthalpy_from_molar_enthalpy.py
+   (ii) generated data: T_h-SnAgCu.csv (csv format) and T_h-SnAgCu.dat (dat file format)
 
