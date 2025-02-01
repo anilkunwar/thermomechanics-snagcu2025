@@ -1,6 +1,6 @@
 # thermomechanics-snagcu2025
 
-1. Themodynamic Dataset
+1. Computation of Enthalpy
    
    (a) temperature_molar-enthalpy.csv
    The csf file consists of the following two columns:
