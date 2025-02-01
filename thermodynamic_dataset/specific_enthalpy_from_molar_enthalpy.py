@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 def calculate_specific_enthalpy(df, element_composition):
     # Calculate molar weight of alloy or element
-    molar_weights = {'Sn': 118.71, 'Ag': 107.8682, 'Cu': 63.546}  # Updated with Sn, Ag, Cu molar weights
+    molar_weights = {'Sn': 118.71, 'Ag': 107.8682, 'Cu': 63.546}  # Can be updated with molar weights of any elements present in the alloy (Sn, Ag, Cu )
     molar_weight = sum(element_composition[element] * molar_weights[element] for element in element_composition)
 
     # Calculate specific enthalpy (h) in J/kg
