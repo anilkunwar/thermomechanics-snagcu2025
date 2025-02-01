@@ -11,7 +11,7 @@
     
 
    This data is computed from a TDB file using pycalphad software.  A webapp (https://enthalpydatafromtdbfile.streamlit.app/) has been constructed to make this computational task easier.
-   The  thermophysical quantities such as  melting point and  latent heat of fusion for the alloy can be estimated for the Sn-xAg-yCu alloy by fitting the T-H data in the webapp (https://enthalpytemperature.streamlit.app/) 
+   The  thermophysical quantities such as  melting point and  latent heat of fusion for the alloy can be estimated for the Sn-xAg-yCu alloy by fitting the T-H data in another webapp (https://enthalpytemperature.streamlit.app/) 
 
    (b) computation of specific enthalpy of Sn-3.0Ag0.5Cu alloy from the molar enthalpy values
    
