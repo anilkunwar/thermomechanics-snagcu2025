@@ -5,6 +5,26 @@ import matplotlib.pyplot as plt
 from scipy.optimize import differential_evolution
 
 st.title("Thermal Conductivity Fit with Ensemble Optimizer")
+st.markdown(r"""
+### Differential Evolution Method
+The Differential Evolution (DE) algorithm  has been applied in this code to fit the thermal conductivity data. The DE is a stochastic optimization method used to minimize a function by iteratively improving candidate solutions. It operates on a large space of potential solutions and applies mutation, crossover, and selection to evolve towards the optimal solution.
+
+The optimization problem  for thermal conductivity data with m observations is defined as:""")
+st.latex(r'''
+\min_{A,B} \sum_{i=1}^{m} \left( A T_i + B - k_{th,i} \right)^2
+''')
+
+st.markdown(r"""
+where  A  and  B are the fitting parameters, and \( T_i \) and \( kth_i \) are the temperature and thermal conductivity data points, respectively.
+
+For multiple datasets, we compute the weighted average fit:""")
+
+st.latex(r'''
+A_{avg} = \sum_{j=1}^{n} w_j A_j, \quad B_{avg} = \sum_{j=1}^{n} w_j B_j
+''')
+st.markdown(r"""
+where \( w_j \) are user-defined weights that sum to 1, ensuring an Ensemble Fit that optimally represents the combined data 1+2+...+n.
+""")
 
 st.write("Upload CSV files where the first column is Temperature (T) and the second column is Thermal Conductivity (kth). Headers will be ignored if present.")
 
