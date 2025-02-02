@@ -35,8 +35,9 @@ if uploaded_files:
     weights = np.ones(n_datasets) / n_datasets  
     
     st.write("### Set Weights for Each Dataset (Sum = 1):")
-    weight_sliders = []
-    total_weight = sum(weights)
+    #weight_sliders = []
+    #total_weight = sum(weights)
+    weight_sliders = np.array(weights)
     
     for i in range(n_datasets - 1):  # Last weight is determined automatically
         weight = st.slider(f"Weight for Dataset {i+1}", min_value=0.0, max_value=1.0, value=float(weights[i]), step=0.01)
