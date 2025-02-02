@@ -38,17 +38,33 @@ if uploaded_files:
     #weight_sliders = []
     #total_weight = sum(weights)
     weight_sliders = np.array(weights)
+
+    ## the commented part works for n < = 2, but for n>2 it is not so flexible
+    #for i in range(n_datasets - 1):  # Last weight is determined automatically
+    #    weight = st.slider(f"Weight for Dataset {i+1}", min_value=0.0, max_value=1.0, value=float(weights[i]), step=0.01)
+    #    weight_sliders.append(weight)
     
+    #last_weight = 1.0 - sum(weight_sliders)
+    #last_weight = max(0.0, min(1.0, last_weight))  # Ensure the last weight is valid
+    #weight_sliders.append(last_weight)
+    #weights = np.array(weight_sliders)
+    
+    #st.write(f"Final Weight for Dataset {n_datasets}: {last_weight:.2f}")
+
     for i in range(n_datasets - 1):  # Last weight is determined automatically
-        weight = st.slider(f"Weight for Dataset {i+1}", min_value=0.0, max_value=1.0, value=float(weights[i]), step=0.01)
-        weight_sliders.append(weight)
+        weight_sliders[i] = st.slider(f"Weight for Dataset {i+1}", min_value=0.0, max_value=1.0, value=float(weights[i]), step=0.01)
+        
+        # Normalize remaining weights to ensure sum = 1
+        remaining_weight = 1.0 - np.sum(weight_sliders[:i+1])
+        remaining_datasets = n_datasets - (i + 1)
+        if remaining_datasets > 0:
+            weight_sliders[i+1:] = remaining_weight / remaining_datasets
     
-    last_weight = 1.0 - sum(weight_sliders)
-    last_weight = max(0.0, min(1.0, last_weight))  # Ensure the last weight is valid
-    weight_sliders.append(last_weight)
-    weights = np.array(weight_sliders)
+    weights = weight_sliders
     
-    st.write(f"Final Weight for Dataset {n_datasets}: {last_weight:.2f}")
+    st.write("### Final Weights:")
+    for i in range(n_datasets):
+        st.write(f"Dataset {i+1}: {weights[i]:.2f}")
     
     if st.button("Optimize"):
         results = []
