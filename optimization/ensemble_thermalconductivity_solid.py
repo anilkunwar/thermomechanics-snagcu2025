@@ -88,7 +88,8 @@ if uploaded_files:
     
     if st.button("Optimize"):
         results = []
-        T_fit = np.linspace(min(min(T) for T, _ in datasets), max(max(T) for T, _ in datasets), 100)
+        #T_fit = np.linspace(min(min(T) for T, _ in datasets), max(max(T) for T, _ in datasets), 100) # finds the maximum temperature within the datasets
+        T_fit = np.linspace(min(min(T) for T, _ in datasets), 480, 100) # user defined value for maximum temperature
         kth_fits = []
         
         for T, kth in datasets:
@@ -120,4 +121,13 @@ if uploaded_files:
         ax.grid()
         
         st.pyplot(fig)
+        
+        # Prepare data for download
+        fit_data = pd.DataFrame({'T(K)': T_fit, 'kth': kth_fit_avg})
+        csv_data = fit_data.to_csv(index=False)
+        dat_data = fit_data.to_csv(index=False, sep=' ')
+    
+        st.download_button(label="Download CSV", data=csv_data, file_name="fitted_curve.csv", mime="text/csv")
+        st.download_button(label="Download DAT", data=dat_data, file_name="fitted_curve.dat", mime="text/plain")
+
 
