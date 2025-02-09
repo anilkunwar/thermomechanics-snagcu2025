@@ -3,7 +3,7 @@
     ! Density of solid  SnAgCu fitted as a function of temperature
     ! (rho_alloy)solid = As*(T-298) +  Cs, where As = -0.000476 kg/m3K  and Cs = 7270.0 kg/m3
     ! 298 < T < Tm where Tm = 492.0 K
-    ! Reference: Wang and Xian, JOurnal of Electronic Materials, 34 (2005) 1414-1419.
+    ! Reference: Wang and Xian, Journal of Electronic Materials, 34 (2005) 1414-1419.
     ! https://link.springer.com/article/10.1007/s11664-005-0199-x
     ! Density of liquid SnAgCu fitted as a function of temperature
     !(rho_alloy)liquid  = Al*(T-273) + Cl, where Al = -0.691 kg/m3K  and Cl = 7457.7 kg/m3 (492.0 K < T < 2500.0 K) 7.4577-0.000691T
