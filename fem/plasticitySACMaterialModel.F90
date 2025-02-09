@@ -12,7 +12,7 @@
     ! https://www.sciencedirect.com/science/article/abs/pii/S0921509311001481?via%3Dihub
     ! Battau et al.
     ! https://cdn2.hubspot.net/hubfs/1871852/DfR_Solutions_Website/Resources-Archived/Publications/2002-2004/2004_FlexCrackPb-Free2_Hillman-Blattau.pdf?t=1482271815148
-    ! T dependence of elasticity E(T) = As*(T-273)^2 + Bs*(T-273) + Cs , where As= -1.86E+5 Pa/K^2 , Bs = 7.5E+7 Pa/K , Cs =43.4E+09 Pa
+    ! T dependence of elasticity E(T) = As*(T-273)^2 + Bs*(T-273) + Cs , where As= -1.86E+5 Pa/K^2 , Bs = 7.5E+7 Pa/K , Cs =43.4E+09 Pa (Vianco et al., 2023)
     ! References: Vianco et al., Journal of Electronic Materials 52 (2023) 2116–2138.
     ! https://link.springer.com/article/10.1007/s11664-022-10159-y
     !-----------------------------------------------------
