@@ -37,7 +37,8 @@ if uploaded_files:
 
 if datasets:
     results = []
-    T_fit = np.linspace(min(min(T) for T, _ in datasets), max(max(T) for T, _ in datasets), 100)
+    #T_fit = np.linspace(min(min(T) for T, _ in datasets), max(max(T) for T, _ in datasets), 100) # Finds the maximum values within the original datasets
+    T_fit = np.linspace(min(min(T) for T, _ in datasets), 470, 100)  # Extend range up to 470 K # user defined maximum temperature limit
     nu_fits = []
     bounds = [(-1, 1), (-1, 1), (0, 1)]  # Reasonable bounds for A, B, and C
     
@@ -71,3 +72,14 @@ if datasets:
     ax.grid()
     
     st.pyplot(fig)
+    
+    # Prepare data for download
+    fit_data = pd.DataFrame({'T(K)': T_fit, 'nu': nu_fit_avg})
+    csv_data = fit_data.to_csv(index=False)
+    dat_data = fit_data.to_csv(index=False, sep=' ')
+    
+    st.download_button(label="Download CSV", data=csv_data, file_name="fitted_curve.csv", mime="text/csv")
+    st.download_button(label="Download DAT", data=dat_data, file_name="fitted_curve.dat", mime="text/plain")
+
+
+    
