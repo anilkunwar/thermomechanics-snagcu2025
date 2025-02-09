@@ -6,15 +6,15 @@
     ! When sigma > sigma_yield , E = sigma/((sigma/K_H))**(1/n) (T=298.0 K)
     ! Hollomon parameters
     ! where, strength coefficient K_H = 381.08 MPa and strain hardening coefficient = n = 0.196; m = 1/n = 5.1
-    ! References: Vianco et al., Journal of Electronic Materials 52 (2023) 2116–2138.
-    ! https://link.springer.com/article/10.1007/s11664-022-10159-y
-    ! T dependence of elasticity E(T) = As*(T-273)^2 + Bs*(T-273) + Cs , where As= -1.86E+5 Pa/K^2 , Bs = 7.5E+7 Pa/K , Cs =43.4E+09 Pa
     ! Nguyen and Park, Microelectronics Reliability 51 (2011) 1385-1392.
     ! https://www.sciencedirect.com/science/article/pii/S0026271411000953?via%3Dihub
     ! Rao et al., 2011 MSEA,
     ! https://www.sciencedirect.com/science/article/abs/pii/S0921509311001481?via%3Dihub
     ! Battau et al.
     ! https://cdn2.hubspot.net/hubfs/1871852/DfR_Solutions_Website/Resources-Archived/Publications/2002-2004/2004_FlexCrackPb-Free2_Hillman-Blattau.pdf?t=1482271815148
+    ! T dependence of elasticity E(T) = As*(T-273)^2 + Bs*(T-273) + Cs , where As= -1.86E+5 Pa/K^2 , Bs = 7.5E+7 Pa/K , Cs =43.4E+09 Pa
+    ! References: Vianco et al., Journal of Electronic Materials 52 (2023) 2116–2138.
+    ! https://link.springer.com/article/10.1007/s11664-022-10159-y
     !-----------------------------------------------------
     FUNCTION getPlasticity( model, n, stress, temp ) RESULT(elast)
     ! modules needed
