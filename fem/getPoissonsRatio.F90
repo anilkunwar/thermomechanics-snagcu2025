@@ -42,7 +42,7 @@
     END IF
     
     ! read in Temperature Coefficient of Resistance
-    betas = GetConstReal( material, 'Ti Coeff Solid Sn3.0Ag0.5Cu', GotIt)
+    betas = GetConstReal( material, 'T1 Coeff Solid Sn3.0Ag0.5Cu', GotIt)
     IF(.NOT. GotIt) THEN
     CALL Fatal('getNu', 'Coefficientt of Bs*T2 term solid Sn3.0Ag0.5Cu not found')
     END IF
