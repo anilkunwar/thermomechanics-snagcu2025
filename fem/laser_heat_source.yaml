@@ -1,1 +1,5 @@
-
+model_number: ULTRA-SB2300
+laser_parameters:
+  heating_duration: 10 ms
+  wavelength: 1064 nm
+  energy: 7.5 mJ
