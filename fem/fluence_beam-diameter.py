@@ -3,7 +3,7 @@ import numpy as np
 import plotly.graph_objects as go
 import math
 
-st.title('Fluence Comparison for Different Beam Diameters')
+st.title('Fluence Comparison for Two Different Beam Diameters')
 
 # Define the colormap list globally
 cmaps = ['balance', 'bluered', 'hsv', 'jet', 'picnic', 'portland', 
