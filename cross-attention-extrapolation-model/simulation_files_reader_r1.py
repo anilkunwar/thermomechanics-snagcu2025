@@ -3,13 +3,8 @@ import os
 import glob
 import re
 import numpy as np
-import pyvista as pv
-from pathlib import Path
-
-# =====================================================
-# PYVISTA SAFE MODE (CRITICAL FOR STREAMLIT CLOUD)
-# =====================================================
-pv.OFF_SCREEN = True
+import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 
 # =============================================
 # PATH CONFIGURATION
@@ -19,109 +14,77 @@ FEA_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "fea_solutions")
 os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 
 # =============================================
-# PATTERN UTILS
+# FOLDER NAME PARSER
 # =============================================
 def parse_folder_name(folder: str):
-    match = re.match(r"q([\d\.p]+)mJ-delta([\d\.p]+)ns", folder)
+    """
+    q0p5mJ-delta4p2ns → (0.5, 4.2)
+    """
+    match = re.match(r"q([\dp\.]+)mJ-delta([\dp\.]+)ns", folder)
     if not match:
         return None, None
-    e_str, d_str = match.groups()
-    try:
-        return float(e_str.replace("p", ".")), float(d_str.replace("p", "."))
-    except ValueError:
-        return None, None
+    e, d = match.groups()
+    return float(e.replace("p", ".")), float(d.replace("p", "."))
 
 # =============================================
-# LOAD ALL FEA SIMULATIONS (FIXED)
+# LOAD FEA DATA (VTU → NUMPY, NO RENDERING)
 # =============================================
 @st.cache_data
 def load_all_simulations():
+    import pyvista as pv  # SAFE: IO only, no rendering
+
     simulations = {}
     folders = glob.glob(os.path.join(FEA_SOLUTIONS_DIR, "q*mJ-delta*ns"))
 
-    for folder_path in folders:
-        folder_name = os.path.basename(folder_path)
-        energy, duration = parse_folder_name(folder_name)
+    for folder in folders:
+        name = os.path.basename(folder)
+        energy, duration = parse_folder_name(name)
         if energy is None:
             continue
 
-        vtu_files = sorted(glob.glob(os.path.join(folder_path, "a_t????.vtu")))
+        vtu_files = sorted(glob.glob(os.path.join(folder, "a_t????.vtu")))
         if not vtu_files:
             continue
 
-        try:
-            first_mesh = pv.read(vtu_files[0])
-        except Exception as e:
-            st.warning(f"⚠️ Skipping {folder_name}: {e}")
+        mesh0 = pv.read(vtu_files[0])
+
+        if not mesh0.point_data:
             continue
 
-        # Prefer point data
-        data_container_name = "point"
-        data_keys = list(first_mesh.point_data.keys())
-        n_entities = first_mesh.n_points
+        points = mesh0.points
+        n_pts = mesh0.n_points
+        n_steps = len(vtu_files)
 
-        if not data_keys:
-            data_container_name = "cell"
-            data_keys = list(first_mesh.cell_data.keys())
-            n_entities = first_mesh.n_cells
-
-        if not data_keys:
-            continue
-
-        n_timesteps = len(vtu_files)
-
-        # Inspect field dimensionality
+        fields = {}
         field_info = {}
-        for key in data_keys:
-            arr = np.asarray(
-                first_mesh.point_data[key]
-                if data_container_name == "point"
-                else first_mesh.cell_data[key]
-            )
+
+        # Detect scalar vs vector
+        for key in mesh0.point_data.keys():
+            arr = np.asarray(mesh0.point_data[key])
             if arr.ndim == 1:
                 field_info[key] = ("scalar", 1)
+                fields[key] = np.full((n_steps, n_pts), np.nan, dtype=np.float32)
             else:
                 field_info[key] = ("vector", arr.shape[1])
-
-        # Allocate storage
-        fields = {}
-        for key, (kind, ncomp) in field_info.items():
-            if kind == "scalar":
-                fields[key] = np.full((n_timesteps, n_entities), np.nan, dtype=np.float32)
-            else:
                 fields[key] = np.full(
-                    (n_timesteps, n_entities, ncomp), np.nan, dtype=np.float32
+                    (n_steps, n_pts, arr.shape[1]), np.nan, dtype=np.float32
                 )
 
-        # Load timesteps
-        for t_idx, vtu in enumerate(vtu_files):
-            try:
-                mesh = pv.read(vtu)
-                container = mesh.point_data if data_container_name == "point" else mesh.cell_data
+        # Load all timesteps
+        for t, vtu in enumerate(vtu_files):
+            mesh = pv.read(vtu)
+            for key, (kind, _) in field_info.items():
+                data = np.asarray(mesh.point_data[key], dtype=np.float32)
+                fields[key][t] = data
 
-                for key, (kind, _) in field_info.items():
-                    if key not in container:
-                        continue
-                    arr = np.asarray(container[key], dtype=np.float32)
-
-                    if kind == "scalar":
-                        fields[key][t_idx, :] = arr
-                    else:
-                        fields[key][t_idx, :, :] = arr
-
-            except Exception as e:
-                st.error(f"❌ Error reading {vtu}: {e}")
-
-        simulations[folder_name] = {
-            "energy_mJ": energy,
-            "duration_ns": duration,
-            "timesteps_ns": np.arange(1, n_timesteps + 1),
-            "fields": fields,
-            "field_info": field_info,
-            "points": first_mesh.points if data_container_name == "point" else None,
-            "n_timesteps": n_timesteps,
-            "n_entities": n_entities,
-        }
+        simulations[name] = dict(
+            energy_mJ=energy,
+            duration_ns=duration,
+            points=points,
+            fields=fields,
+            field_info=field_info,
+            n_timesteps=n_steps,
+        )
 
     return simulations
 
@@ -129,68 +92,110 @@ def load_all_simulations():
 # STREAMLIT APP
 # =============================================
 def main():
-    st.set_page_config(page_title="FEA Laser Simulation Viewer", layout="wide")
-    st.title("🔍 FEA Laser Simulation Viewer (.vtu)")
-    st.caption(f"Scanning: `{FEA_SOLUTIONS_DIR}`")
+    st.set_page_config(page_title="FEA Viewer (Cloud-Safe)", layout="wide")
+    st.title("🔍 FEA Laser Simulation Viewer")
+    st.caption("✅ Plotly + Matplotlib | ❌ No PyVista rendering")
 
-    with st.spinner("Loading FEA simulations..."):
-        all_sims = load_all_simulations()
+    simulations = load_all_simulations()
+    if not simulations:
+        st.error("No valid simulations found.")
+        return
 
-    if not all_sims:
-        st.warning("No valid simulations found.")
-        st.stop()
-
+    # -----------------------------------------
+    # SIDEBAR
+    # -----------------------------------------
     st.sidebar.header("⚙️ Simulation")
-    sim_name = st.sidebar.selectbox("Select simulation", sorted(all_sims))
-    sim = all_sims[sim_name]
+    sim_name = st.sidebar.selectbox("Select simulation", sorted(simulations))
+    sim = simulations[sim_name]
 
     st.sidebar.write(f"**Energy:** {sim['energy_mJ']} mJ")
-    st.sidebar.write(f"**Pulse:** {sim['duration_ns']} ns")
+    st.sidebar.write(f"**Pulse Duration:** {sim['duration_ns']} ns")
 
-    # Field selection
+    # -----------------------------------------
+    # FIELD & TIME
+    # -----------------------------------------
     field = st.selectbox("Select field", list(sim["fields"].keys()))
-    kind, ncomp = sim["field_info"][field]
-
-    timestep = st.slider("Timestep (ns)", 0, sim["n_timesteps"] - 1, 0)
-
-    # Extract scalar for visualization
-    if kind == "scalar":
-        values = sim["fields"][field][timestep]
-    else:
-        values = np.linalg.norm(sim["fields"][field][timestep], axis=1)
-
-    points = sim["points"]
-    mesh = pv.PolyData(points)
-    mesh.point_data[field] = values
-
-    st.subheader(f"{field} at {timestep + 1} ns – {sim_name}")
-
-    plotter = pv.Plotter(off_screen=True)
-    plotter.add_mesh(
-        mesh,
-        scalars=field,
-        cmap="viridis",
-        nan_color="gray",
-        show_edges=False,
+    timestep = st.slider(
+        "Timestep (ns)",
+        0,
+        sim["n_timesteps"] - 1,
+        0,
     )
-    plotter.camera_position = "iso"
-    plotter.add_scalar_bar(title=f"{field} ({'magnitude' if kind!='scalar' else 'scalar'})")
 
-    st.pyvista(plotter)
+    pts = sim["points"]
+    kind, _ = sim["field_info"][field]
+    raw = sim["fields"][field][timestep]
 
+    if kind == "scalar":
+        values = raw
+        label = field
+    else:
+        values = np.linalg.norm(raw, axis=1)
+        label = f"{field} (magnitude)"
+
+    # -----------------------------------------
+    # PLOTLY 3D (PRIMARY)
+    # -----------------------------------------
+    st.subheader(f"{label} at {timestep + 1} ns – {sim_name}")
+
+    fig = go.Figure(
+        data=go.Scatter3d(
+            x=pts[:, 0],
+            y=pts[:, 1],
+            z=pts[:, 2],
+            mode="markers",
+            marker=dict(
+                size=3,
+                color=values,
+                colorscale="Viridis",
+                colorbar=dict(title=label),
+                opacity=0.85,
+            ),
+        )
+    )
+
+    fig.update_layout(
+        height=700,
+        scene=dict(aspectmode="data"),
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # -----------------------------------------
+    # MATPLOTLIB FALLBACK / EXPORT VIEW
+    # -----------------------------------------
+    with st.expander("🖼️ 2D Projection (Matplotlib)"):
+        fig2, ax = plt.subplots(figsize=(6, 5))
+        sc = ax.scatter(
+            pts[:, 0],
+            pts[:, 1],
+            c=values,
+            s=5,
+            cmap="viridis",
+        )
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_title(label)
+        plt.colorbar(sc, ax=ax)
+        st.pyplot(fig2)
+
+    # -----------------------------------------
+    # STATISTICS
+    # -----------------------------------------
     with st.expander("📊 Field Statistics"):
         clean = values[~np.isnan(values)]
-        if clean.size:
-            st.write(
-                dict(
-                    Min=float(clean.min()),
-                    Max=float(clean.max()),
-                    Mean=float(clean.mean()),
-                    Std=float(clean.std()),
-                )
-            )
-        else:
-            st.write("All values are NaN.")
+        st.write(
+            {
+                "Min": float(clean.min()),
+                "Max": float(clean.max()),
+                "Mean": float(clean.mean()),
+                "Std": float(clean.std()),
+            }
+        )
 
+# =============================================
+# ENTRY POINT
+# =============================================
 if __name__ == "__main__":
     main()
