@@ -6,48 +6,38 @@ import numpy as np
 import pyvista as pv
 from pathlib import Path
 
+# =====================================================
+# PYVISTA SAFE MODE (CRITICAL FOR STREAMLIT CLOUD)
+# =====================================================
+pv.OFF_SCREEN = True
+
 # =============================================
-# PATH CONFIGURATION (same style as reference)
+# PATH CONFIGURATION
 # =============================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FEA_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "fea_solutions")
-
-# Create directory if it doesn't exist
-if not os.path.exists(FEA_SOLUTIONS_DIR):
-    os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
-    st.info(f"📁 Created fea_solutions directory at: {FEA_SOLUTIONS_DIR}")
+os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 
 # =============================================
 # PATTERN UTILS
 # =============================================
 def parse_folder_name(folder: str):
-    """
-    Parse 'q0p5mJ-delta4p2ns' → energy=0.5 (mJ), duration=4.2 (ns)
-    Handles 'p' as decimal separator.
-    """
     match = re.match(r"q([\d\.p]+)mJ-delta([\d\.p]+)ns", folder)
     if not match:
         return None, None
     e_str, d_str = match.groups()
     try:
-        energy = float(e_str.replace('p', '.'))
-        duration = float(d_str.replace('p', '.'))
-        return energy, duration
+        return float(e_str.replace("p", ".")), float(d_str.replace("p", "."))
     except ValueError:
         return None, None
 
 # =============================================
-# LOAD ALL FEA SIMULATIONS
+# LOAD ALL FEA SIMULATIONS (FIXED)
 # =============================================
 @st.cache_data
 def load_all_simulations():
-    """
-    Returns a dictionary of simulation data with fields as NumPy arrays.
-    Each simulation key: folder name like 'q0p5mJ-delta4p2ns'
-    """
     simulations = {}
-    pattern = os.path.join(FEA_SOLUTIONS_DIR, "q*mJ-delta*ns")
-    folders = glob.glob(pattern)
+    folders = glob.glob(os.path.join(FEA_SOLUTIONS_DIR, "q*mJ-delta*ns"))
 
     for folder_path in folders:
         folder_name = os.path.basename(folder_path)
@@ -55,7 +45,6 @@ def load_all_simulations():
         if energy is None:
             continue
 
-        # Get all .vtu files: a_t0001.vtu ... a_t0008.vtu
         vtu_files = sorted(glob.glob(os.path.join(folder_path, "a_t????.vtu")))
         if not vtu_files:
             continue
@@ -63,61 +52,75 @@ def load_all_simulations():
         try:
             first_mesh = pv.read(vtu_files[0])
         except Exception as e:
-            st.warning(f"⚠️ Skipping {folder_name}: failed to read first VTU file – {e}")
+            st.warning(f"⚠️ Skipping {folder_name}: {e}")
             continue
 
-        # Determine data location: point vs cell
-        point_keys = list(first_mesh.point_data.keys())
-        cell_keys = list(first_mesh.cell_data.keys())
+        # Prefer point data
+        data_container_name = "point"
+        data_keys = list(first_mesh.point_data.keys())
+        n_entities = first_mesh.n_points
 
-        if not point_keys and not cell_keys:
-            st.warning(f"⚠️ Skipping {folder_name}: no scalar data found in VTU files.")
+        if not data_keys:
+            data_container_name = "cell"
+            data_keys = list(first_mesh.cell_data.keys())
+            n_entities = first_mesh.n_cells
+
+        if not data_keys:
             continue
 
-        use_point_data = len(point_keys) >= len(cell_keys)
-        data_keys = point_keys if use_point_data else cell_keys
         n_timesteps = len(vtu_files)
-        n_entities = first_mesh.n_points if use_point_data else first_mesh.n_cells
 
-        # Initialize field arrays
-        fields = {key: np.empty((n_timesteps, n_entities), dtype=np.float32) for key in data_keys}
+        # Inspect field dimensionality
+        field_info = {}
+        for key in data_keys:
+            arr = np.asarray(
+                first_mesh.point_data[key]
+                if data_container_name == "point"
+                else first_mesh.cell_data[key]
+            )
+            if arr.ndim == 1:
+                field_info[key] = ("scalar", 1)
+            else:
+                field_info[key] = ("vector", arr.shape[1])
 
-        # Load each timestep
+        # Allocate storage
+        fields = {}
+        for key, (kind, ncomp) in field_info.items():
+            if kind == "scalar":
+                fields[key] = np.full((n_timesteps, n_entities), np.nan, dtype=np.float32)
+            else:
+                fields[key] = np.full(
+                    (n_timesteps, n_entities, ncomp), np.nan, dtype=np.float32
+                )
+
+        # Load timesteps
         for t_idx, vtu in enumerate(vtu_files):
             try:
                 mesh = pv.read(vtu)
-                data_container = mesh.point_data if use_point_data else mesh.cell_data
+                container = mesh.point_data if data_container_name == "point" else mesh.cell_data
 
-                for key in data_keys:
-                    if key not in data_container:
-                        st.warning(f"⚠️ Field '{key}' missing in {vtu}. Filling with NaN.")
-                        fields[key][t_idx, :] = np.nan
+                for key, (kind, _) in field_info.items():
+                    if key not in container:
                         continue
+                    arr = np.asarray(container[key], dtype=np.float32)
 
-                    raw_data = np.asarray(data_container[key], dtype=np.float32)
-                    if raw_data.ndim > 1:
-                        raw_data = raw_data.flatten()  # e.g., vector → scalar magnitude?
-                    if raw_data.size != n_entities:
-                        st.warning(f"⚠️ Size mismatch for '{key}' in {vtu}. Expected {n_entities}, got {raw_data.size}. Truncating/padding.")
-                        raw_data = raw_data[:n_entities] if raw_data.size >= n_entities else np.pad(raw_data, (0, n_entities - raw_data.size), constant_values=np.nan)
-                    fields[key][t_idx, :] = raw_data
+                    if kind == "scalar":
+                        fields[key][t_idx, :] = arr
+                    else:
+                        fields[key][t_idx, :, :] = arr
 
             except Exception as e:
                 st.error(f"❌ Error reading {vtu}: {e}")
-                for key in data_keys:
-                    fields[key][t_idx, :] = np.nan
 
-        # Store
         simulations[folder_name] = {
             "energy_mJ": energy,
             "duration_ns": duration,
-            "timesteps_ns": np.arange(1, n_timesteps + 1),  # 1ns, 2ns, ..., 8ns
+            "timesteps_ns": np.arange(1, n_timesteps + 1),
             "fields": fields,
-            "points": first_mesh.points if use_point_data else None,
-            "cell_data": not use_point_data,
+            "field_info": field_info,
+            "points": first_mesh.points if data_container_name == "point" else None,
             "n_timesteps": n_timesteps,
             "n_entities": n_entities,
-            "use_point_data": use_point_data
         }
 
     return simulations
@@ -134,87 +137,60 @@ def main():
         all_sims = load_all_simulations()
 
     if not all_sims:
-        st.warning(
-            f"No valid simulations found in `{FEA_SOLUTIONS_DIR}`.\n"
-            "Expected subfolders like `q0p5mJ-delta4p2ns` containing `a_t0001.vtu`, ..., `a_t0008.vtu`."
-        )
+        st.warning("No valid simulations found.")
         st.stop()
 
-    # Sidebar selection
     st.sidebar.header("⚙️ Simulation")
-    sim_names = sorted(all_sims.keys())
-    selected_sim = st.sidebar.selectbox("Select simulation", sim_names)
-    sim_data = all_sims[selected_sim]
+    sim_name = st.sidebar.selectbox("Select simulation", sorted(all_sims))
+    sim = all_sims[sim_name]
 
-    st.sidebar.write(f"**Energy**: {sim_data['energy_mJ']} mJ")
-    st.sidebar.write(f"**Pulse Duration**: {sim_data['duration_ns']} ns")
-    st.sidebar.write(f"**Timesteps**: {sim_data['n_timesteps']} (1 ns each)")
+    st.sidebar.write(f"**Energy:** {sim['energy_mJ']} mJ")
+    st.sidebar.write(f"**Pulse:** {sim['duration_ns']} ns")
 
     # Field selection
-    field_names = list(sim_data["fields"].keys())
-    if not field_names:
-        st.error("No scalar fields available in selected simulation.")
-        st.stop()
-    selected_field = st.selectbox("Select field to visualize", field_names)
+    field = st.selectbox("Select field", list(sim["fields"].keys()))
+    kind, ncomp = sim["field_info"][field]
 
-    # Timestep slider
-    timestep = st.slider(
-        "Timestep (ns)",
-        0,
-        sim_data["n_timesteps"] - 1,
-        0,
-        format="%dns"
-    )
+    timestep = st.slider("Timestep (ns)", 0, sim["n_timesteps"] - 1, 0)
 
-    # Get data
-    field_values = sim_data["fields"][selected_field][timestep]  # (N,)
-    points = sim_data.get("points")
-
-    # Reconstruct mesh for rendering
-    if points is not None and len(points) == len(field_values):
-        mesh = pv.PolyData(points)
-        mesh.point_data[selected_field] = field_values
+    # Extract scalar for visualization
+    if kind == "scalar":
+        values = sim["fields"][field][timestep]
     else:
-        # Fallback: use points from first mesh or dummy
-        N = len(field_values)
-        if points is not None and len(points) != N:
-            st.warning("Point count mismatch – using dummy point cloud.")
-        dummy_points = np.random.rand(N, 3) if N > 0 else np.zeros((1, 3))
-        mesh = pv.PolyData(dummy_points)
-        mesh.point_data[selected_field] = field_values if N > 0 else np.array([0.0])
+        values = np.linalg.norm(sim["fields"][field][timestep], axis=1)
 
-    # Visualization
-    st.subheader(f"{selected_field} at {timestep + 1} ns – {selected_sim}")
+    points = sim["points"]
+    mesh = pv.PolyData(points)
+    mesh.point_data[field] = values
 
-    plotter = pv.Plotter()
+    st.subheader(f"{field} at {timestep + 1} ns – {sim_name}")
+
+    plotter = pv.Plotter(off_screen=True)
     plotter.add_mesh(
         mesh,
-        scalars=selected_field,
+        scalars=field,
         cmap="viridis",
         nan_color="gray",
         show_edges=False,
-        clim=[np.nanmin(field_values), np.nanmax(field_values)]
     )
-    plotter.add_scalar_bar(title=selected_field, vertical=True)
-    plotter.camera_position = 'iso'
+    plotter.camera_position = "iso"
+    plotter.add_scalar_bar(title=f"{field} ({'magnitude' if kind!='scalar' else 'scalar'})")
 
-    try:
-        st.pyvista(plotter.show(auto_close=False))
-    except Exception:
-        st.warning("3D rendering failed – ensure PyVista is supported in your environment.")
+    st.pyvista(plotter)
 
-    # Statistics
     with st.expander("📊 Field Statistics"):
-        clean_vals = field_values[~np.isnan(field_values)]
-        if len(clean_vals) > 0:
-            st.write({
-                "Min": float(np.min(clean_vals)),
-                "Max": float(np.max(clean_vals)),
-                "Mean": float(np.mean(clean_vals)),
-                "Std": float(np.std(clean_vals))
-            })
+        clean = values[~np.isnan(values)]
+        if clean.size:
+            st.write(
+                dict(
+                    Min=float(clean.min()),
+                    Max=float(clean.max()),
+                    Mean=float(clean.mean()),
+                    Std=float(clean.std()),
+                )
+            )
         else:
-            st.write("⚠️ All values are NaN.")
+            st.write("All values are NaN.")
 
 if __name__ == "__main__":
     main()
