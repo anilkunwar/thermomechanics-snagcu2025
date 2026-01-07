@@ -20,3 +20,4 @@ pandas
 xgboost
 s3fs
 cmasher
+stpyvista
