@@ -32,3 +32,6 @@
    Interpolating (Extrapolating) the solutions
 
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator1-streamlit-red)](https://thermomechanical-solutions-interpolator1.streamlit.app/)
+
+    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator2-streamlit-red)](https://thermomechanical-solutions-interpolator2.streamlit.app/)
+
