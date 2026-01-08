@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import os
 import glob
@@ -1054,4 +1053,4 @@ def render_comparative_analysis():
     st.plotly_chart(fig_space, use_container_width=True)
 if __name__ == "__main__":
     main()
-```
+
