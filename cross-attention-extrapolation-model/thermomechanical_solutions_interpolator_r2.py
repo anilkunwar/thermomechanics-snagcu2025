@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import os
 import glob
@@ -457,4 +456,4 @@ This tool combines visualization and extrapolation of laser-material simulations
 
 if __name__ == "__main__":
     main()
-```
+
