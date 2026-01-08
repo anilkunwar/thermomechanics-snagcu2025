@@ -17,18 +17,21 @@ from sklearn.preprocessing import StandardScaler
 import plotly.express as px
 from plotly.subplots import make_subplots
 import networkx as nx
+from streamlit.runtime.scripter_runtime.script_runner import get_script_run_ctx
 warnings.filterwarnings('ignore')
+
 # =============================================
 # PATH CONFIGURATION
 # =============================================
-SCRIPT_DIR = os.getcwd()
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FEA_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "fea_solutions")
 os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
+
 # =============================================
 # UNIFIED DATA LOADER WITH ENHANCED CAPABILITIES
 # =============================================
 class UnifiedFEADataLoader:
-    """Enhanced data loader combining both meshio and PyVista capabilities"""
+    """Enhanced data loader with robust error handling and progress tracking"""
    
     def __init__(self):
         self.simulations = {}
@@ -36,7 +39,7 @@ class UnifiedFEADataLoader:
         self.field_statistics = {}
        
     def parse_folder_name(self, folder: str):
-        """q0p5mJ-delta4p2ns → (0.5, 4.2)"""
+        """Parse folder name to extract energy and duration"""
         match = re.match(r"q([\dp\.]+)mJ-delta([\dp\.]+)ns", folder)
         if not match:
             return None, None
@@ -51,19 +54,34 @@ class UnifiedFEADataLoader:
        
         folders = glob.glob(os.path.join(FEA_SOLUTIONS_DIR, "q*mJ-delta*ns"))
        
-        for folder in folders:
+        if not folders:
+            st.warning(f"No simulation folders found in {FEA_SOLUTIONS_DIR}")
+            st.info("Expected folder pattern: q{energy}mJ-delta{duration}ns")
+            return simulations, summaries
+       
+        progress_bar = st.progress(0)
+        total_folders = len(folders)
+       
+        for folder_idx, folder in enumerate(folders):
             name = os.path.basename(folder)
             energy, duration = _self.parse_folder_name(name)
             if energy is None:
+                st.warning(f"Invalid folder name: {name}")
                 continue
                
             vtu_files = sorted(glob.glob(os.path.join(folder, "a_t????.vtu")))
             if not vtu_files:
+                st.warning(f"No VTU files found in {name}")
                 continue
            
             # Load first file to get structure
             try:
                 mesh0 = meshio.read(vtu_files[0])
+               
+                # Check if mesh has point data
+                if not mesh0.point_data:
+                    st.warning(f"No point data found in {vtu_files[0]}")
+                    continue
                
                 # Create simulation entry
                 sim_data = {
@@ -99,11 +117,17 @@ class UnifiedFEADataLoader:
                             fields[key] = np.full((len(vtu_files), n_pts, arr.shape[1]), np.nan, dtype=np.float32)
                         fields[key][0] = arr
                    
-                    # Load all timesteps
+                    # Load all timesteps with progress
+                    timestep_progress = st.progress(0)
                     for t in range(1, len(vtu_files)):
-                        mesh = meshio.read(vtu_files[t])
-                        for key in sim_data['field_info'].keys():
-                            fields[key][t] = mesh.point_data[key].astype(np.float32)
+                        try:
+                            mesh = meshio.read(vtu_files[t])
+                            for key in sim_data['field_info'].keys():
+                                if key in mesh.point_data:
+                                    fields[key][t] = mesh.point_data[key].astype(np.float32)
+                        except Exception as e:
+                            st.warning(f"Error loading timestep {t} in {name}: {e}")
+                        timestep_progress.progress((t + 1) / len(vtu_files))
                    
                     sim_data.update({
                         'points': points,
@@ -111,8 +135,8 @@ class UnifiedFEADataLoader:
                         'triangles': triangles
                     })
                
-                # Create summary statistics (for interpolation/extrapolation)
-                summary = _self.extract_summary_statistics(vtu_files, energy, duration)
+                # Create summary statistics
+                summary = _self.extract_summary_statistics(vtu_files, energy, duration, name)
                 summaries.append(summary)
                
                 simulations[name] = sim_data
@@ -120,12 +144,15 @@ class UnifiedFEADataLoader:
             except Exception as e:
                 st.warning(f"Error loading {name}: {str(e)}")
                 continue
+           
+            progress_bar.progress((folder_idx + 1) / total_folders)
        
         return simulations, summaries
    
-    def extract_summary_statistics(self, vtu_files, energy, duration):
+    def extract_summary_statistics(self, vtu_files, energy, duration, name):
         """Extract summary statistics from VTU files"""
         summary = {
+            'name': name,
             'energy': energy,
             'duration': duration,
             'timesteps': [],
@@ -133,34 +160,44 @@ class UnifiedFEADataLoader:
         }
        
         for idx, vtu_file in enumerate(vtu_files):
-            mesh = meshio.read(vtu_file)
-            timestep = idx + 1 # 1-based indexing
-            summary['timesteps'].append(timestep)
-           
-            for field_name in mesh.point_data.keys():
-                data = mesh.point_data[field_name]
+            try:
+                mesh = meshio.read(vtu_file)
+                timestep = idx + 1
+                summary['timesteps'].append(timestep)
                
-                if field_name not in summary['field_stats']:
-                    summary['field_stats'][field_name] = {
-                        'min': [], 'max': [], 'mean': [], 'std': [],
-                        'q25': [], 'q50': [], 'q75': []
-                    }
-               
-                if data.ndim == 1:
-                    values = data
-                else:
-                    # For vector fields, take magnitude
-                    values = np.linalg.norm(data, axis=1)
-               
-                # Compute all stats uniformly
-                stats = summary['field_stats'][field_name]
-                stats['min'].append(np.nanmin(values))
-                stats['max'].append(np.nanmax(values))
-                stats['mean'].append(np.nanmean(values))
-                stats['std'].append(np.nanstd(values))
-                stats['q25'].append(np.nanpercentile(values, 25))
-                stats['q50'].append(np.nanpercentile(values, 50))
-                stats['q75'].append(np.nanpercentile(values, 75))
+                for field_name in mesh.point_data.keys():
+                    data = mesh.point_data[field_name]
+                   
+                    if field_name not in summary['field_stats']:
+                        summary['field_stats'][field_name] = {
+                            'min': [], 'max': [], 'mean': [], 'std': [],
+                            'q25': [], 'q50': [], 'q75': []
+                        }
+                   
+                    if data.ndim == 1:
+                        values = data
+                    else:
+                        values = np.linalg.norm(data, axis=1)
+                   
+                    clean_values = values[~np.isnan(values)]
+                    if len(clean_values) > 0:
+                        stats = summary['field_stats'][field_name]
+                        stats['min'].append(np.min(clean_values))
+                        stats['max'].append(np.max(clean_values))
+                        stats['mean'].append(np.mean(clean_values))
+                        stats['std'].append(np.std(clean_values))
+                        stats['q25'].append(np.percentile(clean_values, 25))
+                        stats['q50'].append(np.percentile(clean_values, 50))
+                        stats['q75'].append(np.percentile(clean_values, 75))
+                    else:
+                        stats = summary['field_stats'][field_name]
+                        for key in stats:
+                            stats[key].append(np.nan)
+            except Exception as e:
+                st.warning(f"Error processing {vtu_file}: {e}")
+                for field_name in summary['field_stats']:
+                    for key in summary['field_stats'][field_name]:
+                        summary['field_stats'][field_name][key].append(np.nan)
        
         return summary
 # =============================================
@@ -182,7 +219,8 @@ class PhysicsInformedAttentionExtrapolator:
         self.source_db = summaries
        
         # Extract all field names
-        self.field_names = sorted(set().union(*(set(s['field_stats'].keys()) for s in summaries)))
+        self.field_names = list(set.union(*(set(s['field_stats'].keys()) for s in summaries)))
+        self.field_names.sort()
        
         # Prepare data for scaling
         all_embeddings = []
@@ -228,16 +266,11 @@ class PhysicsInformedAttentionExtrapolator:
         query_norm = self.scaler.transform([query_embedding])[0]
         source_norm = self.scaler.transform(source_embeddings)
        
-        # Compute base distances for locality
-        dists = np.sqrt(np.sum((query_norm - source_norm)**2, axis=1))
-        min_dist, max_dist = np.min(dists), np.max(dists)
-        normalized_dists = (dists - min_dist) / (max_dist - min_dist + 1e-10) if max_dist > min_dist else np.zeros_like(dists)
-       
         # Multi-head attention
         for head in range(self.n_heads):
             # Different projection for each head
             np.random.seed(head) # For reproducibility
-            proj_matrix = np.random.randn(len(query_embedding), len(query_embedding) // self.n_heads + 1)
+            proj_matrix = np.random.randn(len(query_embedding), 3)
            
             query_proj = query_norm @ proj_matrix
             source_proj = source_norm @ proj_matrix
@@ -246,10 +279,11 @@ class PhysicsInformedAttentionExtrapolator:
             scores = np.exp(-np.sum((query_proj - source_proj) ** 2, axis=1) /
                           (2 * self.sigma_param ** 2))
            
-            # Apply spatial locality regulation based on embedding distance
+            # Apply spatial locality regulation
             if self.spatial_weight > 0:
-                locality_scores = np.exp(-normalized_dists / self.sigma_param)
-                scores = (1 - self.spatial_weight) * scores + self.spatial_weight * locality_scores
+                # Add spatial correlation (simplified - in practice would use actual coordinates)
+                spatial_corr = 1.0 / (1.0 + np.arange(n_sources) / n_sources)
+                scores = (1 - self.spatial_weight) * scores + self.spatial_weight * spatial_corr
            
             weights += scores / self.n_heads
        
@@ -282,7 +316,7 @@ class PhysicsInformedAttentionExtrapolator:
                                                        summary['duration'], t)
                 all_embeddings.append(src_embedding)
                
-                # Collect all stats for all fields
+                # Collect field statistics values
                 field_vals = []
                 for field in self.field_names:
                     stats = summary['field_stats'].get(field, {})
@@ -362,7 +396,7 @@ class AdvancedVisualizer:
     """Comprehensive visualization components"""
    
     @staticmethod
-    def create_sunburst_chart(summaries, selected_field):
+    def create_sunburst_chart(summaries, selected_field='temperature'):
         """Create sunburst chart showing hierarchy of simulations"""
         labels = []
         parents = []
@@ -388,7 +422,7 @@ class AdvancedVisualizer:
            
             # Field statistics
             if selected_field in summary['field_stats']:
-                avg_max = np.mean(summary['field_stats'][selected_field]['max'])
+                avg_max = np.nanmean(summary['field_stats'][selected_field]['max'])
                 field_label = f"{selected_field}: {avg_max:.1f}"
                 labels.append(field_label)
                 parents.append(duration_label)
@@ -414,8 +448,9 @@ class AdvancedVisualizer:
         return fig
    
     @staticmethod
-    def create_radar_chart(summaries, simulation_names, fields):
+    def create_radar_chart(summaries, simulation_names):
         """Create radar chart comparing multiple simulations"""
+        fields = ['temperature', 'displacement', 'principal stress']
         stats = ['mean', 'max', 'std']
        
         fig = go.Figure()
@@ -433,7 +468,7 @@ class AdvancedVisualizer:
             for field in fields:
                 if field in summary['field_stats']:
                     for stat in stats:
-                        avg_value = np.mean(summary['field_stats'][field][stat])
+                        avg_value = np.nanmean(summary['field_stats'][field][stat])
                         r_values.append(avg_value)
                         theta_values.append(f"{field}<br>{stat}")
            
@@ -587,21 +622,18 @@ def main():
        
         if st.button("🔄 Load All Simulations"):
             with st.spinner("Loading simulation data..."):
-                try:
-                    simulations, summaries = st.session_state.data_loader.load_all_simulations(
-                        load_full_mesh=load_full_data
-                    )
-                    st.session_state.simulations = simulations
-                    st.session_state.summaries = summaries
-                    st.session_state.extrapolator.load_summaries(summaries)
-                    st.session_state.data_loaded = True
-                    st.success(f"✅ Loaded {len(simulations)} simulations")
-                except Exception as e:
-                    st.error(f"Loading failed: {str(e)}")
+                simulations, summaries = st.session_state.data_loader.load_all_simulations(
+                    load_full_mesh=load_full_data
+                )
+                st.session_state.simulations = simulations
+                st.session_state.summaries = summaries
+                st.session_state.extrapolator.load_summaries(summaries)
+                st.session_state.data_loaded = True
+                st.success(f"✅ Loaded {len(simulations)} simulations")
        
         if st.session_state.data_loaded:
             st.info(f"**Loaded:** {len(st.session_state.simulations)} simulations")
-            fields = list(set().union(*(set(s['field_info'].keys()) for s in st.session_state.simulations.values())))
+            fields = list(set.union(*(set(s['field_info'].keys()) for s in st.session_state.simulations.values())))
             st.info(f"**Fields:** {', '.join(fields)}")
    
     # Main content based on selected mode
@@ -611,446 +643,5 @@ def main():
         render_interpolation_extrapolation()
     elif app_mode == "Comparative Analysis":
         render_comparative_analysis()
-def render_data_viewer():
-    """Render the data visualization interface"""
-    st.markdown('<h2 class="sub-header">📁 FEA Data Viewer</h2>', unsafe_allow_html=True)
-   
-    if not st.session_state.data_loaded:
-        st.warning("Please load simulations first using the sidebar button.")
-        return
-   
-    simulations = st.session_state.simulations
-   
-    # Simulation selection
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        sim_name = st.selectbox(
-            "Select Simulation",
-            sorted(simulations.keys()),
-            key="viewer_sim_select"
-        )
-   
-    sim = simulations[sim_name]
-   
-    with col2:
-        st.metric("Energy (mJ)", f"{sim['energy_mJ']:.2f}")
-        st.metric("Duration (ns)", f"{sim['duration_ns']:.2f}")
-   
-    # Field and timestep selection
-    col1, col2 = st.columns(2)
-    with col1:
-        field = st.selectbox(
-            "Select Field",
-            list(sim['field_info'].keys()),
-            key="viewer_field_select"
-        )
-    with col2:
-        timestep = st.slider(
-            "Timestep",
-            0, sim['n_timesteps'] - 1, 0,
-            key="viewer_timestep_slider"
-        )
-   
-    # Main 3D visualization
-    if 'points' in sim:
-        pts = sim['points']
-        kind, _ = sim['field_info'][field]
-        raw = sim['fields'][field][timestep]
-       
-        if kind == "scalar":
-            values = raw
-            label = field
-        else:
-            values = np.linalg.norm(raw, axis=1)
-            label = f"{field} (magnitude)"
-       
-        # Create 3D plot
-        if sim.get('triangles') is not None:
-            tri = sim['triangles']
-            mesh_data = go.Mesh3d(
-                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
-                i=tri[:, 0], j=tri[:, 1], k=tri[:, 2],
-                intensity=values,
-                colorscale="Viridis",
-                intensitymode='vertex',
-                colorbar=dict(title=label),
-                opacity=0.85,
-                hovertemplate='Value: %{intensity:.2f}<br>X: %{x:.3f}<br>Y: %{y:.3f}<br>Z: %{z:.3f}'
-            )
-        else:
-            mesh_data = go.Scatter3d(
-                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
-                mode='markers',
-                marker=dict(
-                    size=3,
-                    color=values,
-                    colorscale="Viridis",
-                    opacity=0.8,
-                    colorbar=dict(title=label)
-                ),
-                hovertemplate='Value: %{marker.color:.2f}<br>X: %{x:.3f}<br>Y: %{y:.3f}<br>Z: %{z:.3f}'
-            )
-       
-        fig = go.Figure(data=mesh_data)
-        fig.update_layout(
-            title=f"{label} at Timestep {timestep} - {sim_name}",
-            scene=dict(
-                aspectmode="data",
-                camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
-            ),
-            height=600
-        )
-       
-        st.plotly_chart(fig, use_container_width=True)
-   
-    # Field statistics over time
-    st.markdown('<h3 class="sub-header">📈 Field Evolution Over Time</h3>',
-                unsafe_allow_html=True)
-   
-    # Find corresponding summary
-    summary = next((s for s in st.session_state.summaries if
-                   f"q{s['energy']}mJ-delta{s['duration']}ns" == sim_name), None)
-   
-    if summary and field in summary['field_stats']:
-        stats = summary['field_stats'][field]
-       
-        fig_time = go.Figure()
-        fig_time.add_trace(go.Scatter(
-            x=summary['timesteps'],
-            y=stats['mean'],
-            mode='lines+markers',
-            name='Mean',
-            line=dict(color='blue', width=2)
-        ))
-        fig_time.add_trace(go.Scatter(
-            x=summary['timesteps'],
-            y=stats['max'],
-            mode='lines+markers',
-            name='Max',
-            line=dict(color='red', width=2)
-        ))
-       
-        fig_time.update_layout(
-            title=f"{field} Statistics Over Time",
-            xaxis_title="Timestep (ns)",
-            yaxis_title="Field Value",
-            hovermode="x unified",
-            height=400
-        )
-       
-        st.plotly_chart(fig_time, use_container_width=True)
-def render_interpolation_extrapolation():
-    """Render the interpolation/extrapolation interface"""
-    st.markdown('<h2 class="sub-header">🔮 Interpolation/Extrapolation Engine</h2>',
-                unsafe_allow_html=True)
-   
-    if not st.session_state.data_loaded:
-        st.warning("Please load simulations first using the sidebar button.")
-        return
-   
-    st.markdown("""
-    <div class="info-box">
-    <strong>Physics-Informed Attention Mechanism:</strong> This engine uses a transformer-inspired
-    attention mechanism with spatial locality regulation to interpolate and extrapolate
-    simulation results. The model learns from existing FEA simulations and can predict
-    outcomes for new parameter combinations.
-    </div>
-    """, unsafe_allow_html=True)
-   
-    # Query parameters
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        energy_query = st.number_input(
-            "Energy (mJ)",
-            min_value=0.1,
-            max_value=50.0,
-            value=5.0,
-            step=0.5,
-            key="interp_energy"
-        )
-    with col2:
-        duration_query = st.number_input(
-            "Pulse Duration (ns)",
-            min_value=0.5,
-            max_value=20.0,
-            value=4.0,
-            step=0.5,
-            key="interp_duration"
-        )
-    with col3:
-        max_time = st.number_input(
-            "Max Prediction Time (ns)",
-            min_value=1,
-            max_value=50,
-            value=15,
-            step=1,
-            key="interp_maxtime"
-        )
-   
-    # Time points for prediction
-    time_points = np.arange(1, max_time + 1)
-   
-    # Model parameters
-    with st.expander("⚙️ Model Parameters"):
-        col1, col2 = st.columns(2)
-        with col1:
-            sigma_param = st.slider(
-                "Sigma Parameter",
-                min_value=0.1,
-                max_value=1.0,
-                value=0.3,
-                step=0.05,
-                key="interp_sigma"
-            )
-        with col2:
-            spatial_weight = st.slider(
-                "Spatial Locality Weight",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.5,
-                step=0.1,
-                key="interp_spatial"
-            )
-       
-        st.session_state.extrapolator.sigma_param = sigma_param
-        st.session_state.extrapolator.spatial_weight = spatial_weight
-   
-    if st.button("🚀 Run Prediction", type="primary"):
-        with st.spinner("Running physics-informed prediction..."):
-            # Get predictions
-            results = st.session_state.extrapolator.predict_time_series(
-                energy_query, duration_query, time_points
-            )
-           
-            if results and 'field_predictions' in results:
-                # Visualize predictions
-                st.markdown('<h3 class="sub-header">📊 Prediction Results</h3>',
-                           unsafe_allow_html=True)
-               
-                # Create subplots dynamically based on fields
-                n_fields = len(st.session_state.extrapolator.field_names)
-                rows = (n_fields + 1) // 2 + 1  # Extra row for confidence
-                fig_pred = make_subplots(
-                    rows=rows, cols=2,
-                    vertical_spacing=0.15,
-                    horizontal_spacing=0.1
-                )
-               
-                row = 1
-                col = 1
-                for field in st.session_state.extrapolator.field_names:
-                    fig_pred.add_trace(
-                        go.Scatter(
-                            x=time_points,
-                            y=results['field_predictions'][field]['max'],
-                            mode='lines+markers',
-                            name=f'{field} Max',
-                            line=dict(width=3)
-                        ),
-                        row=row, col=col
-                    )
-                    fig_pred.update_xaxes(title_text="Time (ns)", row=row, col=col)
-                    fig_pred.update_yaxes(title_text=field, row=row, col=col)
-                   
-                    col = 2 if col == 1 else 1
-                    if col == 1:
-                        row += 1
-               
-                # Confidence
-                fig_pred.add_trace(
-                    go.Scatter(
-                        x=time_points,
-                        y=results['confidences'],
-                        mode='lines+markers',
-                        name='Confidence',
-                        line=dict(color='orange', width=3)
-                    ),
-                    row=rows, col=1
-                )
-                fig_pred.update_xaxes(title_text="Time (ns)", row=rows, col=1)
-                fig_pred.update_yaxes(title_text="Confidence", row=rows, col=1)
-               
-                fig_pred.update_layout(height=300 * rows, showlegend=True)
-                st.plotly_chart(fig_pred, use_container_width=True)
-               
-                # Attention heatmap and graph
-                if results['attention_maps']:
-                    st.markdown('<h4 class="sub-header">🧠 Attention Analysis</h4>',
-                               unsafe_allow_html=True)
-                   
-                    col1, col2 = st.columns(2)
-                   
-                    with col1:
-                        # Heatmap for first timestep
-                        heatmap_fig = st.session_state.visualizer.create_attention_heatmap(
-                            results['attention_maps'][0],
-                            st.session_state.summaries
-                        )
-                        st.plotly_chart(heatmap_fig, use_container_width=True)
-                   
-                    with col2:
-                        # Graph for first timestep
-                        graph_fig = st.session_state.visualizer.create_attention_graph(
-                            results['attention_maps'][0],
-                            st.session_state.summaries
-                        )
-                        st.plotly_chart(graph_fig, use_container_width=True)
-               
-                # Display results table
-                st.markdown('<h4 class="sub-header">📋 Detailed Predictions</h4>',
-                           unsafe_allow_html=True)
-               
-                data_rows = []
-                for idx, t in enumerate(time_points):
-                    row = {'Time (ns)': t}
-                    for field in st.session_state.extrapolator.field_names:
-                        field_pred = results['field_predictions'][field]
-                        row[f'{field}_max'] = field_pred['max'][idx]
-                        row[f'{field}_mean'] = field_pred['mean'][idx]
-                        row[f'{field}_median'] = field_pred['q50'][idx]
-                    row['confidence'] = results['confidences'][idx]
-                    data_rows.append(row)
-               
-                df_results = pd.DataFrame(data_rows)
-                st.dataframe(df_results.style.format("{:.3f}"), use_container_width=True)
-               
-                # Export option
-                csv = df_results.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="📥 Download Predictions",
-                    data=csv,
-                    file_name=f"predictions_E{energy_query}_tau{duration_query}.csv",
-                    mime="text/csv"
-                )
-            else:
-                st.error("Prediction failed. Check input parameters.")
-def render_comparative_analysis():
-    """Render comparative analysis interface"""
-    st.markdown('<h2 class="sub-header">📊 Comparative Analysis</h2>',
-                unsafe_allow_html=True)
-   
-    if not st.session_state.data_loaded:
-        st.warning("Please load simulations first using the sidebar button.")
-        return
-   
-    simulations = st.session_state.simulations
-    summaries = st.session_state.summaries
-   
-    # Simulation selection for comparison
-    selected_sims = st.multiselect(
-        "Select simulations for comparison",
-        sorted(simulations.keys()),
-        default=list(simulations.keys())[:3] if simulations else []
-    )
-   
-    if not selected_sims:
-        st.info("Please select at least one simulation for comparison.")
-        return
-   
-    # Field selection
-    available_fields = set().union(*(set(simulations[sim_name]['field_info'].keys()) for sim_name in selected_sims))
-   
-    selected_field = st.selectbox(
-        "Select field for analysis",
-        sorted(available_fields)
-    )
-   
-    # Create comparison plots
-    col1, col2 = st.columns(2)
-   
-    with col1:
-        st.markdown('<h4>📈 Sunburst Chart</h4>', unsafe_allow_html=True)
-        sunburst_fig = st.session_state.visualizer.create_sunburst_chart(
-            [s for s in summaries if f"q{s['energy']}mJ-delta{s['duration']}ns" in selected_sims],
-            selected_field
-        )
-        st.plotly_chart(sunburst_fig, use_container_width=True)
-   
-    with col2:
-        st.markdown('<h4>🎯 Radar Chart Comparison</h4>', unsafe_allow_html=True)
-        radar_fig = st.session_state.visualizer.create_radar_chart(
-            summaries, selected_sims[:5],  # Limit to 5 for clarity
-            list(available_fields)
-        )
-        st.plotly_chart(radar_fig, use_container_width=True)
-   
-    # Detailed field comparison over time
-    st.markdown('<h4>⏱️ Field Evolution Comparison</h4>', unsafe_allow_html=True)
-   
-    fig_comparison = go.Figure()
-   
-    for sim_name in selected_sims:
-        # Find summary
-        summary = next((s for s in summaries if
-                       f"q{s['energy']}mJ-delta{s['duration']}ns" == sim_name), None)
-       
-        if summary and selected_field in summary['field_stats']:
-            stats = summary['field_stats'][selected_field]
-           
-            fig_comparison.add_trace(go.Scatter(
-                x=summary['timesteps'],
-                y=stats['mean'],
-                mode='lines+markers',
-                name=f"{sim_name} (mean)",
-                line=dict(width=2)
-            ))
-   
-    fig_comparison.update_layout(
-        title=f"{selected_field} Comparison",
-        xaxis_title="Timestep (ns)",
-        yaxis_title="Field Value",
-        hovermode="x unified",
-        height=500
-    )
-   
-    st.plotly_chart(fig_comparison, use_container_width=True)
-   
-    # Parameter space visualization
-    st.markdown('<h4>🌐 Parameter Space Analysis</h4>', unsafe_allow_html=True)
-   
-    # Extract parameters
-    energies = []
-    durations = []
-    max_values = []
-   
-    for summary in summaries:
-        if f"q{summary['energy']}mJ-delta{summary['duration']}ns" not in selected_sims:
-            continue
-        energies.append(summary['energy'])
-        durations.append(summary['duration'])
-       
-        if selected_field in summary['field_stats']:
-            max_values.append(np.max(summary['field_stats'][selected_field]['max']))
-        else:
-            max_values.append(0)
-   
-    fig_space = go.Figure(data=go.Scatter3d(
-        x=energies,
-        y=durations,
-        z=max_values,
-        mode='markers',
-        marker=dict(
-            size=10,
-            color=max_values,
-            colorscale='Viridis',
-            opacity=0.8,
-            colorbar=dict(title=f"Max {selected_field}")
-        ),
-        text=[f"E:{e}mJ, τ:{d}ns" for e, d in zip(energies, durations)],
-        hovertemplate='%{text}<br>Max Value: %{z:.1f}<extra></extra>'
-    ))
-   
-    fig_space.update_layout(
-        title=f"Parameter Space - Maximum {selected_field}",
-        scene=dict(
-            xaxis_title="Energy (mJ)",
-            yaxis_title="Duration (ns)",
-            zaxis_title=f"Max {selected_field}"
-        ),
-        height=600
-    )
-   
-    st.plotly_chart(fig_space, use_container_width=True)
 if __name__ == "__main__":
     main()
-
