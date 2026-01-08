@@ -33,5 +33,9 @@
 
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator1-streamlit-red)](https://thermomechanical-solutions-interpolator1.streamlit.app/)
 
-    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator2-streamlit-red)](https://thermomechanical-solutions-interpolator2.streamlit.app/)
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator2-streamlit-red)](https://thermomechanical-solutions-interpolator2.streamlit.app/)
+
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator3-streamlit-red)](https://thermomechanical-solutions-interpolator3.streamlit.app/) (attention weights)
+
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator4-streamlit-red)](https://thermomechanical-solutions-interpolator4.streamlit.app/) 
 
