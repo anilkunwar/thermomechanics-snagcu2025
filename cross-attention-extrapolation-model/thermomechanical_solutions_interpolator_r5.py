@@ -274,7 +274,11 @@ class EnhancedFEADataLoader:
                                  if count == len(simulations)}
             
             st.success(f"✅ Loaded {len(simulations)} simulations with {len(_self.available_fields)} unique fields")
-            st.info(f"📊 {len(_self.common_fields)} common fields across all simulations")
+            
+            if not _self.common_fields:
+                st.warning("⚠️ No common fields found across all simulations. This will limit field comparison capabilities.")
+            else:
+                st.info(f"📊 {len(_self.common_fields)} common fields across all simulations")
         else:
             st.error("❌ No simulations loaded successfully")
         
@@ -1470,7 +1474,7 @@ class FEAVisualizationPlatform:
                         st.metric("Z Range", f"{bbox['min'][2]:.3f} - {bbox['max'][2]:.3f}")
     
     def render_interpolation_extrapolation(self):
-        """Render interpolation/extrapolation interface"""
+        """Render interpolation/extrapolation interface with FIX for UnboundLocalError"""
         st.markdown('<h2 class="sub-header">🔮 Interpolation/Extrapolation Engine</h2>', 
                    unsafe_allow_html=True)
         
@@ -1515,7 +1519,9 @@ class FEAVisualizationPlatform:
                 key="interp_time"
             )
         
-        # Field selection
+        # Field selection - FIXED: Initialize selected_field before conditional block
+        selected_field = None  # Initialize to None
+        
         if st.session_state.data_loaded:
             available_fields = list(self.data_loader.common_fields)
             if available_fields:
@@ -1524,6 +1530,8 @@ class FEAVisualizationPlatform:
                     available_fields,
                     key="pred_field_select"
                 )
+            else:
+                st.warning("⚠️ No common fields found across simulations. Please load simulations with shared field names.")
         
         # Visualization options
         col1, col2 = st.columns(2)
@@ -1541,19 +1549,40 @@ class FEAVisualizationPlatform:
             )
         
         if st.button("🚀 Generate Prediction", type="primary", use_container_width=True):
+            # FIXED: Check if selected_field is None before proceeding
+            if selected_field is None:
+                st.error("❌ Unable to generate prediction: No field selected. Please ensure simulations have common fields.")
+                return
+            
             with st.spinner("Generating physics-informed prediction..."):
                 # This is where the actual prediction would happen
-                # For demonstration, we'll create a synthetic prediction
                 self.render_prediction_demo(energy_query, duration_query, time_query, 
                                           selected_field, reference_sim, viz_type)
     
     def render_prediction_demo(self, energy, duration, time, field, ref_sim, viz_type):
-        """Render demonstration of prediction capabilities"""
+        """Render demonstration of prediction capabilities with enhanced error handling"""
         if not st.session_state.data_loaded:
             return
         
         simulations = st.session_state.simulations
+        
+        if ref_sim not in simulations:
+            st.error(f"❌ Reference simulation '{ref_sim}' not found.")
+            return
+        
         mesh_data = simulations[ref_sim]['mesh_data']
+        
+        # Check if the selected field is available in the reference simulation
+        if field not in mesh_data.field_info:
+            st.warning(f"⚠️ Field '{field}' not available in reference simulation. Using first available field instead.")
+            # Use the first available field
+            available_fields = list(mesh_data.field_info.keys())
+            if available_fields:
+                field = available_fields[0]
+                st.info(f"Using field: {field}")
+            else:
+                st.error("❌ No fields available in reference simulation.")
+                return
         
         # Create synthetic prediction for demonstration
         n_points = len(mesh_data.points)
@@ -1593,7 +1622,7 @@ class FEAVisualizationPlatform:
         elif viz_type == "Cross-Section":
             col1, col2 = st.columns(2)
             with col1:
-                slice_axis = st.selectbox("Slice Axis", ["X", "Y", "Z"])
+                slice_axis = st.selectbox("Slice Axis", ["X", "Y", "Z"], key="pred_slice_axis")
             with col2:
                 if mesh_data.points is not None:
                     if slice_axis == 'X':
@@ -1607,7 +1636,8 @@ class FEAVisualizationPlatform:
                         f"{slice_axis} Position",
                         float(coord_range[0]),
                         float(coord_range[1]),
-                        float((coord_range[0] + coord_range[1]) / 2)
+                        float((coord_range[0] + coord_range[1]) / 2),
+                        key="pred_slice_pos"
                     )
             
             slice_fig = self.visualizer.create_cross_section_view(
@@ -1649,7 +1679,8 @@ class FEAVisualizationPlatform:
         with col3:
             st.metric("Std Dev", f"{np.std(predicted_values):.3f}")
         with col4:
-            confidence = 0.85 - 0.1 * abs(energy - 5.0) / 5.0  # Mock confidence
+            # Mock confidence calculation
+            confidence = max(0.1, 0.85 - 0.1 * abs(energy - 5.0) / 5.0)
             st.metric("Confidence", f"{confidence:.2%}")
     
     def render_comparative_analysis(self):
@@ -1855,9 +1886,10 @@ class FEAVisualizationPlatform:
             )
         
         with col2:
+            sim = simulations[sim_name]
             field = st.selectbox(
                 "Select Field",
-                sorted(simulations[sim_name]['field_info'].keys()),
+                sorted(sim['field_info'].keys()),
                 key="geom_field_select"
             )
         
@@ -1870,13 +1902,13 @@ class FEAVisualizationPlatform:
         
         # Visualization parameters
         if viz_mode == "Interactive 3D":
-            self.render_interactive_3d(simulations[sim_name], field)
+            self.render_interactive_3d(sim, field)
         elif viz_mode == "Cross-Section Analysis":
-            self.render_cross_section_analysis(simulations[sim_name], field)
+            self.render_cross_section_analysis(sim, field)
         elif viz_mode == "Time Animation":
-            self.render_time_animation(simulations[sim_name], field)
+            self.render_time_animation(sim, field)
         elif viz_mode == "Spatial Statistics":
-            self.render_spatial_statistics(simulations[sim_name], field)
+            self.render_spatial_statistics(sim, field)
     
     def render_interactive_3d(self, sim, field):
         """Render interactive 3D visualization"""
