@@ -21,3 +21,4 @@ xgboost
 s3fs
 cmasher
 stpyvista
+scikit-image
