@@ -1868,7 +1868,7 @@ class FEAVisualizationPlatform:
                         self.data_loader.save_field_mappings()
                         st.success(f"Added mapping: {variant_name} → {canonical_name}")
         
-        # Manual field renaming
+        # Manual field renaming - FIXED VERSION
         if st.session_state.data_loaded:
             with st.expander("Manual Field Renaming"):
                 if 'simulations' in st.session_state and st.session_state.simulations:
@@ -1876,12 +1876,14 @@ class FEAVisualizationPlatform:
                                            key="rename_sim")
                     if sim_name:
                         sim = st.session_state.simulations[sim_name]
-                        if 'mesh_data' in sim and 'field_info' in sim['mesh_data']:
+                        # FIXED: Use hasattr() to check for attributes on EnhancedMeshData object
+                        if hasattr(sim['mesh_data'], 'field_info') and sim['mesh_data'].field_info:
                             field_name = st.selectbox("Field to Rename", sorted(sim['mesh_data'].field_info.keys()),
                                                     key="rename_field")
                             new_name = st.text_input("New Name", value=field_name, key="new_field_name")
                             if st.button("Rename Field"):
-                                if field_name in sim['mesh_data'].fields and field_name in sim['mesh_data'].field_info:
+                                if hasattr(sim['mesh_data'], 'fields') and field_name in sim['mesh_data'].fields and field_name in sim['mesh_data'].field_info:
+                                    # FIXED: Access fields and field_info as attributes of EnhancedMeshData
                                     sim['mesh_data'].fields[new_name] = sim['mesh_data'].fields.pop(field_name)
                                     sim['mesh_data'].field_info[new_name] = sim['mesh_data'].field_info.pop(field_name)
                                     st.success(f"Renamed field from '{field_name}' to '{new_name}'")
@@ -1893,6 +1895,7 @@ class FEAVisualizationPlatform:
         if 'simulations' in st.session_state and st.session_state.simulations:
             field_counts = {}
             for sim in st.session_state.simulations.values():
+                # FIXED: Access field_info as attribute of EnhancedMeshData
                 for field in sim['mesh_data'].field_info.keys():
                     field_counts[field] = field_counts.get(field, 0) + 1
             self.data_loader.common_fields = {field for field, count in field_counts.items()
