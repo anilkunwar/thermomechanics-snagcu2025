@@ -41,3 +41,7 @@
 
     [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator5-streamlit-red)](https://thermomechanical-solutions-interpolator5.streamlit.app/) (visualization of extrapolated/interpolated results)
 
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator6-streamlit-red)](https://thermomechanical-solutions-interpolator6.streamlit.app/)
+
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator7-streamlit-red)](https://thermomechanical-solutions-interpolator7.streamlit.app/) (data loading in interpolation module not yet resolved for entire mesh and geometry)
+
