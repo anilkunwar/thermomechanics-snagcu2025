@@ -43,5 +43,5 @@
 
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator6-streamlit-red)](https://thermomechanical-solutions-interpolator6.streamlit.app/)
 
-   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator7-streamlit-red)](https://thermomechanical-solutions-interpolator7.streamlit.app/) (data loading in interpolation module not yet resolved for entire mesh and geometry)
-
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator7-streamlit-red)](https://thermomechanical-solutions-interpolator7.streamlit.app/) (data loading in interpolation module not yet resolved for entire mesh and geometry, unrealistic interpolation )
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator8-streamlit-red)](https://thermomechanical-solutions-interpolator8.streamlit.app/) (developed from the model r4)
