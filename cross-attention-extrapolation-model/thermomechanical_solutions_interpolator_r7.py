@@ -478,7 +478,7 @@ class EnhancedFEADataLoader:
         
         return True
     
-    @st.cache_data(ttl=3600, show_spinner=True)
+    @st.cache_resource(ttl=3600, show_spinner=True)
     def load_all_simulations(_self, load_full_mesh=True):
         """Load all simulations with enhanced mesh capabilities"""
         simulations = {}
@@ -1115,7 +1115,7 @@ class AdvancedVisualizationEngine:
         fig = go.Figure()
         
         mode = config.get('mode', 'surface')
-        colormap = config.get('colormap', 'Viridis')
+        colormap = config.get('colormap', 'viridis')
         opacity = config.get('opacity', 0.9)
         show_colorbar = config.get('show_colorbar', True)
         lighting = config.get('lighting', 'default')
@@ -1426,7 +1426,7 @@ class AdvancedVisualizationEngine:
                         x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
                         i=triangles[:, 0], j=triangles[:, 1], k=triangles[:, 2],
                         intensity=field_values,
-                        colorscale=config.get('colormap', 'Viridis'),
+                        colorscale=config.get('colormap', 'viridis'),
                         intensitymode='vertex',
                         opacity=config.get('opacity', 0.8),
                         showscale=(idx == 0)  # Only show colorbar on first plot
@@ -1848,7 +1848,7 @@ class EnhancedFEAPlatform:
         """Initialize session state variables"""
         defaults = {
             'data_loaded': False,
-            'selected_colormap': "Viridis",
+            'selected_colormap': "viridis",
             'current_mode': "Data Explorer",
             'visualization_mode': 'surface',
             'lighting_preset': 'default',
@@ -2039,10 +2039,29 @@ class EnhancedFEAPlatform:
                         format_func=lambda x: AdvancedVisualizationEngine.VISUALIZATION_MODES[x]
                     )
                     
+                    # FIXED: Handle colormap selection safely
+                    color_scales = px.colors.named_colorscales()
+                    if not color_scales:
+                        color_scales = ['viridis', 'plasma', 'inferno', 'magma', 'cividis']
+                    
+                    # Find a safe default colormap
+                    if 'viridis' in color_scales:
+                        default_colormap = 'viridis'
+                    elif 'Viridis' in color_scales:
+                        default_colormap = 'Viridis'
+                    else:
+                        default_colormap = color_scales[0] if color_scales else 'plasma'
+                    
+                    # Get index for the default colormap
+                    try:
+                        default_index = color_scales.index(default_colormap)
+                    except ValueError:
+                        default_index = 0
+                    
                     st.session_state.selected_colormap = st.selectbox(
                         "Colormap",
-                        px.colors.named_colorscales(),
-                        index=px.colors.named_colorscales().index('Viridis')
+                        color_scales,
+                        index=default_index
                     )
                     
                     st.session_state.lighting_preset = st.selectbox(
@@ -2074,6 +2093,7 @@ class EnhancedFEAPlatform:
         """Load simulations with progress tracking"""
         with st.spinner("Loading simulation data..."):
             try:
+                # Use cache_resource for non-serializable objects
                 simulations, summaries = self.data_loader.load_all_simulations(load_full_mesh=True)
                 
                 if simulations:
