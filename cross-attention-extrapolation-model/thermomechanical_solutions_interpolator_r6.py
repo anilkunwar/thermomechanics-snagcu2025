@@ -24,6 +24,7 @@ import json
 import base64
 from PIL import Image
 import io
+
 warnings.filterwarnings('ignore')
 
 # =============================================
@@ -38,6 +39,7 @@ os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 # =============================================
 class EnhancedMeshData:
     """Container for enhanced mesh data with spatial indexing"""
+    
     def __init__(self):
         self.points = None
         self.triangles = None
@@ -47,7 +49,7 @@ class EnhancedMeshData:
         self.spatial_tree = None
         self.region_labels = None
         self.mesh_stats = {}
-
+        
     def compute_spatial_features(self):
         """Compute spatial features for the mesh"""
         if self.points is None:
@@ -90,11 +92,13 @@ class EnhancedMeshData:
                 v0 = self.points[tri[0]]
                 v1 = self.points[tri[1]]
                 v2 = self.points[tri[2]]
+                
                 # Compute area using cross product
                 v0v1 = v1 - v0
                 v0v2 = v2 - v0
                 area = 0.5 * np.linalg.norm(np.cross(v0v1, v0v2))
                 areas.append(area)
+        
         return np.array(areas)
     
     def segment_regions(self, n_regions=5):
@@ -104,6 +108,7 @@ class EnhancedMeshData:
         
         # Simple region segmentation based on spatial clustering
         from sklearn.cluster import KMeans
+        
         kmeans = KMeans(n_clusters=n_regions, random_state=42, n_init=10)
         self.region_labels = kmeans.fit_predict(self.points)
         
@@ -244,6 +249,7 @@ class EnhancedFEADataLoader:
             
             try:
                 mesh0 = meshio.read(vtu_files[0])
+                
                 if not mesh0.point_data:
                     st.warning(f"No point data in {name}")
                     continue
@@ -276,6 +282,7 @@ class EnhancedFEADataLoader:
                     if cell_block.type == "triangle":
                         triangles = cell_block.data.astype(np.int32)
                         break
+                
                 mesh_data.triangles = triangles
                 
                 # Initialize fields
@@ -284,11 +291,11 @@ class EnhancedFEADataLoader:
                     arr = mesh0.point_data[key].astype(np.float32)
                     if arr.ndim == 1:
                         sim_data['field_info'][key] = ("scalar", 1)
-                        mesh_data.fields[key] = np.full((len(vtu_files), len(mesh_data.points)),
+                        mesh_data.fields[key] = np.full((len(vtu_files), len(mesh_data.points)), 
                                                        np.nan, dtype=np.float32)
                     else:
                         sim_data['field_info'][key] = ("vector", arr.shape[1])
-                        mesh_data.fields[key] = np.full((len(vtu_files), len(mesh_data.points), arr.shape[1]),
+                        mesh_data.fields[key] = np.full((len(vtu_files), len(mesh_data.points), arr.shape[1]), 
                                                        np.nan, dtype=np.float32)
                     mesh_data.fields[key][0] = arr
                     _self.available_fields.add(key)
@@ -321,6 +328,7 @@ class EnhancedFEADataLoader:
                 # Set as reference mesh if not already set
                 if _self.reference_mesh is None:
                     _self.reference_mesh = mesh_data
+                
             except Exception as e:
                 st.warning(f"Error loading {name}: {str(e)}")
                 continue
@@ -337,9 +345,11 @@ class EnhancedFEADataLoader:
                 for field in sim['mesh_data'].field_info.keys():
                     field_counts[field] = field_counts.get(field, 0) + 1
             
-            _self.common_fields = {field for field, count in field_counts.items() if count == len(simulations)}
+            _self.common_fields = {field for field, count in field_counts.items() 
+                                 if count == len(simulations)}
             
             st.success(f"✅ Loaded {len(simulations)} simulations with {len(_self.available_fields)} unique fields")
+            
             if not _self.common_fields:
                 st.warning("⚠️ No common fields found across all simulations. This will limit field comparison capabilities.")
             else:
@@ -543,209 +553,6 @@ class EnhancedFEADataLoader:
                         st.experimental_rerun()
             else:
                 st.success("✅ No recommendations needed")
-
-# =============================================
-# GEOMETRICAL FIELD PREDICTOR
-# =============================================
-class GeometricalFieldPredictor:
-    """Predict field values on mesh geometry using attention-based interpolation"""
-    def __init__(self, extrapolator, data_loader):
-        self.extrapolator = extrapolator
-        self.data_loader = data_loader
-        self.rbf_interpolators = {}
-    
-    def predict_field_on_mesh(self, energy_query, duration_query, time_query, reference_mesh, field_name):
-        """Predict field values on a reference mesh geometry"""
-        if not self.extrapolator.fitted:
-            return None
-        
-        # Get prediction statistics for the field
-        stats_prediction = self.extrapolator.predict_field_statistics(energy_query, duration_query, time_query)
-        if not stats_prediction or 'field_predictions' not in stats_prediction:
-            return None
-        
-        if field_name not in stats_prediction['field_predictions']:
-            st.warning(f"⚠️ Field '{field_name}' not available in predictions. Trying to find similar field...")
-            
-            # Try to find similar field
-            similar_fields = []
-            field_lower = field_name.lower()
-            for available_field in stats_prediction['field_predictions'].keys():
-                if field_lower in available_field.lower() or available_field.lower() in field_lower:
-                    similar_fields.append(available_field)
-            
-            if similar_fields:
-                field_name = similar_fields[0]
-                st.info(f"✅ Using similar field: '{field_name}' instead")
-            else:
-                return None
-        
-        attention_weights = stats_prediction['attention_weights']
-        target_stats = stats_prediction['field_predictions'][field_name]
-        
-        # Initialize mesh values
-        mesh_points = reference_mesh.points
-        n_points = len(mesh_points)
-        predicted_values = np.zeros(n_points)
-        
-        # Collect source field distributions weighted by attention
-        source_distributions = []
-        source_weights = []
-        source_metadata = []
-        
-        for i, (weight, meta) in enumerate(zip(attention_weights, self.extrapolator.source_metadata)):
-            if weight > 0.001:  # Only consider significant sources
-                sim_name = meta['name']
-                timestep_idx = meta['timestep_idx']
-                # Find the simulation
-                if sim_name in self.data_loader.simulations:
-                    sim = self.data_loader.simulations[sim_name]
-                    if hasattr(sim['mesh_data'], 'fields') and field_name in sim['mesh_data'].fields:
-                        field_data = sim['mesh_data'].fields[field_name]
-                        if timestep_idx < field_data.shape[0]:
-                            source_values = field_data[timestep_idx]
-                            # Handle vector fields
-                            if source_values.ndim == 2:
-                                source_values = np.linalg.norm(source_values, axis=1)
-                            # Ensure same number of points
-                            if len(source_values) == n_points:
-                                source_distributions.append(source_values)
-                                source_weights.append(weight)
-                                source_metadata.append({
-                                    'sim_name': sim_name,
-                                    'timestep': meta['time'],
-                                    'energy': meta['energy'],
-                                    'duration': meta['duration']
-                                })
-        
-        if not source_distributions:
-            # Fallback: create synthetic distribution based on statistics
-            mean_val = target_stats['mean']
-            std_val = target_stats['std']
-            # Create spatial variation pattern
-            centroid = np.mean(mesh_points, axis=0)
-            distances = np.linalg.norm(mesh_points - centroid, axis=1)
-            distances_norm = distances / np.max(distances)
-            # Gaussian radial pattern
-            spatial_pattern = np.exp(-distances_norm ** 2 / 0.3)
-            # Scale to match target statistics
-            spatial_pattern = (spatial_pattern - np.mean(spatial_pattern)) / np.std(spatial_pattern)
-            predicted_values = spatial_pattern * std_val + mean_val
-            return {
-                'values': predicted_values,
-                'method': 'synthetic',
-                'confidence': 0.0
-            }
-        
-        # Blend distributions based on attention weights
-        source_weights = np.array(source_weights)
-        source_weights = source_weights / np.sum(source_weights)
-        
-        # Weighted average of source distributions
-        blended_distribution = np.zeros(n_points)
-        for dist, weight in zip(source_distributions, source_weights):
-            blended_distribution += dist * weight
-        
-        # Scale blended distribution to match predicted statistics
-        current_mean = np.mean(blended_distribution)
-        current_std = np.std(blended_distribution)
-        target_mean = target_stats['mean']
-        target_std = target_stats['std']
-        
-        if current_std > 1e-6:
-            # Scale and shift to match target statistics
-            scaled_distribution = (blended_distribution - current_mean) / current_std * target_std + target_mean
-        else:
-            # Constant distribution with target mean
-            scaled_distribution = np.full(n_points, target_mean)
-        
-        # Add spatial coherence using RBF interpolation of residuals
-        residuals = scaled_distribution - blended_distribution
-        if len(source_distributions) > 3 and np.std(residuals) > 1e-6:
-            # Sample points for RBF
-            n_samples = min(50, len(mesh_points))
-            sample_indices = np.random.choice(len(mesh_points), n_samples, replace=False)
-            try:
-                rbf = RBFInterpolator(
-                    mesh_points[sample_indices],
-                    residuals[sample_indices],
-                    kernel='thin_plate_spline',
-                    epsilon=0.1
-                )
-                # Interpolate residuals to all points
-                interpolated_residuals = rbf(mesh_points)
-                # Apply residuals with smoothing
-                scaled_distribution += interpolated_residuals * 0.5
-            except Exception as e:
-                st.warning(f"RBF interpolation failed: {str(e)}. Using basic interpolation.")
-        
-        # Ensure physical constraints (e.g., non-negative for some fields)
-        if field_name.lower() in ['temperature', 'stress', 'displacement', 'strain', 'heat_flux']:
-            scaled_distribution = np.maximum(scaled_distribution, 0)
-        
-        # Compute confidence based on attention weight distribution
-        confidence = float(np.mean(source_weights))
-        
-        return {
-            'values': scaled_distribution,
-            'method': 'attention_blend',
-            'confidence': confidence,
-            'n_sources': len(source_distributions),
-            'source_stats': {
-                'min': float(np.min(scaled_distribution)),
-                'max': float(np.max(scaled_distribution)),
-                'mean': float(np.mean(scaled_distribution)),
-                'std': float(np.std(scaled_distribution))
-            }
-        }
-    
-    def predict_field_evolution(self, energy_query, duration_query, time_points, reference_mesh, field_name):
-        """Predict field evolution over time on mesh"""
-        predictions = []
-        confidences = []
-        for t in time_points:
-            pred = self.predict_field_on_mesh(energy_query, duration_query, t, reference_mesh, field_name)
-            if pred:
-                predictions.append(pred['values'])
-                confidences.append(pred['confidence'])
-            else:
-                predictions.append(None)
-                confidences.append(0.0)
-        return predictions, confidences
-    
-    def compute_spatial_correlations(self, field_values, reference_mesh):
-        """Compute spatial correlation structure of predicted field"""
-        if field_values is None or reference_mesh.points is None:
-            return None
-        
-        points = reference_mesh.points
-        values = field_values
-        
-        # Compute distance matrix (sampled for efficiency)
-        n_samples = min(100, len(points))
-        sample_indices = np.random.choice(len(points), n_samples, replace=False)
-        sample_points = points[sample_indices]
-        sample_values = values[sample_indices]
-        
-        # Compute pairwise distances and value differences
-        distances = []
-        value_diffs = []
-        for i in range(n_samples):
-            for j in range(i+1, n_samples):
-                dist = np.linalg.norm(sample_points[i] - sample_points[j])
-                val_diff = abs(sample_values[i] - sample_values[j])
-                distances.append(dist)
-                value_diffs.append(val_diff)
-        
-        if len(distances) > 10:
-            # Compute correlation
-            from scipy.stats import pearsonr
-            try:
-                corr, _ = pearsonr(distances, value_diffs)
-                return float(corr)
-            except:
-                return 0.0
-        return 0.0
 
 # =============================================
 # ENHANCED ATTENTION MECHANISM WITH PHYSICS-AWARE EMBEDDINGS
@@ -1027,23 +834,244 @@ class EnhancedPhysicsInformedAttentionExtrapolator:
         return results
 
 # =============================================
+# GEOMETRICAL FIELD PREDICTOR
+# =============================================
+class GeometricalFieldPredictor:
+    """Predict field values on mesh geometry using attention-based interpolation"""
+    
+    def __init__(self, extrapolator, data_loader):
+        self.extrapolator = extrapolator
+        self.data_loader = data_loader
+        self.rbf_interpolators = {}
+        
+    def predict_field_on_mesh(self, energy_query, duration_query, time_query, reference_mesh, field_name):
+        """Predict field values on a reference mesh geometry"""
+        if not self.extrapolator.fitted:
+            return None
+        
+        # Get prediction statistics for the field
+        stats_prediction = self.extrapolator.predict_field_statistics(energy_query, duration_query, time_query)
+        
+        if not stats_prediction or 'field_predictions' not in stats_prediction:
+            return None
+        
+        if field_name not in stats_prediction['field_predictions']:
+            st.warning(f"⚠️ Field '{field_name}' not available in predictions. Trying to find similar field...")
+            
+            # Try to find similar field
+            similar_fields = []
+            field_lower = field_name.lower()
+            for available_field in stats_prediction['field_predictions'].keys():
+                if field_lower in available_field.lower() or available_field.lower() in field_lower:
+                    similar_fields.append(available_field)
+            
+            if similar_fields:
+                field_name = similar_fields[0]
+                st.info(f"✅ Using similar field: '{field_name}' instead")
+            else:
+                return None
+        
+        attention_weights = stats_prediction['attention_weights']
+        target_stats = stats_prediction['field_predictions'][field_name]
+        
+        # Initialize mesh values
+        mesh_points = reference_mesh.points
+        n_points = len(mesh_points)
+        predicted_values = np.zeros(n_points)
+        
+        # Collect source field distributions weighted by attention
+        source_distributions = []
+        source_weights = []
+        source_metadata = []
+        
+        for i, (weight, meta) in enumerate(zip(attention_weights, self.extrapolator.source_metadata)):
+            if weight > 0.001:  # Only consider significant sources
+                sim_name = meta['name']
+                timestep_idx = meta['timestep_idx']
+                
+                # Find the simulation
+                if sim_name in self.data_loader.simulations:
+                    sim = self.data_loader.simulations[sim_name]
+                    if hasattr(sim['mesh_data'], 'fields') and field_name in sim['mesh_data'].fields:
+                        field_data = sim['mesh_data'].fields[field_name]
+                        
+                        if timestep_idx < field_data.shape[0]:
+                            source_values = field_data[timestep_idx]
+                            
+                            # Handle vector fields
+                            if source_values.ndim == 2:
+                                source_values = np.linalg.norm(source_values, axis=1)
+                            
+                            # Ensure same number of points
+                            if len(source_values) == n_points:
+                                source_distributions.append(source_values)
+                                source_weights.append(weight)
+                                source_metadata.append({
+                                    'sim_name': sim_name,
+                                    'timestep': meta['time'],
+                                    'energy': meta['energy'],
+                                    'duration': meta['duration']
+                                })
+        
+        if not source_distributions:
+            # Fallback: create synthetic distribution based on statistics
+            mean_val = target_stats['mean']
+            std_val = target_stats['std']
+            
+            # Create spatial variation pattern
+            centroid = np.mean(mesh_points, axis=0)
+            distances = np.linalg.norm(mesh_points - centroid, axis=1)
+            distances_norm = distances / np.max(distances)
+            
+            # Gaussian radial pattern
+            spatial_pattern = np.exp(-distances_norm ** 2 / 0.3)
+            
+            # Scale to match target statistics
+            spatial_pattern = (spatial_pattern - np.mean(spatial_pattern)) / np.std(spatial_pattern)
+            predicted_values = spatial_pattern * std_val + mean_val
+            
+            return {
+                'values': predicted_values,
+                'method': 'synthetic',
+                'confidence': 0.0
+            }
+        
+        # Blend distributions based on attention weights
+        source_weights = np.array(source_weights)
+        source_weights = source_weights / np.sum(source_weights)
+        
+        # Weighted average of source distributions
+        blended_distribution = np.zeros(n_points)
+        for dist, weight in zip(source_distributions, source_weights):
+            blended_distribution += dist * weight
+        
+        # Scale blended distribution to match predicted statistics
+        current_mean = np.mean(blended_distribution)
+        current_std = np.std(blended_distribution)
+        
+        target_mean = target_stats['mean']
+        target_std = target_stats['std']
+        
+        if current_std > 1e-6:
+            # Scale and shift to match target statistics
+            scaled_distribution = (blended_distribution - current_mean) / current_std * target_std + target_mean
+        else:
+            # Constant distribution with target mean
+            scaled_distribution = np.full(n_points, target_mean)
+        
+        # Add spatial coherence using RBF interpolation of residuals
+        residuals = scaled_distribution - blended_distribution
+        
+        if len(source_distributions) > 3 and np.std(residuals) > 1e-6:
+            # Sample points for RBF
+            n_samples = min(50, len(mesh_points))
+            sample_indices = np.random.choice(len(mesh_points), n_samples, replace=False)
+            
+            try:
+                rbf = RBFInterpolator(
+                    mesh_points[sample_indices],
+                    residuals[sample_indices],
+                    kernel='thin_plate_spline',
+                    epsilon=0.1
+                )
+                
+                # Interpolate residuals to all points
+                interpolated_residuals = rbf(mesh_points)
+                
+                # Apply residuals with smoothing
+                scaled_distribution += interpolated_residuals * 0.5
+            except Exception as e:
+                st.warning(f"RBF interpolation failed: {str(e)}. Using basic interpolation.")
+        
+        # Ensure physical constraints (e.g., non-negative for some fields)
+        if field_name.lower() in ['temperature', 'stress', 'displacement', 'strain', 'heat_flux']:
+            scaled_distribution = np.maximum(scaled_distribution, 0)
+        
+        # Compute confidence based on attention weight distribution
+        confidence = float(np.mean(source_weights))
+        
+        return {
+            'values': scaled_distribution,
+            'method': 'attention_blend',
+            'confidence': confidence,
+            'n_sources': len(source_distributions),
+            'source_stats': {
+                'min': float(np.min(scaled_distribution)),
+                'max': float(np.max(scaled_distribution)),
+                'mean': float(np.mean(scaled_distribution)),
+                'std': float(np.std(scaled_distribution))
+            }
+        }
+    
+    def predict_field_evolution(self, energy_query, duration_query, time_points, reference_mesh, field_name):
+        """Predict field evolution over time on mesh"""
+        predictions = []
+        confidences = []
+        
+        for t in time_points:
+            pred = self.predict_field_on_mesh(energy_query, duration_query, t, reference_mesh, field_name)
+            if pred:
+                predictions.append(pred['values'])
+                confidences.append(pred['confidence'])
+            else:
+                predictions.append(None)
+                confidences.append(0.0)
+        
+        return predictions, confidences
+    
+    def compute_spatial_correlations(self, field_values, reference_mesh):
+        """Compute spatial correlation structure of predicted field"""
+        if field_values is None or reference_mesh.points is None:
+            return None
+        
+        points = reference_mesh.points
+        values = field_values
+        
+        # Compute distance matrix (sampled for efficiency)
+        n_samples = min(100, len(points))
+        sample_indices = np.random.choice(len(points), n_samples, replace=False)
+        sample_points = points[sample_indices]
+        sample_values = values[sample_indices]
+        
+        # Compute pairwise distances and value differences
+        distances = []
+        value_diffs = []
+        
+        for i in range(n_samples):
+            for j in range(i+1, n_samples):
+                dist = np.linalg.norm(sample_points[i] - sample_points[j])
+                val_diff = abs(sample_values[i] - sample_values[j])
+                
+                distances.append(dist)
+                value_diffs.append(val_diff)
+        
+        if len(distances) > 10:
+            # Compute correlation
+            from scipy.stats import pearsonr
+            try:
+                corr, _ = pearsonr(distances, value_diffs)
+                return float(corr)
+            except:
+                return 0.0
+        
+        return 0.0
+
+# =============================================
 # ENHANCED VISUALIZER WITH GEOMETRICAL FEATURES
 # =============================================
 class EnhancedGeometricalVisualizer:
     """Visualization components with advanced geometrical features"""
     
-    # Extended colormap options for Plotly
     EXTENDED_COLORMAPS = [
         'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis', 'Rainbow',
         'Jet', 'Hot', 'Cool', 'Portland', 'Bluered', 'Electric',
         'Thermal', 'Balance', 'Brwnyl', 'Darkmint', 'Emrld', 'Mint',
         'Oranges', 'Purp', 'Purples', 'Sunset', 'Sunsetdark', 'Teal',
-        'Tealgrn', 'Twilight', 'Burg', 'Burgyl', 'RdYlBu', 'RdYlGn',
-        'Blues', 'Greens', 'Reds', 'YlOrBr', 'YlOrRd', 'YlGnBu', 'YlGn'
+        'Tealgrn', 'Twilight', 'Burg', 'Burgyl', 'RdYlBu', 'RdYlGn'
     ]
     
     @staticmethod
-    def create_mesh_field_visualization(mesh_data, field_name, field_values,
+    def create_mesh_field_visualization(mesh_data, field_name, field_values, 
                                        colormap="Viridis", title="", opacity=0.9,
                                        show_wireframe=True, show_points=False):
         """Create interactive 3D mesh visualization of field values"""
@@ -1260,7 +1288,7 @@ class EnhancedGeometricalVisualizer:
         return fig
     
     @staticmethod
-    def create_cross_section_view(mesh_data, field_values, slice_axis, slice_position,
+    def create_cross_section_view(mesh_data, field_values, slice_axis, slice_position, 
                                  field_name, colormap="Viridis"):
         """Create 2D cross-section visualization"""
         if mesh_data is None or field_values is None:
@@ -1303,14 +1331,15 @@ class EnhancedGeometricalVisualizer:
             # Create grid for interpolation
             x_min, x_max = np.min(x_axis), np.max(x_axis)
             y_min, y_max = np.min(y_axis), np.max(y_axis)
+            
             grid_x, grid_y = np.mgrid[x_min:x_max:100j, y_min:y_max:100j]
             
             # Interpolate values
             try:
                 grid_z = griddata(
-                    (x_axis, y_axis),
-                    values,
-                    (grid_x, grid_y),
+                    (x_axis, y_axis), 
+                    values, 
+                    (grid_x, grid_y), 
                     method='cubic',
                     fill_value=np.nanmean(values)
                 )
@@ -1371,8 +1400,8 @@ class EnhancedGeometricalVisualizer:
         return fig
     
     @staticmethod
-    def create_attention_visualization_on_mesh(mesh_data, attention_weights,
-                                             source_metadata, query_point=None):
+    def create_attention_visualization_on_mesh(mesh_data, attention_weights, 
+                                              source_metadata, query_point=None):
         """Visualize attention weights distribution on mesh geometry"""
         if mesh_data is None or attention_weights is None:
             return go.Figure()
@@ -1475,6 +1504,7 @@ class EnhancedGeometricalVisualizer:
             return go.Figure()
         
         frames = []
+        
         for i, (values, t) in enumerate(zip(field_evolution, time_points)):
             if values is None:
                 continue
@@ -1563,6 +1593,7 @@ class EnhancedGeometricalVisualizer:
 # =============================================
 class FEAVisualizationPlatform:
     """Main application class integrating all components"""
+    
     def __init__(self):
         self.data_loader = EnhancedFEADataLoader()
         self.visualizer = EnhancedGeometricalVisualizer()
@@ -1570,12 +1601,6 @@ class FEAVisualizationPlatform:
         self.geom_predictor = None
         
         # Session state initialization
-        if 'data_loader' not in st.session_state:
-            st.session_state.data_loader = self.data_loader
-        if 'visualizer' not in st.session_state:
-            st.session_state.visualizer = self.visualizer
-        if 'extrapolator' not in st.session_state:
-            st.session_state.extrapolator = self.extrapolator
         if 'data_loaded' not in st.session_state:
             st.session_state.data_loaded = False
         if 'selected_colormap' not in st.session_state:
@@ -1599,6 +1624,9 @@ class FEAVisualizationPlatform:
         
         # Render header
         self.render_header()
+        
+        # Initialize session state
+        self.initialize_session_state()
         
         # Render sidebar
         self.render_sidebar()
@@ -1653,14 +1681,6 @@ class FEAVisualizationPlatform:
             margin: 1.5rem 0;
             box-shadow: 0 10px 20px rgba(0,0,0,0.1);
         }
-        .field-mapping-card {
-            background: linear-gradient(135deg, #8e44ad 0%, #3498db 100%);
-            color: white;
-            padding: 1rem;
-            border-radius: 10px;
-            margin: 1rem 0;
-            border-left: 4px solid #e74c3c;
-        }
         .metric-card {
             background: white;
             padding: 1rem;
@@ -1708,6 +1728,14 @@ class FEAVisualizationPlatform:
             margin: 1rem 0;
             border-left: 4px solid #1E88E5;
         }
+        .field-mapping-card {
+            background: linear-gradient(135deg, #8e44ad 0%, #3498db 100%);
+            color: white;
+            padding: 1rem;
+            border-radius: 10px;
+            margin: 1rem 0;
+            border-left: 4px solid #e74c3c;
+        }
         .field-category {
             background: linear-gradient(135deg, #2ecc71, #1abc9c);
             padding: 0.5rem;
@@ -1720,15 +1748,25 @@ class FEAVisualizationPlatform:
     
     def render_header(self):
         """Render application header"""
-        st.markdown('<h1 class="main-header">🔬 Advanced FEA Laser Simulation Platform</h1>',
+        st.markdown('<h1 class="main-header">🔬 Advanced FEA Laser Simulation Platform</h1>', 
                    unsafe_allow_html=True)
         st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">Geometrical Mesh Visualization with Physics-Informed Attention</p>',
                    unsafe_allow_html=True)
+    
+    def initialize_session_state(self):
+        """Initialize session state variables"""
+        if 'data_loader' not in st.session_state:
+            st.session_state.data_loader = self.data_loader
+        if 'visualizer' not in st.session_state:
+            st.session_state.visualizer = self.visualizer
+        if 'extrapolator' not in st.session_state:
+            st.session_state.extrapolator = self.extrapolator
     
     def render_sidebar(self):
         """Render application sidebar"""
         with st.sidebar:
             st.markdown("### ⚙️ Navigation")
+            
             # Mode selection
             app_mode = st.radio(
                 "Select Mode",
@@ -1738,6 +1776,7 @@ class FEAVisualizationPlatform:
                 ),
                 key="nav_mode"
             )
+            
             st.session_state.current_mode = app_mode
             
             st.markdown("---")
@@ -1745,8 +1784,8 @@ class FEAVisualizationPlatform:
             
             col1, col2 = st.columns(2)
             with col1:
-                load_full_data = st.checkbox("Load Full Mesh", value=True,
-                                           help="Load complete mesh data for 3D visualization")
+                load_full_data = st.checkbox("Load Full Mesh", value=True, 
+                                            help="Load complete mesh data for 3D visualization")
             with col2:
                 st.session_state.selected_colormap = st.selectbox(
                     "Colormap",
@@ -1759,21 +1798,37 @@ class FEAVisualizationPlatform:
                     simulations, summaries = self.data_loader.load_all_simulations(
                         load_full_mesh=load_full_data
                     )
-                    st.session_state.simulations = simulations
-                    st.session_state.summaries = summaries
+                    
                     if simulations and summaries:
+                        st.session_state.simulations = simulations
+                        st.session_state.summaries = summaries
                         st.session_state.data_loaded = True
-                        # Initialize extrapolator
-                        st.session_state.extrapolator.load_summaries(summaries)
-                        st.success("✅ Data loaded successfully!")
+                        
+                        # Initialize extrapolator with summaries
+                        self.extrapolator.load_summaries(summaries)
+                        st.session_state.extrapolator_ready = True
                         
                         # Create geometric predictor
                         self.geom_predictor = GeometricalFieldPredictor(
-                            st.session_state.extrapolator,
-                            st.session_state.data_loader
+                            self.extrapolator,
+                            self.data_loader
                         )
-            else:
-                st.error("❌ Failed to load data")
+                        
+                        st.success("✅ Data loaded successfully!")
+                        
+                        # Display data statistics
+                        with st.expander("📊 Data Statistics", expanded=True):
+                            st.metric("Simulations", len(simulations))
+                            st.metric("Available Fields", len(self.data_loader.available_fields))
+                            st.metric("Common Fields", len(self.data_loader.common_fields))
+                            
+                            if summaries:
+                                energies = [s['energy'] for s in summaries]
+                                durations = [s['duration'] for s in summaries]
+                                st.metric("Energy Range", f"{min(energies):.1f} - {max(energies):.1f} mJ")
+                                st.metric("Duration Range", f"{min(durations):.1f} - {max(durations):.1f} ns")
+                    else:
+                        st.error("❌ Failed to load data")
             
             if st.session_state.get('data_loaded', False):
                 st.markdown("---")
@@ -1786,23 +1841,15 @@ class FEAVisualizationPlatform:
                     st.checkbox("Show Wireframe", value=True, key="show_wireframe")
                     st.checkbox("Show Points", value=False, key="show_points")
                     st.slider("Mesh Opacity", 0.1, 1.0, 0.9, 0.1, key="mesh_opacity")
-                
-                with st.expander("🔍 Data Validation", expanded=False):
-                    if st.button("Validate Data Consistency", use_container_width=True):
-                        report = self.data_loader.validate_simulation_consistency(
-                            st.session_state.simulations
-                        )
-                        st.session_state.consistency_report = report
-                        st.success("✅ Data validation complete")
     
     def render_field_mapping_interface(self):
         """Render field mapping configuration interface"""
-        if not st.session_state.data_loader.field_mapping:
+        if not self.data_loader.field_mapping:
             st.info("No field mappings configured yet. System will auto-detect common patterns.")
         
         # Show current mappings
         with st.expander("Current Field Mappings", expanded=True):
-            for canonical, variants in st.session_state.data_loader.field_mapping.items():
+            for canonical, variants in self.data_loader.field_mapping.items():
                 st.markdown(f"**{canonical}** ← {', '.join(variants)}")
         
         # Add new mapping
@@ -1814,11 +1861,11 @@ class FEAVisualizationPlatform:
         with col3:
             if st.button("➕ Add Mapping", key="add_mapping"):
                 if canonical_name and variant_name:
-                    if canonical_name not in st.session_state.data_loader.field_mapping:
-                        st.session_state.data_loader.field_mapping[canonical_name] = []
-                    if variant_name not in st.session_state.data_loader.field_mapping[canonical_name]:
-                        st.session_state.data_loader.field_mapping[canonical_name].append(variant_name)
-                        st.session_state.data_loader.save_field_mappings()
+                    if canonical_name not in self.data_loader.field_mapping:
+                        self.data_loader.field_mapping[canonical_name] = []
+                    if variant_name not in self.data_loader.field_mapping[canonical_name]:
+                        self.data_loader.field_mapping[canonical_name].append(variant_name)
+                        self.data_loader.save_field_mappings()
                         st.success(f"Added mapping: {variant_name} → {canonical_name}")
         
         # Manual field renaming
@@ -1848,8 +1895,8 @@ class FEAVisualizationPlatform:
             for sim in st.session_state.simulations.values():
                 for field in sim['mesh_data'].field_info.keys():
                     field_counts[field] = field_counts.get(field, 0) + 1
-            st.session_state.data_loader.common_fields = {field for field, count in field_counts.items()
-                                                         if count == len(st.session_state.simulations)}
+            self.data_loader.common_fields = {field for field, count in field_counts.items()
+                                            if count == len(st.session_state.simulations)}
             st.success("✅ Common fields rebuilt successfully")
     
     def render_main_content(self):
@@ -1913,7 +1960,7 @@ class FEAVisualizationPlatform:
     
     def render_interpolation_extrapolation(self):
         """Render interpolation/extrapolation interface with field mapping support"""
-        st.markdown('<h2 class="sub-header">🔮 Interpolation/Extrapolation Engine</h2>',
+        st.markdown('<h2 class="sub-header">🔮 Interpolation/Extrapolation Engine</h2>', 
                    unsafe_allow_html=True)
         
         if not st.session_state.get('data_loaded', False):
@@ -2020,8 +2067,8 @@ class FEAVisualizationPlatform:
                                        help="Uncheck to select fields from specific simulations")
         
         if use_common_fields:
-            if st.session_state.data_loader.common_fields:
-                selected_field = self.render_field_category_selector(st.session_state.data_loader.common_fields)
+            if self.data_loader.common_fields:
+                selected_field = self.render_field_category_selector(self.data_loader.common_fields)
             else:
                 st.warning("⚠️ No common fields found across all simulations. Try unchecking 'Use common fields only' to select fields from specific simulations.")
         else:
@@ -2104,10 +2151,10 @@ class FEAVisualizationPlatform:
                 )
         
         # Update extrapolator parameters
-        st.session_state.extrapolator.sigma_param = sigma_param
-        st.session_state.extrapolator.spatial_weight = spatial_weight
-        st.session_state.extrapolator.n_heads = n_heads
-        st.session_state.extrapolator.temperature = temperature
+        self.extrapolator.sigma_param = sigma_param
+        self.extrapolator.spatial_weight = spatial_weight
+        self.extrapolator.n_heads = n_heads
+        self.extrapolator.temperature = temperature
         
         # Run prediction
         if st.button("🚀 Generate Prediction", type="primary", use_container_width=True):
@@ -2120,23 +2167,22 @@ class FEAVisualizationPlatform:
                 reference_sim = st.session_state.simulations[viz_reference]
                 reference_mesh = reference_sim['mesh_data']
                 
-                # Generate predictions
+                # Generate predictions using the geometric predictor
+                if self.geom_predictor is None:
+                    self.geom_predictor = GeometricalFieldPredictor(
+                        self.extrapolator,
+                        self.data_loader
+                    )
+                
+                predictions, confidences = self.geom_predictor.predict_field_evolution(
+                    energy_query, duration_query, time_points, reference_mesh, selected_field
+                )
+                
                 results = {
-                    'predictions': [],
-                    'confidences': [],
+                    'predictions': predictions,
+                    'confidences': confidences,
                     'time_points': time_points
                 }
-                
-                for t in time_points:
-                    pred = self.geom_predictor.predict_field_on_mesh(
-                        energy_query, duration_query, t, reference_mesh, selected_field
-                    )
-                    if pred:
-                        results['predictions'].append(pred['values'])
-                        results['confidences'].append(pred['confidence'])
-                    else:
-                        results['predictions'].append(None)
-                        results['confidences'].append(0.0)
                 
                 st.success(f"✅ Prediction generated for {selected_field} (E={energy_query:.1f}mJ, τ={duration_query:.1f}ns)")
                 
@@ -2298,7 +2344,7 @@ class FEAVisualizationPlatform:
     
     def render_data_viewer(self):
         """Render data viewer with mesh visualization"""
-        st.markdown('<h2 class="sub-header">📁 Data Viewer with Mesh Visualization</h2>',
+        st.markdown('<h2 class="sub-header">📁 Data Viewer with Mesh Visualization</h2>', 
                    unsafe_allow_html=True)
         
         if not st.session_state.get('data_loaded', False):
@@ -2315,18 +2361,13 @@ class FEAVisualizationPlatform:
                 sorted(simulations.keys()),
                 key="viewer_sim_select"
             )
-        with col2:
-            if sim_name in simulations:
-                st.metric("Energy", f"{simulations[sim_name]['energy_mJ']:.2f} mJ")
-        with col3:
-            if sim_name in simulations:
-                st.metric("Duration", f"{simulations[sim_name]['duration_ns']:.2f} ns")
-        
-        if sim_name not in simulations:
-            st.error("Selected simulation not found.")
-            return
         
         sim = simulations[sim_name]
+        
+        with col2:
+            st.metric("Energy", f"{sim['energy_mJ']:.2f} mJ")
+        with col3:
+            st.metric("Duration", f"{sim['duration_ns']:.2f} ns")
         
         if not sim.get('has_mesh', False):
             st.warning("This simulation was loaded without mesh data.")
@@ -2380,8 +2421,10 @@ class FEAVisualizationPlatform:
         
         # Field statistics and cross-sections
         col1, col2 = st.columns(2)
+        
         with col1:
             st.markdown("##### 📊 Field Statistics")
+            
             stats = {
                 "Minimum": float(np.min(field_values)),
                 "Maximum": float(np.max(field_values)),
@@ -2390,12 +2433,15 @@ class FEAVisualizationPlatform:
                 "Median": float(np.median(field_values)),
                 "Range": float(np.max(field_values) - np.min(field_values))
             }
+            
             for stat_name, stat_value in stats.items():
                 st.metric(stat_name, f"{stat_value:.3f}")
         
         with col2:
             st.markdown("##### 🔍 Cross-Section View")
+            
             slice_axis = st.selectbox("Slice Axis", ["X", "Y", "Z"], key="slice_axis")
+            
             if mesh_data.points is not None:
                 if slice_axis == 'X':
                     coord_range = (np.min(mesh_data.points[:, 0]), np.max(mesh_data.points[:, 0]))
@@ -2427,7 +2473,9 @@ class FEAVisualizationPlatform:
         with st.expander("📐 Mesh Statistics", expanded=False):
             if hasattr(mesh_data, 'mesh_stats'):
                 mesh_stats = mesh_data.mesh_stats
+                
                 col1, col2 = st.columns(2)
+                
                 with col1:
                     st.markdown("**Geometrical Properties**")
                     if 'surface_area' in mesh_stats:
@@ -2436,6 +2484,7 @@ class FEAVisualizationPlatform:
                         st.metric("Triangle Count", f"{mesh_stats['triangle_count']:,}")
                     if 'avg_triangle_area' in mesh_stats:
                         st.metric("Avg Triangle Area", f"{mesh_stats['avg_triangle_area']:.6f}")
+                
                 with col2:
                     st.markdown("**Spatial Properties**")
                     if 'bbox' in mesh_stats:
@@ -2446,7 +2495,7 @@ class FEAVisualizationPlatform:
     
     def render_comparative_analysis(self):
         """Render comparative analysis interface"""
-        st.markdown('<h2 class="sub-header">📊 Comparative Analysis</h2>',
+        st.markdown('<h2 class="sub-header">📊 Comparative Analysis</h2>', 
                    unsafe_allow_html=True)
         
         if not st.session_state.get('data_loaded', False):
@@ -2471,7 +2520,7 @@ class FEAVisualizationPlatform:
         for sim_name in selected_sims:
             if sim_name in simulations:
                 for field in simulations[sim_name]['mesh_data'].field_info.keys():
-                    canonical_field = st.session_state.data_loader.get_canonical_field_name(field)
+                    canonical_field = self.data_loader.get_canonical_field_name(field)
                     all_fields.add(canonical_field)
         
         if all_fields:
@@ -2498,10 +2547,11 @@ class FEAVisualizationPlatform:
         
         for sim_name in selected_sims:
             sim = st.session_state.simulations[sim_name]
-            mesh_data = sim['mesh_data']
             
-            if selected_field in mesh_data.fields:
+            if selected_field in sim['mesh_data'].field_info:
+                mesh_data = sim['mesh_data']
                 field_data = mesh_data.fields[selected_field]
+                
                 # Compute mean value over space for each timestep
                 spatial_means = []
                 for t in range(field_data.shape[0]):
@@ -2535,14 +2585,17 @@ class FEAVisualizationPlatform:
         """Render radar chart comparison"""
         # Extract field statistics for each simulation
         field_stats = {}
+        
         for sim_name in selected_sims:
             sim = st.session_state.simulations[sim_name]
             summary = next((s for s in st.session_state.summaries if s['name'] == sim_name), None)
+            
             if summary:
                 stats = {}
                 for field in summary['field_stats']:
                     if 'mean' in summary['field_stats'][field] and summary['field_stats'][field]['mean']:
                         stats[field] = np.mean(summary['field_stats'][field]['mean'])
+                
                 field_stats[sim_name] = stats
         
         # Create radar chart
@@ -2586,6 +2639,7 @@ class FEAVisualizationPlatform:
             
             if selected_field in mesh_data.fields:
                 field_data = mesh_data.fields[selected_field]
+                
                 # Use first timestep
                 if field_data[0].ndim == 1:
                     values = field_data[0]
@@ -2605,7 +2659,7 @@ class FEAVisualizationPlatform:
     
     def render_geometrical_visualization(self):
         """Render advanced geometrical visualization interface"""
-        st.markdown('<h2 class="sub-header">🏗️ Advanced Geometrical Visualization</h2>',
+        st.markdown('<h2 class="sub-header">🏗️ Advanced Geometrical Visualization</h2>', 
                    unsafe_allow_html=True)
         
         if not st.session_state.get('data_loaded', False):
@@ -2615,7 +2669,7 @@ class FEAVisualizationPlatform:
         st.markdown("""
         <div class="info-box">
         <h3>🎨 Geometrical Mesh Visualization</h3>
-        <p>This module provides advanced 3D visualization of field distributions on mesh geometry,
+        <p>This module provides advanced 3D visualization of field distributions on mesh geometry, 
         including cross-sections, animations, and spatial analysis tools.</p>
         </div>
         """, unsafe_allow_html=True)
@@ -2624,19 +2678,22 @@ class FEAVisualizationPlatform:
         
         # Main visualization controls
         col1, col2, col3 = st.columns(3)
+        
         with col1:
             sim_name = st.selectbox(
                 "Select Simulation",
                 sorted(simulations.keys()),
                 key="geom_sim_select"
             )
+        
         with col2:
-            if sim_name in simulations:
-                field = st.selectbox(
-                    "Select Field",
-                    sorted(simulations[sim_name]['mesh_data'].field_info.keys()),
-                    key="geom_field_select"
-                )
+            sim = simulations[sim_name]
+            field = st.selectbox(
+                "Select Field",
+                sorted(sim['mesh_data'].field_info.keys()),
+                key="geom_field_select"
+            )
+        
         with col3:
             viz_mode = st.selectbox(
                 "Visualization Mode",
@@ -2645,28 +2702,28 @@ class FEAVisualizationPlatform:
             )
         
         # Visualization parameters
-        if sim_name in simulations:
-            sim = simulations[sim_name]
-            if viz_mode == "Interactive 3D":
-                self.render_interactive_3d(sim, field)
-            elif viz_mode == "Cross-Section Analysis":
-                self.render_cross_section_analysis(sim, field)
-            elif viz_mode == "Time Animation":
-                self.render_time_animation(sim, field)
-            elif viz_mode == "Spatial Statistics":
-                self.render_spatial_statistics(sim, field)
+        if viz_mode == "Interactive 3D":
+            self.render_interactive_3d(sim, field)
+        elif viz_mode == "Cross-Section Analysis":
+            self.render_cross_section_analysis(sim, field)
+        elif viz_mode == "Time Animation":
+            self.render_time_animation(sim, field)
+        elif viz_mode == "Spatial Statistics":
+            self.render_spatial_statistics(sim, field)
     
     def render_interactive_3d(self, sim, field):
         """Render interactive 3D visualization"""
         mesh_data = sim['mesh_data']
         
         col1, col2 = st.columns([2, 1])
+        
         with col1:
             timestep = st.slider(
                 "Timestep",
                 0, sim['n_timesteps'] - 1, 0,
                 key="interactive_timestep"
             )
+        
         with col2:
             display_options = st.multiselect(
                 "Display Options",
@@ -2697,15 +2754,19 @@ class FEAVisualizationPlatform:
         # Additional controls
         with st.expander("🎨 Visualization Controls", expanded=False):
             col1, col2, col3 = st.columns(3)
+            
             with col1:
                 camera_x = st.slider("Camera X", -3.0, 3.0, 1.5, 0.1)
                 camera_y = st.slider("Camera Y", -3.0, 3.0, 1.5, 0.1)
                 camera_z = st.slider("Camera Z", -3.0, 3.0, 1.5, 0.1)
+            
             with col2:
                 light_ambient = st.slider("Ambient Light", 0.0, 1.0, 0.8, 0.1)
                 light_diffuse = st.slider("Diffuse Light", 0.0, 1.0, 0.8, 0.1)
+            
             with col3:
                 if st.button("Apply Camera Settings"):
+                    # Update camera settings
                     fig.update_layout(
                         scene_camera=dict(
                             eye=dict(x=camera_x, y=camera_y, z=camera_z)
@@ -2721,8 +2782,10 @@ class FEAVisualizationPlatform:
         mesh_data = sim['mesh_data']
         
         col1, col2, col3 = st.columns(3)
+        
         with col1:
             slice_axis = st.selectbox("Slice Axis", ["X", "Y", "Z"], key="cs_axis")
+        
         with col2:
             if mesh_data.points is not None:
                 if slice_axis == 'X':
@@ -2739,6 +2802,7 @@ class FEAVisualizationPlatform:
                     float((coord_range[0] + coord_range[1]) / 2),
                     key="cs_pos"
                 )
+        
         with col3:
             timestep = st.slider(
                 "Timestep",
@@ -2766,12 +2830,16 @@ class FEAVisualizationPlatform:
         # Multiple cross-sections
         with st.expander("📊 Multiple Cross-Sections", expanded=False):
             n_slices = st.slider("Number of slices", 1, 10, 3, key="n_slices")
+            
             slice_positions = np.linspace(coord_range[0], coord_range[1], n_slices + 2)[1:-1]
+            
             cols = st.columns(min(n_slices, 4))
+            
             for idx, pos in enumerate(slice_positions):
                 if idx < len(cols):
                     with cols[idx]:
                         st.markdown(f"**{slice_axis} = {pos:.3f}**")
+                        
                         # Create small cross-section
                         small_fig = self.visualizer.create_cross_section_view(
                             mesh_data,
@@ -2781,6 +2849,7 @@ class FEAVisualizationPlatform:
                             field,
                             colormap=st.session_state.selected_colormap
                         )
+                        
                         small_fig.update_layout(height=300, showlegend=False, margin=dict(t=20, b=20, l=20, r=20))
                         st.plotly_chart(small_fig, use_container_width=True)
     
@@ -2789,9 +2858,11 @@ class FEAVisualizationPlatform:
         mesh_data = sim['mesh_data']
         
         col1, col2 = st.columns(2)
+        
         with col1:
             start_time = st.slider("Start Time", 0, sim['n_timesteps'] - 1, 0, key="anim_start")
             end_time = st.slider("End Time", 0, sim['n_timesteps'] - 1, sim['n_timesteps'] - 1, key="anim_end")
+        
         with col2:
             frame_rate = st.slider("Frame Rate (fps)", 1, 30, 10, key="anim_fps")
             play_direction = st.selectbox("Play Direction", ["Forward", "Reverse"], key="anim_dir")
@@ -2803,6 +2874,7 @@ class FEAVisualizationPlatform:
         # Prepare animation data
         time_indices = range(start_time, end_time + 1)
         field_evolution = []
+        
         for t in time_indices:
             field_data = mesh_data.fields[field][t]
             if field_data.ndim == 2:
@@ -2827,11 +2899,14 @@ class FEAVisualizationPlatform:
         # Animation controls
         with st.expander("🎬 Animation Controls", expanded=False):
             col1, col2, col3 = st.columns(3)
+            
             with col1:
                 loop_animation = st.checkbox("Loop Animation", value=True, key="anim_loop")
+            
             with col2:
                 if st.button("🔄 Restart Animation"):
                     st.rerun()
+            
             with col3:
                 # Export animation as GIF (conceptual)
                 if st.button("💾 Export Animation"):
@@ -2839,11 +2914,13 @@ class FEAVisualizationPlatform:
         
         # Time series statistics
         st.markdown("##### 📈 Time Series Statistics")
+        
         time_series_data = []
         for t in range(sim['n_timesteps']):
             field_data = mesh_data.fields[field][t]
             if field_data.ndim == 2:
                 field_data = np.linalg.norm(field_data, axis=1)
+            
             time_series_data.append({
                 'timestep': t + 1,
                 'mean': float(np.mean(field_data)),
@@ -2853,6 +2930,7 @@ class FEAVisualizationPlatform:
             })
         
         df_time_series = pd.DataFrame(time_series_data)
+        
         fig_ts = go.Figure()
         fig_ts.add_trace(go.Scatter(
             x=df_time_series['timestep'],
@@ -2875,6 +2953,7 @@ class FEAVisualizationPlatform:
             name='Minimum',
             line=dict(width=1, color='green', dash='dash')
         ))
+        
         fig_ts.update_layout(
             title=f"{field} Time Series Statistics",
             xaxis_title="Timestep",
@@ -2891,12 +2970,14 @@ class FEAVisualizationPlatform:
         mesh_data = sim['mesh_data']
         
         col1, col2 = st.columns(2)
+        
         with col1:
             timestep = st.slider(
                 "Timestep for Analysis",
                 0, sim['n_timesteps'] - 1, 0,
                 key="spatial_timestep"
             )
+        
         with col2:
             analysis_type = st.selectbox(
                 "Analysis Type",
@@ -2946,7 +3027,9 @@ class FEAVisualizationPlatform:
         
         # Statistical analysis
         st.markdown("##### 📊 Spatial Statistics")
+        
         col1, col2, col3, col4 = st.columns(4)
+        
         with col1:
             # Spatial autocorrelation
             if len(field_values) > 100:
@@ -2968,10 +3051,13 @@ class FEAVisualizationPlatform:
                         st.metric("Spatial Correlation", f"{corr:.3f}")
                     except:
                         st.metric("Spatial Correlation", "N/A")
+        
         with col2:
             st.metric("Spatial Mean", f"{np.mean(field_values):.3f}")
+        
         with col3:
             st.metric("Spatial Std Dev", f"{np.std(field_values):.3f}")
+        
         with col4:
             st.metric("Spatial Range", f"{np.max(field_values) - np.min(field_values):.3f}")
     
@@ -2985,6 +3071,7 @@ class FEAVisualizationPlatform:
         
         # Create radial scatter plot
         fig_radial = go.Figure()
+        
         fig_radial.add_trace(go.Scatter(
             x=distances,
             y=field_values,
@@ -3004,9 +3091,11 @@ class FEAVisualizationPlatform:
             try:
                 z = np.polyfit(distances, field_values, 2)
                 p = np.poly1d(z)
+                
                 sorted_indices = np.argsort(distances)
                 trend_x = distances[sorted_indices]
                 trend_y = p(trend_x)
+                
                 fig_radial.add_trace(go.Scatter(
                     x=trend_x,
                     y=trend_y,
@@ -3036,9 +3125,11 @@ class FEAVisualizationPlatform:
         
         # Compute statistics per region
         region_stats = []
+        
         for region_id in np.unique(region_labels):
             region_mask = region_labels == region_id
             region_values = field_values[region_mask]
+            
             if len(region_values) > 0:
                 region_stats.append({
                     'Region': region_id,
@@ -3062,6 +3153,7 @@ class FEAVisualizationPlatform:
             
             # Visualize region statistics
             fig_regions = go.Figure()
+            
             fig_regions.add_trace(go.Bar(
                 x=df_region_stats['Region'],
                 y=df_region_stats['Mean'],
@@ -3073,16 +3165,19 @@ class FEAVisualizationPlatform:
                 name='Mean ± Std',
                 marker_color='skyblue'
             ))
+            
             fig_regions.update_layout(
                 title=f"{field_name} Statistics by Region",
                 xaxis_title="Region ID",
                 yaxis_title=f"{field_name} Value",
                 height=400
             )
+            
             st.plotly_chart(fig_regions, use_container_width=True)
             
             # Color mesh by region
             region_colors = region_labels / np.max(region_labels)
+            
             fig_region_viz = self.visualizer.create_mesh_field_visualization(
                 mesh_data,
                 "Region",
@@ -3091,6 +3186,7 @@ class FEAVisualizationPlatform:
                 title="Mesh Regions",
                 opacity=0.8
             )
+            
             st.plotly_chart(fig_region_viz, use_container_width=True)
     
     def render_gradient_analysis(self, mesh_data, field_values, field_name):
@@ -3100,20 +3196,24 @@ class FEAVisualizationPlatform:
         if mesh_data.triangles is not None and len(mesh_data.triangles) > 0:
             # Compute gradients on mesh
             gradients = np.zeros_like(points)
+            
             for tri in mesh_data.triangles[:min(1000, len(mesh_data.triangles))]:
                 if (tri[0] < len(points) and tri[1] < len(points) and tri[2] < len(points) and
                     tri[0] < len(field_values) and tri[1] < len(field_values) and tri[2] < len(field_values)):
+                    
                     # Get triangle vertices and values
                     v0, v1, v2 = points[tri]
                     f0, f1, f2 = field_values[tri]
                     
                     # Compute gradient using finite differences
+                    # Simple approximation for demonstration
                     grad = np.zeros(3)
                     for i in range(3):
                         if v1[i] != v0[i]:
                             grad[i] += (f1 - f0) / (v1[i] - v0[i])
                         if v2[i] != v0[i]:
                             grad[i] += (f2 - f0) / (v2[i] - v0[i])
+                    
                     gradients[tri] += grad / 3
             
             # Compute gradient magnitude
@@ -3128,23 +3228,30 @@ class FEAVisualizationPlatform:
                 title=f"Gradient Magnitude of {field_name}",
                 opacity=0.9
             )
+            
             st.plotly_chart(fig_grad, use_container_width=True)
             
             # Gradient statistics
             st.markdown("##### 📊 Gradient Statistics")
+            
             col1, col2, col3 = st.columns(3)
+            
             with col1:
                 st.metric("Mean Gradient", f"{np.mean(grad_magnitude):.3f}")
+            
             with col2:
                 st.metric("Max Gradient", f"{np.max(grad_magnitude):.3f}")
+            
             with col3:
                 # Compute gradient direction consistency
                 if len(gradients) > 10:
                     # Normalize gradients
                     grad_norm = gradients / (np.linalg.norm(gradients, axis=1, keepdims=True) + 1e-8)
+                    
                     # Compute mean direction
                     mean_direction = np.mean(grad_norm, axis=0)
                     direction_magnitude = np.linalg.norm(mean_direction)
+                    
                     st.metric("Direction Consistency", f"{direction_magnitude:.3f}")
         else:
             st.info("Gradient analysis requires triangular mesh data.")
@@ -3152,29 +3259,38 @@ class FEAVisualizationPlatform:
     def render_field_statistics(self, field_values, field_name):
         """Render field statistics panel"""
         st.markdown("##### 📊 Field Statistics")
+        
         col1, col2, col3, col4 = st.columns(4)
+        
         with col1:
             st.metric("Minimum", f"{np.min(field_values):.3f}")
+        
         with col2:
             st.metric("Maximum", f"{np.max(field_values):.3f}")
+        
         with col3:
             st.metric("Mean", f"{np.mean(field_values):.3f}")
+        
         with col4:
             st.metric("Std Dev", f"{np.std(field_values):.3f}")
         
         # Additional statistics
         with st.expander("📈 Detailed Statistics", expanded=False):
             col1, col2, col3, col4 = st.columns(4)
+            
             with col1:
                 st.metric("Median", f"{np.median(field_values):.3f}")
+            
             with col2:
                 st.metric("Variance", f"{np.var(field_values):.3f}")
+            
             with col3:
                 from scipy.stats import skew, kurtosis
                 try:
                     st.metric("Skewness", f"{skew(field_values):.3f}")
                 except:
                     st.metric("Skewness", "N/A")
+            
             with col4:
                 try:
                     st.metric("Kurtosis", f"{kurtosis(field_values):.3f}")
@@ -3190,12 +3306,14 @@ class FEAVisualizationPlatform:
                 opacity=0.7,
                 name='Distribution'
             ))
+            
             fig_hist.update_layout(
                 title=f"{field_name} Value Distribution",
                 xaxis_title=field_name,
                 yaxis_title="Frequency",
                 height=300
             )
+            
             st.plotly_chart(fig_hist, use_container_width=True)
     
     def show_data_not_loaded_warning(self):
@@ -3210,19 +3328,19 @@ class FEAVisualizationPlatform:
         
         with st.expander("📁 Expected Directory Structure"):
             st.code("""
-            fea_solutions/
-            ├── q0p5mJ-delta4p2ns/        # Energy: 0.5 mJ, Duration: 4.2 ns
-            │   ├── a_t0001.vtu           # Timestep 1
-            │   ├── a_t0002.vtu           # Timestep 2
-            │   ├── a_t0003.vtu           # Timestep 3
-            │   └── ...
-            ├── q1p0mJ-delta2p0ns/        # Energy: 1.0 mJ, Duration: 2.0 ns
-            │   ├── a_t0001.vtu
-            │   ├── a_t0002.vtu
-            │   └── ...
-            └── q2p0mJ-delta1p0ns/        # Energy: 2.0 mJ, Duration: 1.0 ns
-                ├── a_t0001.vtu
-                └── ...
+fea_solutions/
+├── q0p5mJ-delta4p2ns/        # Energy: 0.5 mJ, Duration: 4.2 ns
+│   ├── a_t0001.vtu           # Timestep 1
+│   ├── a_t0002.vtu           # Timestep 2
+│   ├── a_t0003.vtu           # Timestep 3
+│   └── ...
+├── q1p0mJ-delta2p0ns/        # Energy: 1.0 mJ, Duration: 2.0 ns
+│   ├── a_t0001.vtu
+│   ├── a_t0002.vtu
+│   └── ...
+└── q2p0mJ-delta1p0ns/        # Energy: 2.0 mJ, Duration: 1.0 ns
+    ├── a_t0001.vtu
+    └── ...
             """)
 
 # =============================================
