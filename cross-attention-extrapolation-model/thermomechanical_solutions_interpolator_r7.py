@@ -1741,7 +1741,7 @@ class EnhancedFEAPlatform:
             mesh_data, field_data, config
         )
         
-        st.plotly_chart(fig, use_container_width=True, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
     
     def _render_field_analysis(self, sim):
         """Render field analysis"""
