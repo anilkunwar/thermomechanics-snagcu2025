@@ -22,6 +22,8 @@ from scipy.spatial import Delaunay, ConvexHull
 import hashlib
 import pickle
 import time
+import json
+from collections import defaultdict
 
 warnings.filterwarnings('ignore')
 
@@ -74,6 +76,219 @@ class EnhancedCacheManager:
         return valid_simulations, missing_in
 
 # =============================================
+# FIELD MANAGEMENT SYSTEM
+# =============================================
+class FieldManager:
+    """Manages field discovery, categorization, and metadata"""
+    
+    def __init__(self):
+        self.all_fields = set()
+        self.field_categories = {
+            'temperature': set(),
+            'stress': set(),
+            'displacement': set(),
+            'strain': set(),
+            'velocity': set(),
+            'pressure': set(),
+            'force': set(),
+            'energy': set(),
+            'other': set()
+        }
+        self.field_metadata = {}
+        self.field_aliases = {
+            'temp': 'temperature',
+            'T': 'temperature',
+            'stress': 'stress',
+            'sigma': 'stress',
+            'displ': 'displacement',
+            'disp': 'displacement',
+            'u': 'displacement',
+            'strain': 'strain',
+            'epsilon': 'strain',
+            'vel': 'velocity',
+            'v': 'velocity',
+            'press': 'pressure',
+            'p': 'pressure',
+            'force': 'force',
+            'F': 'force',
+            'energy': 'energy',
+            'E': 'energy'
+        }
+        
+    def categorize_field(self, field_name):
+        """Categorize field based on name patterns"""
+        field_lower = field_name.lower()
+        
+        # Temperature fields
+        if any(keyword in field_lower for keyword in ['temp', 'temperature', 'T_']):
+            category = 'temperature'
+            aliases = ['temperature']
+        
+        # Stress fields
+        elif any(keyword in field_lower for keyword in ['stress', 'sigma', 'tau', 's_']):
+            if any(suffix in field_lower for suffix in ['_xx', '_yy', '_zz', '_xy', '_yz', '_xz']):
+                component = self.extract_component(field_name)
+                category = 'stress'
+                aliases = ['stress', f'stress{component}']
+            else:
+                category = 'stress'
+                aliases = ['stress']
+        
+        # Displacement fields
+        elif any(keyword in field_lower for keyword in ['displacement', 'disp', 'u_', 'displ']):
+            if any(suffix in field_lower for suffix in ['_x', '_y', '_z']):
+                component = self.extract_component(field_name)
+                category = 'displacement'
+                aliases = ['displacement', f'displacement{component}']
+            else:
+                category = 'displacement'
+                aliases = ['displacement']
+        
+        # Strain fields
+        elif any(keyword in field_lower for keyword in ['strain', 'epsilon', 'e_']):
+            category = 'strain'
+            aliases = ['strain']
+        
+        # Velocity fields
+        elif any(keyword in field_lower for keyword in ['velocity', 'vel', 'v_']):
+            category = 'velocity'
+            aliases = ['velocity']
+        
+        # Pressure fields
+        elif any(keyword in field_lower for keyword in ['pressure', 'press', 'p_']):
+            category = 'pressure'
+            aliases = ['pressure']
+        
+        # Force fields
+        elif any(keyword in field_lower for keyword in ['force', 'F_', 'load']):
+            category = 'force'
+            aliases = ['force']
+        
+        # Energy fields
+        elif any(keyword in field_lower for keyword in ['energy', 'E_', 'work']):
+            category = 'energy'
+            aliases = ['energy']
+        
+        # Other fields
+        else:
+            category = 'other'
+            aliases = [field_name]
+        
+        return category, aliases
+    
+    def extract_component(self, field_name):
+        """Extract component suffix from field name"""
+        patterns = [
+            ('_xx', '_xx'), ('_yy', '_yy'), ('_zz', '_zz'),
+            ('_xy', '_xy'), ('_yz', '_yz'), ('_xz', '_xz'),
+            ('_x', '_x'), ('_y', '_y'), ('_z', '_z'),
+            ('_1', '_1'), ('_2', '_2'), ('_3', '_3')
+        ]
+        
+        for pattern, suffix in patterns:
+            if field_name.endswith(pattern):
+                return suffix
+        
+        return ''
+    
+    def discover_fields_from_summaries(self, summaries):
+        """Discover all fields from simulation summaries"""
+        field_info = defaultdict(set)
+        
+        for summary in summaries:
+            for field_name in summary['field_stats'].keys():
+                self.all_fields.add(field_name)
+                category, aliases = self.categorize_field(field_name)
+                self.field_categories[category].add(field_name)
+                
+                # Store metadata
+                if field_name not in self.field_metadata:
+                    self.field_metadata[field_name] = {
+                        'category': category,
+                        'aliases': aliases,
+                        'simulations': set(),
+                        'timesteps': 0,
+                        'has_data': False
+                    }
+                
+                # Track which simulations have this field
+                self.field_metadata[field_name]['simulations'].add(summary['name'])
+                
+                # Check if field has valid data
+                stats = summary['field_stats'][field_name]
+                if stats['mean'] and len(stats['mean']) > 0:
+                    self.field_metadata[field_name]['has_data'] = True
+                    self.field_metadata[field_name]['timesteps'] = max(
+                        self.field_metadata[field_name]['timesteps'],
+                        len(stats['mean'])
+                    )
+        
+        return self.get_field_availability_report()
+    
+    def get_field_availability_report(self):
+        """Generate report of field availability across simulations"""
+        report = {
+            'total_fields': len(self.all_fields),
+            'fields_by_category': {},
+            'coverage_stats': {}
+        }
+        
+        # Count fields by category
+        for category, fields in self.field_categories.items():
+            if fields:
+                report['fields_by_category'][category] = {
+                    'count': len(fields),
+                    'fields': sorted(fields)
+                }
+        
+        # Calculate coverage statistics
+        for field_name, metadata in self.field_metadata.items():
+            sim_count = len(metadata['simulations'])
+            coverage = sim_count / max(len(self.field_metadata), 1)
+            
+            report['coverage_stats'][field_name] = {
+                'simulation_count': sim_count,
+                'coverage_percentage': coverage * 100,
+                'has_data': metadata['has_data']
+            }
+        
+        return report
+    
+    def get_fields_by_category(self, category=None):
+        """Get fields filtered by category"""
+        if category and category in self.field_categories:
+            return sorted(self.field_categories[category])
+        elif category == 'all':
+            return sorted(self.all_fields)
+        else:
+            # Return all fields grouped by category
+            grouped = {}
+            for cat, fields in self.field_categories.items():
+                if fields:
+                    grouped[cat] = sorted(fields)
+            return grouped
+    
+    def suggest_alternative_fields(self, field_name, available_fields):
+        """Suggest alternative fields if requested field is not available"""
+        suggestions = []
+        
+        # Try to find by category
+        if field_name in self.field_metadata:
+            category = self.field_metadata[field_name]['category']
+            category_fields = self.field_categories[category]
+            suggestions.extend([f for f in category_fields if f in available_fields])
+        
+        # Try to find by aliases
+        for alias in self.field_aliases.keys():
+            if alias in field_name.lower():
+                target_category = self.field_aliases[alias]
+                for cat_field in self.field_categories.get(target_category, []):
+                    if cat_field in available_fields:
+                        suggestions.append(cat_field)
+        
+        return list(set(suggestions))[:5]  # Return top 5 suggestions
+
+# =============================================
 # UNIFIED DATA LOADER WITH ENHANCED CAPABILITIES
 # =============================================
 class UnifiedFEADataLoader:
@@ -85,6 +300,7 @@ class UnifiedFEADataLoader:
         self.field_statistics = {}
         self.available_fields = set()
         self.mesh_info = {}
+        self.field_manager = FieldManager()
         
     def parse_folder_name(self, folder: str):
         """q0p5mJ-delta4p2ns → (0.5, 4.2)"""
@@ -236,6 +452,10 @@ class UnifiedFEADataLoader:
             # Validate mesh consistency
             if load_full_mesh:
                 _self._validate_mesh_consistency(simulations)
+            
+            # Discover and categorize fields
+            field_report = _self.field_manager.discover_fields_from_summaries(summaries)
+            st.info(f"📊 Discovered {field_report['total_fields']} fields across {len(simulations)} simulations")
         
         return simulations, summaries
     
@@ -550,6 +770,7 @@ class EnhancedPhysicsInformedAttentionExtrapolator:
         
         Returns:
             np.array: Interpolated field values (n_points or n_points x components).
+            list: List of used sources with metadata.
         """
         if not self.fitted or len(attention_weights) == 0:
             return None, []
@@ -873,425 +1094,69 @@ class EnhancedVisualizer:
             )
     
     @staticmethod
-    def create_sunburst_chart(summaries, selected_field='temperature', highlight_sim=None):
-        """Create enhanced sunburst chart with highlighted target simulation"""
-        labels = []
-        parents = []
-        values = []
-        colors = []
+    def create_field_summary_chart(field_manager):
+        """Create chart showing field distribution by category"""
+        categories = {}
+        for category, fields in field_manager.field_categories.items():
+            if fields:
+                categories[category] = len(fields)
         
-        # Root node
-        labels.append("All Simulations")
-        parents.append("")
-        values.append(len(summaries))
-        colors.append("#1f77b4")
-        
-        # Group by energy first
-        energy_groups = {}
-        for summary in summaries:
-            energy_key = f"{summary['energy']:.1f} mJ"
-            if energy_key not in energy_groups:
-                energy_groups[energy_key] = []
-            energy_groups[energy_key].append(summary)
-        
-        # Add energy level nodes
-        for energy_key, energy_sims in energy_groups.items():
-            labels.append(f"Energy: {energy_key}")
-            parents.append("All Simulations")
-            values.append(len(energy_sims))
-            colors.append("#ff7f0e" if highlight_sim and any(s['name'] == highlight_sim for s in energy_sims) else "#2ca02c")
-            
-            # Add duration nodes for each energy group
-            for summary in energy_sims:
-                duration_key = f"τ: {summary['duration']:.1f} ns"
-                sim_label = f"{summary['name']}"
-                labels.append(sim_label)
-                parents.append(f"Energy: {energy_key}")
-                values.append(1)
-                
-                # Highlight target simulation
-                if highlight_sim and summary['name'] == highlight_sim:
-                    colors.append("#d62728")  # Red for target
-                else:
-                    colors.append("#9467bd")  # Purple for others
-                
-                # Add field statistics if available
-                if selected_field in summary['field_stats']:
-                    stats = summary['field_stats'][selected_field]
-                    if stats['max']:
-                        avg_max = np.mean(stats['max'])
-                        field_label = f"{selected_field}: {avg_max:.1f}"
-                        labels.append(field_label)
-                        parents.append(sim_label)
-                        values.append(avg_max if avg_max > 0 else 1e-6)
-                        colors.append("#8c564b")  # Brown for field values
-        
-        # Ensure all values are positive
-        values = [max(v, 1e-6) for v in values]
-        
-        fig = go.Figure(go.Sunburst(
-            labels=labels,
-            parents=parents,
-            values=values,
-            branchvalues="total",
-            marker=dict(
-                colors=colors,
-                colorscale='Viridis',
-                line=dict(width=2, color='white')
-            ),
-            hovertemplate='<b>%{label}</b><br>Value: %{value:.2f}<br>Parent: %{parent}<extra></extra>',
-            textinfo="label+value",
-            textfont=dict(size=12)
-        ))
-        
-        title = f"Simulation Hierarchy - {selected_field}"
-        if highlight_sim:
-            title += f" (Target: {highlight_sim})"
-        
-        fig.update_layout(
-            title=title,
-            height=700,
-            margin=dict(t=50, b=20, l=20, r=20)
-        )
-        
-        return fig
-    
-    @staticmethod
-    def create_radar_chart(summaries, simulation_names, target_sim=None):
-        """Create enhanced radar chart with highlighted target simulation"""
-        # Determine available fields
-        all_fields = set()
-        for summary in summaries:
-            all_fields.update(summary['field_stats'].keys())
-        
-        if not all_fields:
+        if not categories:
             return go.Figure()
         
-        # Select top 6 fields for clarity
-        selected_fields = list(all_fields)[:6]
-        
-        fig = go.Figure()
-        
-        for sim_name in simulation_names:
-            # Find summary
-            summary = next((s for s in summaries if s['name'] == sim_name), None)
-            if not summary:
-                continue
-            
-            r_values = []
-            theta_values = []
-            
-            for field in selected_fields:
-                if field in summary['field_stats']:
-                    stats = summary['field_stats'][field]
-                    # Use mean value across timesteps
-                    if stats['mean']:
-                        avg_value = np.mean(stats['mean'])
-                        r_values.append(avg_value if avg_value > 0 else 1e-6)
-                        theta_values.append(f"{field[:15]}...")
-                    else:
-                        r_values.append(1e-6)
-                        theta_values.append(f"{field[:15]}...")
-                else:
-                    r_values.append(1e-6)
-                    theta_values.append(f"{field[:15]}...")
-            
-            # Highlight target simulation
-            line_width = 4 if target_sim and sim_name == target_sim else 2
-            fill_opacity = 0.6 if target_sim and sim_name == target_sim else 0.3
-            color = 'red' if target_sim and sim_name == target_sim else None
-            
-            fig.add_trace(go.Scatterpolar(
-                r=r_values,
-                theta=theta_values,
-                fill='toself',
-                name=sim_name,
-                line=dict(width=line_width, color=color),
-                fillcolor=f'rgba(255,0,0,{fill_opacity})' if color else None,
-                opacity=0.8
-            ))
-        
-        if fig.data:
-            # Find maximum value for scaling
-            max_values = []
-            for trace in fig.data:
-                max_values.append(max(trace.r))
-            
-            if max_values:
-                max_r = max(max_values)
-                
-                # Add circular grid lines
-                fig.update_layout(
-                    polar=dict(
-                        radialaxis=dict(
-                            visible=True,
-                            range=[0, max_r * 1.2],
-                            tickfont=dict(size=10),
-                            gridcolor='lightgray',
-                            linecolor='gray'
-                        ),
-                        angularaxis=dict(
-                            tickfont=dict(size=11),
-                            rotation=90,
-                            direction="clockwise"
-                        ),
-                        bgcolor='white',
-                        gridshape='circular'
-                    ),
-                    showlegend=True,
-                    title="Radar Chart: Simulation Comparison",
-                    height=600,
-                    legend=dict(
-                        yanchor="top",
-                        y=0.99,
-                        xanchor="left",
-                        x=1.05
-                    )
-                )
-        
-        return fig
-    
-    @staticmethod
-    def create_attention_heatmap_3d(attention_weights, source_metadata):
-        """Create 3D heatmap of attention weights"""
-        if len(attention_weights) == 0:
-            return go.Figure()
-        
-        # Extract metadata for 3D coordinates
-        energies = []
-        durations = []
-        times = []
-        
-        for meta in source_metadata:
-            energies.append(meta['energy'])
-            durations.append(meta['duration'])
-            times.append(meta['time'])
-        
-        energies = np.array(energies)
-        durations = np.array(durations)
-        times = np.array(times)
-        
-        # Create 3D scatter plot with attention weights as color
-        fig = go.Figure(data=go.Scatter3d(
-            x=energies,
-            y=durations,
-            z=times,
-            mode='markers',
-            marker=dict(
-                size=10,
-                color=attention_weights,
-                colorscale='Viridis',
-                opacity=0.8,
-                colorbar=dict(
-                    title="Attention Weight",
-                    thickness=20,
-                    len=0.5
-                ),
-                showscale=True
-            ),
-            text=[f"E: {e:.1f} mJ<br>τ: {d:.1f} ns<br>t: {t:.1f} ns<br>Weight: {w:.4f}" 
-                  for e, d, t, w in zip(energies, durations, times, attention_weights)],
-            hovertemplate='%{text}<extra></extra>'
-        ))
-        
-        fig.update_layout(
-            title="3D Attention Weight Distribution",
-            scene=dict(
-                xaxis_title="Energy (mJ)",
-                yaxis_title="Duration (ns)",
-                zaxis_title="Time (ns)",
-                camera=dict(
-                    eye=dict(x=1.5, y=1.5, z=1.5)
-                )
-            ),
-            height=600,
-            margin=dict(l=0, r=0, t=40, b=0)
-        )
-        
-        return fig
-    
-    @staticmethod
-    def create_attention_network(attention_weights, source_metadata, top_k=10):
-        """Create network graph of attention relationships"""
-        if len(attention_weights) == 0 or len(source_metadata) == 0:
-            return go.Figure()
-        
-        # Aggregate attention by simulation
-        sim_attention = {}
-        for idx, (weight, meta) in enumerate(zip(attention_weights, source_metadata)):
-            sim_key = meta['name']
-            if sim_key not in sim_attention:
-                sim_attention[sim_key] = []
-            sim_attention[sim_key].append(weight)
-        
-        # Average attention per simulation
-        avg_attention = {k: np.mean(v) for k, v in sim_attention.items()}
-        
-        # Get top-k simulations
-        sorted_sims = sorted(avg_attention.items(), key=lambda x: x[1], reverse=True)[:top_k]
-        
-        if not sorted_sims:
-            return go.Figure()
-        
-        # Create network graph
-        G = nx.Graph()
-        G.add_node("QUERY", size=50, color='red', label="Query")
-        
-        # Add simulation nodes
-        for i, (sim_name, weight) in enumerate(sorted_sims):
-            node_id = f"SIM_{i}"
-            # Find metadata for this simulation
-            sim_meta = next((m for m in source_metadata if m['name'] == sim_name), None)
-            
-            G.add_node(node_id,
-                      size=30 * weight / max(avg_attention.values()),
-                      color='blue',
-                      label=sim_name,
-                      energy=sim_meta['energy'] if sim_meta else 0,
-                      duration=sim_meta['duration'] if sim_meta else 0,
-                      weight=weight)
-            
-            # Add edge from query to simulation
-            G.add_edge("QUERY", node_id, weight=weight, width=3 * weight)
-        
-        # Spring layout for node positions
-        pos = nx.spring_layout(G, seed=42, k=2)
-        
-        # Create edge traces
-        edge_x = []
-        edge_y = []
-        edge_text = []
-        
-        for edge in G.edges():
-            x0, y0 = pos[edge[0]]
-            x1, y1 = pos[edge[1]]
-            edge_x.extend([x0, x1, None])
-            edge_y.extend([y0, y1, None])
-            
-            weight = G[edge[0]][edge[1]]['weight']
-            edge_text.append(f"Attention: {weight:.3f}")
-        
-        edge_trace = go.Scatter(
-            x=edge_x, y=edge_y,
-            line=dict(width=2, color='gray'),
-            hoverinfo='none',
-            mode='lines'
-        )
-        
-        # Create node traces
-        node_x = []
-        node_y = []
-        node_text = []
-        node_size = []
-        node_color = []
-        
-        for node in G.nodes():
-            x, y = pos[node]
-            node_x.append(x)
-            node_y.append(y)
-            
-            if node == "QUERY":
-                node_text.append("QUERY")
-                node_size.append(30)
-                node_color.append('red')
-            else:
-                sim_data = G.nodes[node]
-                energy = sim_data.get('energy', 0)
-                duration = sim_data.get('duration', 0)
-                weight = sim_data.get('weight', 0)
-                
-                node_text.append(
-                    f"Simulation: {sim_data['label']}<br>"
-                    f"Energy: {energy:.1f} mJ<br>"
-                    f"Duration: {duration:.1f} ns<br>"
-                    f"Attention: {weight:.3f}"
-                )
-                node_size.append(sim_data['size'] + 10)
-                node_color.append('blue')
-        
-        node_trace = go.Scatter(
-            x=node_x, y=node_y,
-            mode='markers+text',
-            text=[n if n == "QUERY" else f"Sim{i}" for i, n in enumerate(G.nodes()) if n != "QUERY"],
-            textposition="middle center",
-            hoverinfo='text',
-            hovertext=node_text,
-            marker=dict(
-                size=node_size,
-                color=node_color,
-                line=dict(width=2, color='white')
+        fig = go.Figure(data=[
+            go.Bar(
+                x=list(categories.keys()),
+                y=list(categories.values()),
+                text=list(categories.values()),
+                textposition='auto',
+                marker_color='lightblue'
             )
+        ])
+        
+        fig.update_layout(
+            title="Field Distribution by Category",
+            xaxis_title="Category",
+            yaxis_title="Number of Fields",
+            height=400
         )
         
-        fig = go.Figure(data=[edge_trace, node_trace])
+        return fig
+    
+    @staticmethod
+    def create_field_coverage_chart(field_manager):
+        """Create chart showing field coverage across simulations"""
+        coverage_data = []
+        for field_name, metadata in field_manager.field_metadata.items():
+            coverage_data.append({
+                'field': field_name,
+                'simulations': len(metadata['simulations']),
+                'has_data': metadata['has_data']
+            })
+        
+        if not coverage_data:
+            return go.Figure()
+        
+        df = pd.DataFrame(coverage_data)
+        df = df.sort_values('simulations', ascending=False).head(20)  # Top 20 fields
+        
+        fig = go.Figure(data=[
+            go.Bar(
+                x=df['field'],
+                y=df['simulations'],
+                text=df['simulations'],
+                textposition='auto',
+                marker_color=['green' if h else 'orange' for h in df['has_data']]
+            )
+        ])
+        
         fig.update_layout(
-            title=f"Attention Network (Top {len(sorted_sims)} Simulations)",
-            showlegend=False,
-            hovermode='closest',
-            margin=dict(b=0, l=0, r=0, t=40),
+            title="Field Coverage Across Simulations (Top 20)",
+            xaxis_title="Field Name",
+            yaxis_title="Number of Simulations",
             height=500,
-            plot_bgcolor='white',
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+            xaxis_tickangle=-45
         )
-        
-        return fig
-    
-    @staticmethod
-    def create_field_evolution_comparison(summaries, simulation_names, selected_field, target_sim=None):
-        """Create enhanced field evolution comparison plot"""
-        fig = go.Figure()
-        
-        for sim_name in simulation_names:
-            summary = next((s for s in summaries if s['name'] == sim_name), None)
-            
-            if summary and selected_field in summary['field_stats']:
-                stats = summary['field_stats'][selected_field]
-                
-                # Highlight target simulation
-                line_width = 4 if target_sim and sim_name == target_sim else 2
-                line_dash = 'solid' if target_sim and sim_name == target_sim else 'dash'
-                
-                # Plot mean
-                fig.add_trace(go.Scatter(
-                    x=summary['timesteps'],
-                    y=stats['mean'],
-                    mode='lines+markers',
-                    name=f"{sim_name} (mean)",
-                    line=dict(width=line_width, dash=line_dash),
-                    opacity=0.8
-                ))
-                
-                # Add confidence band (mean ± std)
-                if stats['std']:
-                    y_upper = np.array(stats['mean']) + np.array(stats['std'])
-                    y_lower = np.array(stats['mean']) - np.array(stats['std'])
-                    
-                    fig.add_trace(go.Scatter(
-                        x=summary['timesteps'] + summary['timesteps'][::-1],
-                        y=np.concatenate([y_upper, y_lower[::-1]]),
-                        fill='toself',
-                        fillcolor=f'rgba(128,128,128,{0.1 if target_sim and sim_name == target_sim else 0.05})',
-                        line=dict(color='rgba(255,255,255,0)'),
-                        showlegend=False,
-                        name=f"{sim_name} ± std"
-                    ))
-        
-        if fig.data:
-            fig.update_layout(
-                title=f"{selected_field} Evolution Comparison",
-                xaxis_title="Timestep (ns)",
-                yaxis_title=f"{selected_field} Value",
-                hovermode="x unified",
-                height=500,
-                showlegend=True,
-                legend=dict(
-                    yanchor="top",
-                    y=0.99,
-                    xanchor="left",
-                    x=1.02
-                )
-            )
         
         return fig
 
@@ -1391,6 +1256,13 @@ def main():
         transform: translateY(-2px);
         box-shadow: 0 5px 15px rgba(0,0,0,0.2);
     }
+    .field-category {
+        background-color: #f0f8ff;
+        padding: 0.5rem;
+        margin: 0.25rem 0;
+        border-radius: 5px;
+        border-left: 4px solid #3498db;
+    }
     </style>
     """, unsafe_allow_html=True)
     
@@ -1409,14 +1281,16 @@ def main():
         st.session_state.last_field = None
         st.session_state.last_timestep = 0
         st.session_state.cache_cleared = False
+        st.session_state.field_category_filter = "all"
+        st.session_state.show_all_fields = False
     
     # Sidebar
     with st.sidebar:
         st.markdown("### ⚙️ Navigation")
         app_mode = st.radio(
             "Select Mode",
-            ["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis"],
-            index=["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis"].index(
+            ["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis", "Field Explorer"],
+            index=["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis", "Field Explorer"].index(
                 st.session_state.current_mode if 'current_mode' in st.session_state else "Data Viewer"
             ),
             key="nav_mode"
@@ -1442,6 +1316,10 @@ def main():
         st.session_state.debug_mode = st.checkbox("🔧 Debug Mode", value=False,
                                                  help="Show debug information and raw data")
         
+        # Field display options
+        st.session_state.show_all_fields = st.checkbox("📋 Show All Fields", value=False,
+                                                      help="Show all fields in dropdowns (may be slow)")
+        
         # Cache management
         col1, col2 = st.columns(2)
         with col1:
@@ -1454,8 +1332,8 @@ def main():
                 st.rerun()
         
         with col2:
-            if st.button("🔄 Reload Data", type="primary", use_container_width=True):
-                with st.spinner("Reloading data..."):
+            if st.button("🔄 Load/Reload Data", type="primary", use_container_width=True):
+                with st.spinner("Loading all simulation data..."):
                     # Clear cache and reload
                     st.cache_data.clear()
                     simulations, summaries = st.session_state.data_loader.load_all_simulations(
@@ -1467,24 +1345,60 @@ def main():
                     if simulations and summaries:
                         st.session_state.extrapolator.load_summaries(summaries)
                         st.session_state.data_loaded = True
-                        st.session_state.available_fields = set()
-                        for summary in summaries:
-                            st.session_state.available_fields.update(summary['field_stats'].keys())
-                        st.success("Data reloaded successfully!")
+                        
+                        # Discover and categorize all fields
+                        field_report = st.session_state.data_loader.field_manager.discover_fields_from_summaries(summaries)
+                        
+                        # Store field information in session state
+                        st.session_state.all_fields = sorted(st.session_state.data_loader.field_manager.all_fields)
+                        st.session_state.field_categories = st.session_state.data_loader.field_manager.field_categories
+                        st.session_state.field_metadata = st.session_state.data_loader.field_manager.field_metadata
+                        
+                        # Store field coverage report
+                        st.session_state.field_coverage = field_report
+                        
+                        st.success(f"✅ Data loaded successfully! Found {len(st.session_state.all_fields)} unique fields.")
         
         if st.session_state.data_loaded:
             st.markdown("---")
-            st.markdown("### 📈 Loaded Data")
+            st.markdown("### 📈 Loaded Data Overview")
             
-            with st.expander("Data Overview", expanded=True):
+            with st.expander("📊 Data Statistics", expanded=True):
                 st.metric("Simulations", len(st.session_state.simulations))
-                st.metric("Available Fields", len(st.session_state.available_fields))
+                st.metric("Total Fields", len(st.session_state.all_fields))
                 
                 if st.session_state.summaries:
                     energies = [s['energy'] for s in st.session_state.summaries]
                     durations = [s['duration'] for s in st.session_state.summaries]
                     st.metric("Energy Range", f"{min(energies):.1f} - {max(energies):.1f} mJ")
                     st.metric("Duration Range", f"{min(durations):.1f} - {max(durations):.1f} ns")
+            
+            # Field category filter for dropdowns
+            st.markdown("### 🔍 Field Filter")
+            category_options = ["all"] + [cat for cat in st.session_state.field_categories.keys() 
+                                         if st.session_state.field_categories[cat]]
+            st.session_state.field_category_filter = st.selectbox(
+                "Filter by Category",
+                category_options,
+                index=0,
+                help="Filter fields by category in dropdowns"
+            )
+            
+            # Field explorer in sidebar
+            with st.expander("📋 Available Fields", expanded=False):
+                if 'field_coverage' in st.session_state:
+                    report = st.session_state.field_coverage
+                    st.write(f"**Total Fields:** {report['total_fields']}")
+                    
+                    for category, info in report['fields_by_category'].items():
+                        with st.expander(f"📁 {category.title()} ({info['count']} fields)"):
+                            for field in info['fields']:
+                                coverage = report['coverage_stats'].get(field, {})
+                                sim_count = coverage.get('simulation_count', 0)
+                                has_data = coverage.get('has_data', False)
+                                
+                                status_icon = "✅" if has_data else "⚠️"
+                                st.write(f"{status_icon} **{field}** ({sim_count} sims)")
     
     # Main content based on selected mode
     if app_mode == "Data Viewer":
@@ -1493,6 +1407,8 @@ def main():
         render_interpolation_extrapolation()
     elif app_mode == "Comparative Analysis":
         render_comparative_analysis()
+    elif app_mode == "Field Explorer":
+        render_field_explorer()
 
 def render_data_viewer():
     """Render the enhanced data visualization interface"""
@@ -1552,21 +1468,71 @@ fea_solutions/
         st.error("No field data available for this simulation.")
         return
     
-    # Field and timestep selection with enhanced error handling
+    # Enhanced field selection with categories
+    st.markdown('<h3 class="sub-header">🎯 Field Selection</h3>', unsafe_allow_html=True)
+    
+    # Get available fields in this simulation
+    sim_fields = sorted(sim['field_info'].keys())
+    
+    # Filter fields by category if requested
+    if st.session_state.field_category_filter != "all":
+        category_fields = st.session_state.field_categories.get(
+            st.session_state.field_category_filter, set()
+        )
+        sim_fields = [f for f in sim_fields if f in category_fields]
+    
+    if not sim_fields:
+        st.warning(f"No fields found in category '{st.session_state.field_category_filter}' for this simulation.")
+        st.info("Try changing the category filter or selecting a different simulation.")
+        return
+    
+    # Display field selection in columns for better organization
     col1, col2, col3 = st.columns(3)
+    
     with col1:
+        # Field category information
+        st.markdown("**Field Information:**")
+        st.write(f"**Total fields in sim:** {len(sim_fields)}")
+        
+        # Show field categories present in this simulation
+        field_categories_in_sim = defaultdict(list)
+        for field in sim_fields:
+            if field in st.session_state.field_metadata:
+                category = st.session_state.field_metadata[field]['category']
+                field_categories_in_sim[category].append(field)
+        
+        if field_categories_in_sim:
+            st.markdown("**Categories in this simulation:**")
+            for category, fields in field_categories_in_sim.items():
+                st.write(f"• {category.title()}: {len(fields)} fields")
+    
+    with col2:
+        # Main field selection dropdown
         try:
-            available_fields = sorted(sim['field_info'].keys())
-            if not available_fields:
-                st.error("No fields available in this simulation.")
-                return
+            # Format field names with category information
+            field_options = []
+            for field in sim_fields:
+                if field in st.session_state.field_metadata:
+                    category = st.session_state.field_metadata[field]['category']
+                    field_type = sim['field_info'][field][0]
+                    display_name = f"{field} ({category}, {field_type})"
+                else:
+                    display_name = field
+                field_options.append((field, display_name))
             
-            field = st.selectbox(
+            # Sort by display name
+            field_options.sort(key=lambda x: x[1])
+            
+            # Create selection with enhanced display
+            selected_field_display = st.selectbox(
                 "Select Field",
-                available_fields,
+                options=[opt[1] for opt in field_options],
                 key="viewer_field_select",
                 help="Choose a field to visualize"
             )
+            
+            # Extract actual field name from selection
+            field = next(opt[0] for opt in field_options if opt[1] == selected_field_display)
             
             # Store last field for change detection
             if field != st.session_state.get('last_field'):
@@ -1574,12 +1540,13 @@ fea_solutions/
                 # Clear field-specific cache
                 if 'field_cache' in st.session_state:
                     del st.session_state.field_cache
-        except KeyError as e:
+        except (KeyError, StopIteration) as e:
             st.error(f"Error accessing field information: {e}")
             st.info("Try reloading the data or selecting a different simulation.")
             return
     
-    with col2:
+    with col3:
+        # Timestep selection
         timestep = st.slider(
             "Timestep",
             0, sim['n_timesteps'] - 1, 0,
@@ -1587,17 +1554,43 @@ fea_solutions/
             help="Select timestep to display"
         )
         
-        # Store last timestep for change detection
-        if timestep != st.session_state.get('last_timestep'):
-            st.session_state.last_timestep = timestep
-    
-    with col3:
+        # Visualization options
         colormap = st.selectbox(
             "Colormap",
             EnhancedVisualizer.EXTENDED_COLORMAPS,
             index=EnhancedVisualizer.EXTENDED_COLORMAPS.index(st.session_state.selected_colormap),
             key="viewer_colormap"
         )
+        
+        # Store last timestep for change detection
+        if timestep != st.session_state.get('last_timestep'):
+            st.session_state.last_timestep = timestep
+    
+    # Field information panel
+    with st.expander("📋 Field Details", expanded=True):
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if field in st.session_state.field_metadata:
+                metadata = st.session_state.field_metadata[field]
+                st.write(f"**Category:** {metadata['category'].title()}")
+                st.write(f"**Simulations with field:** {len(metadata['simulations'])}")
+        
+        with col2:
+            if field in sim['field_info']:
+                field_type, components = sim['field_info'][field]
+                st.write(f"**Type:** {field_type}")
+                st.write(f"**Components:** {components}")
+        
+        with col3:
+            # Quick field statistics
+            if field in sim['fields']:
+                data = sim['fields'][field][timestep]
+                if data.ndim == 1:
+                    clean_data = data[~np.isnan(data)]
+                    if len(clean_data) > 0:
+                        st.write(f"**Min:** {clean_data.min():.3f}")
+                        st.write(f"**Max:** {clean_data.max():.3f}")
     
     # Main 3D visualization with enhanced error handling
     try:
@@ -2317,24 +2310,47 @@ def render_3d_interpolation_visualization(results, time_points, energy_query, du
         st.warning("No predicted fields available for 3D rendering.")
         return
     
+    # Enhanced field selection with categories
     col1, col2, col3 = st.columns(3)
     
     with col1:
         try:
-            selected_field_3d = st.selectbox(
+            # Filter fields by category if requested
+            filtered_fields = available_fields
+            if st.session_state.field_category_filter != "all":
+                category_fields = st.session_state.field_categories.get(
+                    st.session_state.field_category_filter, set()
+                )
+                filtered_fields = [f for f in available_fields if f in category_fields]
+            
+            if not filtered_fields:
+                st.warning(f"No fields found in category '{st.session_state.field_category_filter}' for prediction.")
+                st.info("Try changing the category filter or selecting different parameters.")
+                return
+            
+            # Format field names with category information
+            field_options = []
+            for field in filtered_fields:
+                if field in st.session_state.field_metadata:
+                    category = st.session_state.field_metadata[field]['category']
+                    display_name = f"{field} ({category})"
+                else:
+                    display_name = field
+                field_options.append((field, display_name))
+            
+            # Sort by display name
+            field_options.sort(key=lambda x: x[1])
+            
+            # Create selection with enhanced display
+            selected_field_display = st.selectbox(
                 "Select Field for 3D Rendering", 
-                available_fields, 
+                options=[opt[1] for opt in field_options],
                 key="interp_3d_field",
                 help="Choose a field to visualize in 3D"
             )
             
-            # Check field availability in simulations
-            available_simulations, missing_in = EnhancedCacheManager.validate_data_consistency(
-                st.session_state.simulations, selected_field_3d
-            )
-            
-            if missing_in:
-                st.warning(f"Field '{selected_field_3d}' not available in {len(missing_in)} simulations.")
+            # Extract actual field name from selection
+            selected_field_3d = next(opt[0] for opt in field_options if opt[1] == selected_field_display)
             
         except Exception as e:
             st.error(f"Error selecting field: {str(e)}")
@@ -2369,6 +2385,14 @@ def render_3d_interpolation_visualization(results, time_points, energy_query, du
     # Get attention weights for selected timestep
     if timestep_idx_3d < len(results['attention_maps']):
         attention_weights_3d = results['attention_maps'][timestep_idx_3d]
+        
+        # Check field availability in simulations
+        available_simulations, missing_in = EnhancedCacheManager.validate_data_consistency(
+            st.session_state.simulations, selected_field_3d
+        )
+        
+        if missing_in:
+            st.warning(f"Field '{selected_field_3d}' not available in {len(missing_in)} simulations.")
         
         # Compute interpolated field with enhanced error handling
         try:
@@ -2637,7 +2661,7 @@ def render_comparative_analysis():
         st.info("Please select at least one simulation for comparison.")
         return
     
-    # Field selection
+    # Field selection with enhanced dropdown
     st.markdown('<h3 class="sub-header">📈 Select Field for Analysis</h3>', unsafe_allow_html=True)
     
     # Get available fields from selected simulations
@@ -2650,12 +2674,42 @@ def render_comparative_analysis():
         st.error("No field data available for selected simulations.")
         return
     
-    selected_field = st.selectbox(
+    # Filter fields by category if requested
+    filtered_fields = sorted(available_fields)
+    if st.session_state.field_category_filter != "all":
+        category_fields = st.session_state.field_categories.get(
+            st.session_state.field_category_filter, set()
+        )
+        filtered_fields = [f for f in filtered_fields if f in category_fields]
+    
+    if not filtered_fields:
+        st.warning(f"No fields found in category '{st.session_state.field_category_filter}' for selected simulations.")
+        st.info("Try changing the category filter or selecting different simulations.")
+        return
+    
+    # Enhanced field selection with categories
+    field_options = []
+    for field in filtered_fields:
+        if field in st.session_state.field_metadata:
+            category = st.session_state.field_metadata[field]['category']
+            display_name = f"{field} ({category})"
+        else:
+            display_name = field
+        field_options.append((field, display_name))
+    
+    # Sort by display name
+    field_options.sort(key=lambda x: x[1])
+    
+    # Create selection with enhanced display
+    selected_field_display = st.selectbox(
         "Select field for analysis",
-        sorted(available_fields),
+        options=[opt[1] for opt in field_options],
         key="comparison_field",
         help="Choose a field to compare across simulations"
     )
+    
+    # Extract actual field name from selection
+    selected_field = next(opt[0] for opt in field_options if opt[1] == selected_field_display)
     
     # Visualization tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Sunburst", "🎯 Radar", "⏱️ Evolution", "🌐 3D Analysis"])
@@ -2775,6 +2829,224 @@ def render_comparative_analysis():
                 )
                 
                 st.plotly_chart(fig_3d, use_container_width=True)
+
+def render_field_explorer():
+    """Render the field explorer interface"""
+    st.markdown('<h2 class="sub-header">🔍 Field Explorer</h2>', unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first to explore fields.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    # Display field statistics
+    st.markdown('<h3 class="sub-header">📊 Field Statistics Overview</h3>', unsafe_allow_html=True)
+    
+    if 'field_coverage' in st.session_state:
+        report = st.session_state.field_coverage
+        
+        # Summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Fields", report['total_fields'])
+        with col2:
+            st.metric("Simulations", len(st.session_state.simulations))
+        with col3:
+            # Calculate average fields per simulation
+            fields_per_sim = np.mean([len(sim['field_info']) for sim in st.session_state.simulations.values()])
+            st.metric("Avg Fields/Sim", f"{fields_per_sim:.1f}")
+        with col4:
+            # Calculate field coverage
+            total_sims = len(st.session_state.simulations)
+            avg_coverage = np.mean([stats['coverage_percentage'] 
+                                   for stats in report['coverage_stats'].values()])
+            st.metric("Avg Coverage", f"{avg_coverage:.1f}%")
+    
+    # Field distribution by category
+    st.markdown('<h3 class="sub-header">📁 Field Distribution by Category</h3>', unsafe_allow_html=True)
+    
+    fig_dist = st.session_state.visualizer.create_field_summary_chart(
+        st.session_state.data_loader.field_manager
+    )
+    if fig_dist.data:
+        st.plotly_chart(fig_dist, use_container_width=True)
+    
+    # Field coverage chart
+    st.markdown('<h3 class="sub-header">📈 Field Coverage Across Simulations</h3>', unsafe_allow_html=True)
+    
+    fig_cov = st.session_state.visualizer.create_field_coverage_chart(
+        st.session_state.data_loader.field_manager
+    )
+    if fig_cov.data:
+        st.plotly_chart(fig_cov, use_container_width=True)
+    
+    # Detailed field exploration
+    st.markdown('<h3 class="sub-header">🔍 Field Details Explorer</h3>', unsafe_allow_html=True)
+    
+    # Field search and filter
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        # Field search
+        search_term = st.text_input("Search fields", "", 
+                                   placeholder="Enter field name or keyword")
+    
+    with col2:
+        # Category filter
+        category_options = ["all"] + [cat for cat in st.session_state.field_categories.keys() 
+                                     if st.session_state.field_categories[cat]]
+        selected_category = st.selectbox(
+            "Filter by category",
+            category_options,
+            index=0
+        )
+    
+    with col3:
+        # Coverage filter
+        min_coverage = st.slider(
+            "Minimum coverage (%)",
+            0, 100, 0,
+            step=5,
+            help="Filter fields by minimum simulation coverage"
+        )
+    
+    # Get filtered fields
+    filtered_fields = []
+    for field_name, metadata in st.session_state.field_metadata.items():
+        # Apply category filter
+        if selected_category != "all" and metadata['category'] != selected_category:
+            continue
+        
+        # Apply search filter
+        if search_term and search_term.lower() not in field_name.lower():
+            continue
+        
+        # Apply coverage filter
+        coverage = report['coverage_stats'].get(field_name, {}).get('coverage_percentage', 0)
+        if coverage < min_coverage:
+            continue
+        
+        filtered_fields.append((field_name, metadata, coverage))
+    
+    # Sort fields
+    sort_option = st.selectbox(
+        "Sort by",
+        ["Name (A-Z)", "Name (Z-A)", "Coverage (High-Low)", "Coverage (Low-High)"]
+    )
+    
+    if sort_option == "Name (A-Z)":
+        filtered_fields.sort(key=lambda x: x[0])
+    elif sort_option == "Name (Z-A)":
+        filtered_fields.sort(key=lambda x: x[0], reverse=True)
+    elif sort_option == "Coverage (High-Low)":
+        filtered_fields.sort(key=lambda x: x[2], reverse=True)
+    elif sort_option == "Coverage (Low-High)":
+        filtered_fields.sort(key=lambda x: x[2])
+    
+    # Display filtered fields
+    if not filtered_fields:
+        st.info("No fields match the selected filters.")
+        return
+    
+    st.write(f"**Found {len(filtered_fields)} fields:**")
+    
+    # Pagination
+    items_per_page = 20
+    total_pages = max(1, (len(filtered_fields) + items_per_page - 1) // items_per_page)
+    
+    page_number = st.number_input(
+        "Page",
+        min_value=1,
+        max_value=total_pages,
+        value=1,
+        step=1
+    )
+    
+    start_idx = (page_number - 1) * items_per_page
+    end_idx = min(start_idx + items_per_page, len(filtered_fields))
+    
+    # Display fields for current page
+    for i in range(start_idx, end_idx):
+        field_name, metadata, coverage = filtered_fields[i]
+        
+        with st.expander(f"📊 {field_name}", expanded=False):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.write(f"**Category:** {metadata['category'].title()}")
+                st.write(f"**Coverage:** {coverage:.1f}%")
+            
+            with col2:
+                st.write(f"**Simulations:** {len(metadata['simulations'])}")
+                st.write(f"**Has Data:** {'✅' if metadata['has_data'] else '⚠️'}")
+            
+            with col3:
+                # Quick actions
+                if st.button(f"View {field_name}", key=f"view_{field_name}"):
+                    # Switch to Data Viewer mode and select a simulation with this field
+                    st.session_state.current_mode = "Data Viewer"
+                    # Find a simulation with this field
+                    for sim_name in metadata['simulations']:
+                        if sim_name in st.session_state.simulations:
+                            st.session_state.viewer_sim_select = sim_name
+                            st.session_state.viewer_field_select = field_name
+                            st.rerun()
+                            break
+    
+    # Field export options
+    st.markdown("---")
+    st.markdown("##### 💾 Export Field Information")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Export as CSV
+        export_data = []
+        for field_name, metadata, coverage in filtered_fields:
+            export_data.append({
+                'Field Name': field_name,
+                'Category': metadata['category'],
+                'Simulation Count': len(metadata['simulations']),
+                'Coverage (%)': coverage,
+                'Has Data': metadata['has_data'],
+                'Simulations': ', '.join(sorted(metadata['simulations'])[:5]) + 
+                              ('...' if len(metadata['simulations']) > 5 else '')
+            })
+        
+        df_export = pd.DataFrame(export_data)
+        csv = df_export.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Field List as CSV",
+            data=csv,
+            file_name="field_inventory.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    
+    with col2:
+        # Export as JSON
+        export_json = {}
+        for field_name, metadata, coverage in filtered_fields:
+            export_json[field_name] = {
+                'category': metadata['category'],
+                'simulation_count': len(metadata['simulations']),
+                'coverage_percentage': coverage,
+                'has_data': metadata['has_data'],
+                'simulations': list(metadata['simulations'])
+            }
+        
+        json_str = json.dumps(export_json, indent=2)
+        st.download_button(
+            label="📥 Download Field List as JSON",
+            data=json_str.encode('utf-8'),
+            file_name="field_inventory.json",
+            mime="application/json",
+            use_container_width=True
+        )
 
 if __name__ == "__main__":
     main()
