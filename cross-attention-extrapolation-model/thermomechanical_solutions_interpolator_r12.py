@@ -73,7 +73,7 @@ class UnifiedFEADataLoader:
             status_text.text(f"Loading {name}... ({len(vtu_files)} files)")
             try:
                 mesh0 = meshio.read(vtu_files[0])
-                if not mesh0.point_data:
+                if not mesh0.point_data:  # FIX: Properly check for point_data attribute
                     st.warning(f"No point data in {name}")
                     continue
                 
@@ -118,7 +118,7 @@ class UnifiedFEADataLoader:
                         try:
                             mesh = meshio.read(vtu_files[t])
                             for key in sim_data['field_info']:
-                                if key in mesh.point_data:
+                                if key in mesh.point_data:  # FIX: Properly check for field existence
                                     fields[key][t] = mesh.point_data[key].astype(np.float32)
                         except Exception as e:
                             st.warning(f"Error loading timestep {t} in {name}: {e}")
@@ -767,10 +767,10 @@ class EnhancedVisualizer:
                 opacity=0.8
             ))
         
-        if fig.
+        if fig.data:
             # Find maximum value for scaling
             max_values = []
-            for trace in fig.
+            for trace in fig.data:
                 max_values.append(max(trace.r))
             
             if max_values:
@@ -1028,7 +1028,7 @@ class EnhancedVisualizer:
                         name=f"{sim_name} ± std"
                     ))
         
-        if fig.
+        if fig.data:
             fig.update_layout(
                 title=f"{selected_field} Evolution Comparison",
                 xaxis_title="Timestep (ns)",
@@ -1194,7 +1194,7 @@ def main():
             )
         
         # Add warning for interpolation mode without full mesh
-        if st.session_state.current_mode == "Interpolation/Extrapolation" and not load_full_
+        if st.session_state.current_mode == "Interpolation/Extrapolation" and not load_full_data:
             st.warning("⚠️ Full mesh loading is required for 3D interpolation visualization. Please enable and reload.")
         
         if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
@@ -1958,7 +1958,7 @@ def render_attention_visualization(results, energy_query, duration_query, time_p
             attention_weights,
             st.session_state.extrapolator.source_metadata
         )
-        if heatmap_3d.
+        if heatmap_3d.data:
             st.plotly_chart(heatmap_3d, use_container_width=True)
         else:
             st.info("Insufficient data for 3D heatmap")
@@ -1971,7 +1971,7 @@ def render_attention_visualization(results, energy_query, duration_query, time_p
             st.session_state.extrapolator.source_metadata,
             top_k=8
         )
-        if network_fig.
+        if network_fig.data:
             st.plotly_chart(network_fig, use_container_width=True)
         else:
             st.info("Insufficient data for network visualization")
@@ -2014,7 +2014,7 @@ def render_attention_visualization(results, energy_query, duration_query, time_p
                     'Attention Weight': attention_weights[idx]
                 })
         
-        if top_sources_
+        if top_sources_data:
             df_top = pd.DataFrame(top_sources_data)
             st.dataframe(
                 df_top.style.format({
@@ -2549,7 +2549,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                     with open(tmp.name, 'rb') as f:
                         vtu_data = f.read()
                     b64 = base64.b64encode(vtu_data).decode()
-                    href = f'<a href="application/octet-stream;base64,{b64}" download="interpolated_{selected_field_3d}_t{selected_time_3d}.vtu">Download VTU File</a>'
+                    href = f'<a href="data:application/octet-stream;base64,{b64}" download="interpolated_{selected_field_3d}_t{selected_time_3d}.vtu">Download VTU File</a>'
                     st.markdown(href, unsafe_allow_html=True)
     with col2:
         # Export as NPZ file
@@ -2571,7 +2571,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
             with open(tmp.name, 'rb') as f:
                 npz_bytes = f.read()
             b64 = base64.b64encode(npz_bytes).decode()
-            href = f'<a href="application/octet-stream;base64,{b64}" download="interpolated_{selected_field_3d}_t{selected_time_3d}.npz">Download NPZ File</a>'
+            href = f'<a href="data:application/octet-stream;base64,{b64}" download="interpolated_{selected_field_3d}_t{selected_time_3d}.npz">Download NPZ File</a>'
             st.markdown(href, unsafe_allow_html=True)
 
 def render_comparative_analysis():
@@ -2683,7 +2683,7 @@ def render_comparative_analysis():
             selected_field,
             target_sim=target_simulation
         )
-        if evolution_fig.
+        if evolution_fig.data:
             st.plotly_chart(evolution_fig, use_container_width=True)
         else:
             st.info(f"No {selected_field} data available for selected simulations")
@@ -2805,7 +2805,7 @@ def render_comparative_analysis():
                 }
                 stats_data.append(row)
     
-    if stats_
+    if stats_data:
         df_stats = pd.DataFrame(stats_data)
         
         # Apply styling
@@ -2849,9 +2849,9 @@ def render_comparative_analysis():
                 target_data = [row for row in stats_data if row['Type'] == 'Target'][0]
                 comp_data = [row for row in stats_data if row['Type'] == 'Comparison']
                 
-                if target_data and comp_
+                if target_data and comp_data:
                     st.write("**Target vs Comparison Simulations:**")
-                    for comp in comp_
+                    for comp in comp_data:
                         energy_diff = abs(target_data['Energy (mJ)'] - comp['Energy (mJ)']) / target_data['Energy (mJ)']
                         duration_diff = abs(target_data['Duration (ns)'] - comp['Duration (ns)']) / target_data['Duration (ns)']
                         field_diff = abs(target_data[f'Mean {selected_field}'] - comp[f'Mean {selected_field}']) / target_data[f'Mean {selected_field}']
