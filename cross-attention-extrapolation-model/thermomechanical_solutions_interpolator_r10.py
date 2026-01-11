@@ -3499,7 +3499,7 @@ def render_3d_analysis(results, time_points, energy_query, duration_query):
                         size=8,
                         color='blue',
                         opacity=0.7,
-                        symbol='circle'
+                        symbol='circle'  # Valid 3D symbol
                     ),
                     name='Original Training Data',
                     hovertemplate='Original<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Max Temp: %{z:.1f}<extra></extra>'
@@ -3516,13 +3516,13 @@ def render_3d_analysis(results, time_points, energy_query, duration_query):
                         size=10,
                         color='magenta',
                         opacity=0.9,
-                        symbol='diamond'
+                        symbol='diamond'  # Valid 3D symbol
                     ),
                     name='Interpolated Training Data',
                     hovertemplate='Interpolated<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Max Temp: %{z:.1f}<extra></extra>'
                 ))
             
-            # Query point
+            # Query point - FIXED: Changed 'star' to a valid 3D symbol
             fig_temp.add_trace(go.Scatter3d(
                 x=[energy_query],
                 y=[duration_query],
@@ -3531,7 +3531,7 @@ def render_3d_analysis(results, time_points, energy_query, duration_query):
                 marker=dict(
                     size=12,
                     color='red',
-                    symbol='star'
+                    symbol='cross'  # FIXED: Changed from 'star' to 'cross' (valid for 3D)
                 ),
                 name='Query Point',
                 hovertemplate='Query<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Pred Temp: %{z:.1f}<extra></extra>'
@@ -3564,7 +3564,7 @@ def render_3d_analysis(results, time_points, energy_query, duration_query):
                         size=8,
                         color='blue',
                         opacity=0.7,
-                        symbol='circle'
+                        symbol='circle'  # Valid 3D symbol
                     ),
                     name='Original Training Data',
                     hovertemplate='Original<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Max Stress: %{z:.1f}<extra></extra>'
@@ -3581,13 +3581,13 @@ def render_3d_analysis(results, time_points, energy_query, duration_query):
                         size=10,
                         color='magenta',
                         opacity=0.9,
-                        symbol='diamond'
+                        symbol='diamond'  # Valid 3D symbol
                     ),
                     name='Interpolated Training Data',
                     hovertemplate='Interpolated<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Max Stress: %{z:.1f}<extra></extra>'
                 ))
             
-            # Query point
+            # Query point - FIXED: Changed 'star' to a valid 3D symbol
             fig_stress.add_trace(go.Scatter3d(
                 x=[energy_query],
                 y=[duration_query],
@@ -3596,7 +3596,7 @@ def render_3d_analysis(results, time_points, energy_query, duration_query):
                 marker=dict(
                     size=12,
                     color='red',
-                    symbol='star'
+                    symbol='cross'  # FIXED: Changed from 'star' to 'cross' (valid for 3D)
                 ),
                 name='Query Point',
                 hovertemplate='Query<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Pred Stress: %{z:.1f}<extra></extra>'
