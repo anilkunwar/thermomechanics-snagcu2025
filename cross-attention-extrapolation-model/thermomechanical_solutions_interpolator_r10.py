@@ -4,40 +4,20 @@ import glob
 import re
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
 import matplotlib.pyplot as plt
 import meshio
 import warnings
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple, Union
+from typing import List, Dict, Any, Optional, Tuple
 from io import BytesIO
 import pandas as pd
 import traceback
-from scipy.interpolate import griddata, RBFInterpolator, LinearNDInterpolator
+from scipy.interpolate import griddata, RBFInterpolator
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-from sklearn.cluster import KMeans, DBSCAN
-from scipy.spatial import KDTree, cKDTree, Delaunay, ConvexHull
-from scipy.spatial.distance import cdist, pdist, squareform
-from scipy import stats
-import scipy.ndimage as ndimage
-import scipy.sparse as sparse
-import scipy.sparse.linalg as splinalg
+import plotly.express as px
+from plotly.subplots import make_subplots
 import networkx as nx
-import json
-import base64
-from PIL import Image
-import io
-import hashlib
-from dataclasses import dataclass, field
-from enum import Enum
-import pickle
-import gzip
-import tempfile
-import zipfile
-from pathlib import Path
+from scipy.spatial.distance import cdist
 
 warnings.filterwarnings('ignore')
 
@@ -49,257 +29,305 @@ FEA_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "fea_solutions")
 os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 
 # =============================================
-# ENHANCED SPHERICAL GEOMETRY MANAGER
+# UNIFIED DATA LOADER WITH ENHANCED CAPABILITIES
 # =============================================
-class SphericalGeometryManager:
-    """Manages spherical geometry preservation during interpolation"""
+class UnifiedFEADataLoader:
+    """Enhanced data loader with comprehensive field extraction"""
     
     def __init__(self):
-        self.reference_spheres = {}
-        self.spherical_templates = {}
+        self.simulations = {}
+        self.summaries = []
+        self.field_statistics = {}
+        self.available_fields = set()
         
-    def create_spherical_template(self, points, resolution=50):
-        """Create a spherical template mesh from original points"""
-        if len(points) == 0:
-            return None
-        
-        # Compute centroid and radius statistics
-        centroid = np.mean(points, axis=0)
-        distances = np.linalg.norm(points - centroid, axis=1)
-        mean_radius = np.mean(distances)
-        
-        # Create spherical coordinates
-        # Convert Cartesian to spherical
-        x = points[:, 0] - centroid[0]
-        y = points[:, 1] - centroid[1]
-        z = points[:, 2] - centroid[2]
-        
-        r = np.sqrt(x**2 + y**2 + z**2)
-        theta = np.arccos(z / r)
-        phi = np.arctan2(y, x)
-        
-        # Normalize radial distances to unit sphere
-        normalized_r = r / mean_radius
-        normalized_phi = (phi + np.pi) / (2 * np.pi)  # [0, 1]
-        normalized_theta = theta / np.pi  # [0, 1]
-        
-        # Store spherical coordinates for each point
-        spherical_coords = np.column_stack([normalized_r, normalized_theta, normalized_phi])
-        
-        # Create uniform spherical grid for interpolation
-        phi_grid = np.linspace(0, 2*np.pi, resolution)
-        theta_grid = np.linspace(0, np.pi, resolution)
-        
-        PHI, THETA = np.meshgrid(phi_grid, theta_grid)
-        
-        # Convert back to Cartesian for uniform sphere
-        uniform_x = mean_radius * np.sin(THETA) * np.cos(PHI)
-        uniform_y = mean_radius * np.sin(THETA) * np.sin(PHI)
-        uniform_z = mean_radius * np.cos(THETA)
-        
-        uniform_points = np.column_stack([uniform_x.ravel(), uniform_y.ravel(), uniform_z.ravel()]) + centroid
-        
-        return {
-            'original_points': points,
-            'centroid': centroid,
-            'mean_radius': mean_radius,
-            'spherical_coords': spherical_coords,
-            'uniform_points': uniform_points,
-            'phi_grid': phi_grid,
-            'theta_grid': theta_grid,
-            'PHI': PHI,
-            'THETA': THETA,
-            'resolution': resolution,
-            'original_shape': points.shape
-        }
-    
-    def interpolate_to_uniform_sphere(self, points, values, spherical_template):
-        """Interpolate field values to uniform spherical grid"""
-        if spherical_template is None or len(points) == 0 or len(values) == 0:
+    def parse_folder_name(self, folder: str):
+        """q0p5mJ-delta4p2ns → (0.5, 4.2)"""
+        match = re.match(r"q([\dp\.]+)mJ-delta([\dp\.]+)ns", folder)
+        if not match:
             return None, None
+        e, d = match.groups()
+        return float(e.replace("p", ".")), float(d.replace("p", "."))
+    
+    @st.cache_data
+    def load_all_simulations(_self, load_full_mesh=True):
+        """Load all simulations with option for full mesh or summaries"""
+        simulations = {}
+        summaries = []
         
-        # Get uniform sphere points
-        uniform_points = spherical_template['uniform_points']
+        folders = glob.glob(os.path.join(FEA_SOLUTIONS_DIR, "q*mJ-delta*ns"))
         
-        # Use RBF interpolation for smooth spherical interpolation
-        try:
-            # Normalize values for better interpolation
-            values_normalized = (values - np.min(values)) / (np.max(values) - np.min(values) + 1e-10)
+        if not folders:
+            st.warning(f"No simulation folders found in {FEA_SOLUTIONS_DIR}")
+            return simulations, summaries
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for folder_idx, folder in enumerate(folders):
+            name = os.path.basename(folder)
+            energy, duration = _self.parse_folder_name(name)
+            if energy is None:
+                continue
+                
+            vtu_files = sorted(glob.glob(os.path.join(folder, "a_t????.vtu")))
+            if not vtu_files:
+                continue
             
-            # Interpolate using RBF
-            rbf = RBFInterpolator(points, values_normalized, kernel='thin_plate_spline')
-            uniform_values = rbf(uniform_points)
+            status_text.text(f"Loading {name}... ({len(vtu_files)} files)")
             
-            # Denormalize
-            uniform_values = uniform_values * (np.max(values) - np.min(values) + 1e-10) + np.min(values)
-            
-            return uniform_points, uniform_values
-        except Exception as e:
-            st.warning(f"RBF interpolation failed: {e}, falling back to linear")
-            # Fallback to linear interpolation
             try:
-                uniform_values = griddata(points, values, uniform_points, method='linear', fill_value=0)
-                return uniform_points, uniform_values
-            except Exception as e2:
-                st.warning(f"Linear interpolation also failed: {e2}")
-                return None, None
+                mesh0 = meshio.read(vtu_files[0])
+                
+                if not mesh0.point_data:
+                    st.warning(f"No point data in {name}")
+                    continue
+                
+                # Create simulation entry
+                sim_data = {
+                    'name': name,
+                    'energy_mJ': energy,
+                    'duration_ns': duration,
+                    'n_timesteps': len(vtu_files),
+                    'vtu_files': vtu_files,
+                    'field_info': {},
+                    'has_mesh': False
+                }
+                
+                if load_full_mesh:
+                    # Full mesh loading
+                    points = mesh0.points.astype(np.float32)
+                    n_pts = len(points)
+                    
+                    # Find triangles
+                    triangles = None
+                    for cell_block in mesh0.cells:
+                        if cell_block.type == "triangle":
+                            triangles = cell_block.data.astype(np.int32)
+                            break
+                    
+                    # Initialize fields
+                    fields = {}
+                    for key in mesh0.point_data.keys():
+                        arr = mesh0.point_data[key].astype(np.float32)
+                        if arr.ndim == 1:
+                            sim_data['field_info'][key] = ("scalar", 1)
+                            fields[key] = np.full((len(vtu_files), n_pts), np.nan, dtype=np.float32)
+                        else:
+                            sim_data['field_info'][key] = ("vector", arr.shape[1])
+                            fields[key] = np.full((len(vtu_files), n_pts, arr.shape[1]), np.nan, dtype=np.float32)
+                        fields[key][0] = arr
+                        _self.available_fields.add(key)
+                    
+                    # Load remaining timesteps
+                    for t in range(1, len(vtu_files)):
+                        try:
+                            mesh = meshio.read(vtu_files[t])
+                            for key in sim_data['field_info']:
+                                if key in mesh.point_data:
+                                    fields[key][t] = mesh.point_data[key].astype(np.float32)
+                        except Exception as e:
+                            st.warning(f"Error loading timestep {t} in {name}: {e}")
+                    
+                    sim_data.update({
+                        'points': points,
+                        'fields': fields,
+                        'triangles': triangles,
+                        'has_mesh': True
+                    })
+                
+                # Create summary statistics
+                summary = _self.extract_summary_statistics(vtu_files, energy, duration, name)
+                summaries.append(summary)
+                
+                simulations[name] = sim_data
+                
+            except Exception as e:
+                st.warning(f"Error loading {name}: {str(e)}")
+                continue
+            
+            progress_bar.progress((folder_idx + 1) / len(folders))
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        if simulations:
+            st.success(f"✅ Loaded {len(simulations)} simulations with {len(_self.available_fields)} unique fields")
+        else:
+            st.error("❌ No simulations loaded successfully")
+        
+        return simulations, summaries
     
-    def project_to_original_geometry(self, uniform_values, original_points, spherical_template):
-        """Project interpolated values back to original geometry"""
-        if spherical_template is None or uniform_values is None:
-            return None
+    def extract_summary_statistics(self, vtu_files, energy, duration, name):
+        """Extract comprehensive summary statistics from VTU files"""
+        summary = {
+            'name': name,
+            'energy': energy,
+            'duration': duration,
+            'timesteps': [],
+            'field_stats': {}
+        }
         
-        # For each original point, find nearest uniform sphere point
-        tree = cKDTree(spherical_template['uniform_points'])
-        distances, indices = tree.query(original_points, k=1)
+        for idx, vtu_file in enumerate(vtu_files):
+            try:
+                mesh = meshio.read(vtu_file)
+                timestep = idx + 1
+                summary['timesteps'].append(timestep)
+                
+                for field_name in mesh.point_data.keys():
+                    data = mesh.point_data[field_name]
+                    
+                    if field_name not in summary['field_stats']:
+                        summary['field_stats'][field_name] = {
+                            'min': [], 'max': [], 'mean': [], 'std': [],
+                            'q25': [], 'q50': [], 'q75': [], 'percentiles': []
+                        }
+                    
+                    if data.ndim == 1:
+                        clean_data = data[~np.isnan(data)]
+                        if clean_data.size > 0:
+                            summary['field_stats'][field_name]['min'].append(float(np.min(clean_data)))
+                            summary['field_stats'][field_name]['max'].append(float(np.max(clean_data)))
+                            summary['field_stats'][field_name]['mean'].append(float(np.mean(clean_data)))
+                            summary['field_stats'][field_name]['std'].append(float(np.std(clean_data)))
+                            summary['field_stats'][field_name]['q25'].append(float(np.percentile(clean_data, 25)))
+                            summary['field_stats'][field_name]['q50'].append(float(np.percentile(clean_data, 50)))
+                            summary['field_stats'][field_name]['q75'].append(float(np.percentile(clean_data, 75)))
+                            # Store full percentiles for detailed analysis
+                            percentiles = np.percentile(clean_data, [10, 25, 50, 75, 90])
+                            summary['field_stats'][field_name]['percentiles'].append(percentiles)
+                        else:
+                            for key in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']:
+                                summary['field_stats'][field_name][key].append(0.0)
+                            summary['field_stats'][field_name]['percentiles'].append(np.zeros(5))
+                    else:
+                        # Vector field - compute magnitude statistics
+                        magnitude = np.linalg.norm(data, axis=1)
+                        clean_mag = magnitude[~np.isnan(magnitude)]
+                        if clean_mag.size > 0:
+                            summary['field_stats'][field_name]['min'].append(float(np.min(clean_mag)))
+                            summary['field_stats'][field_name]['max'].append(float(np.max(clean_mag)))
+                            summary['field_stats'][field_name]['mean'].append(float(np.mean(clean_mag)))
+                            summary['field_stats'][field_name]['std'].append(float(np.std(clean_mag)))
+                            summary['field_stats'][field_name]['q25'].append(float(np.percentile(clean_mag, 25)))
+                            summary['field_stats'][field_name]['q50'].append(float(np.percentile(clean_mag, 50)))
+                            summary['field_stats'][field_name]['q75'].append(float(np.percentile(clean_mag, 75)))
+                            percentiles = np.percentile(clean_mag, [10, 25, 50, 75, 90])
+                            summary['field_stats'][field_name]['percentiles'].append(percentiles)
+                        else:
+                            for key in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']:
+                                summary['field_stats'][field_name][key].append(0.0)
+                            summary['field_stats'][field_name]['percentiles'].append(np.zeros(5))
+            except Exception as e:
+                st.warning(f"Error processing {vtu_file}: {e}")
+                continue
         
-        # Assign values based on nearest neighbor
-        projected_values = uniform_values[indices]
-        
-        # Optional: Apply radial correction based on original radius
-        centroid = spherical_template['centroid']
-        original_distances = np.linalg.norm(original_points - centroid, axis=1)
-        mean_radius = spherical_template['mean_radius']
-        radial_factors = original_distances / mean_radius
-        
-        # Adjust values based on radial position (optional physics-based correction)
-        # projected_values = projected_values * radial_factors
-        
-        return projected_values
-    
-    def create_spherical_mesh(self, centroid, radius, resolution=30):
-        """Create a triangular mesh for a sphere"""
-        phi = np.linspace(0, 2*np.pi, resolution)
-        theta = np.linspace(0, np.pi, resolution)
-        
-        phi, theta = np.meshgrid(phi, theta)
-        
-        x = radius * np.sin(theta) * np.cos(phi) + centroid[0]
-        y = radius * np.sin(theta) * np.sin(phi) + centroid[1]
-        z = radius * np.cos(theta) + centroid[2]
-        
-        # Flatten arrays
-        points = np.column_stack([x.ravel(), y.ravel(), z.ravel()])
-        
-        # Create triangles (simplified - in reality would need proper triangulation)
-        triangles = []
-        for i in range(resolution-1):
-            for j in range(resolution-1):
-                idx = i * resolution + j
-                triangles.append([idx, idx + 1, idx + resolution])
-                triangles.append([idx + 1, idx + resolution + 1, idx + resolution])
-        
-        return np.array(points), np.array(triangles)
+        return summary
 
 # =============================================
-# ENHANCED ATTENTION MECHANISM WITH SPHERICAL SUPPORT
+# ENHANCED ATTENTION MECHANISM WITH PHYSICS-AWARE EMBEDDINGS
 # =============================================
-class SphericalAttentionExtrapolator:
-    """Attention-based extrapolator with spherical geometry preservation"""
+class EnhancedPhysicsInformedAttentionExtrapolator:
+    """Advanced extrapolator with physics-aware embeddings and multi-head attention"""
     
-    def __init__(self, sigma_param=0.3, spatial_weight=0.5, n_heads=4):
+    def __init__(self, sigma_param=0.3, spatial_weight=0.5, n_heads=4, temperature=1.0):
         self.sigma_param = sigma_param
         self.spatial_weight = spatial_weight
         self.n_heads = n_heads
+        self.temperature = temperature
+        self.source_db = []
+        self.embedding_scaler = StandardScaler()
+        self.value_scaler = StandardScaler()
         self.source_embeddings = []
         self.source_values = []
         self.source_metadata = []
-        self.spherical_manager = SphericalGeometryManager()
         self.fitted = False
         
-    def prepare_spherical_embeddings(self, simulations, summaries):
-        """Prepare embeddings that preserve spherical geometry information"""
+    def load_summaries(self, summaries):
+        """Load summary statistics and prepare for attention mechanism"""
+        self.source_db = summaries
+        
+        if not summaries:
+            return
+        
+        # Prepare embeddings and values
         all_embeddings = []
         all_values = []
         metadata = []
         
         for summary_idx, summary in enumerate(summaries):
-            sim_name = summary['name']
-            if sim_name not in simulations:
-                continue
-            
-            sim = simulations[sim_name]
-            mesh_data = sim.get('mesh_data')
-            
-            if mesh_data is None or mesh_data.points is None:
-                continue
-            
-            # Compute spherical statistics
-            points = mesh_data.points
-            centroid = np.mean(points, axis=0)
-            distances = np.linalg.norm(points - centroid, axis=1)
-            
-            # Spherical features
-            radial_stats = {
-                'mean_radius': float(np.mean(distances)),
-                'std_radius': float(np.std(distances)),
-                'min_radius': float(np.min(distances)),
-                'max_radius': float(np.max(distances)),
-                'radial_aspect': float(np.max(distances) / np.min(distances)) if np.min(distances) > 0 else 1.0
-            }
-            
-            # Create spherical template
-            spherical_template = self.spherical_manager.create_spherical_template(points)
-            
             for timestep_idx, t in enumerate(summary['timesteps']):
-                # Enhanced embedding with spherical features
-                emb = self._compute_spherical_embedding(
-                    summary['energy'],
-                    summary['duration'],
-                    t,
-                    radial_stats
+                # Compute physics-aware embedding
+                emb = self._compute_physics_embedding(
+                    summary['energy'], 
+                    summary['duration'], 
+                    t
                 )
                 all_embeddings.append(emb)
                 
-                # Extract field statistics with spherical consideration
-                field_vals = self._extract_spherical_field_values(
-                    summary, timestep_idx, radial_stats
-                )
+                # Extract field values (flattened)
+                field_vals = []
+                for field in sorted(summary['field_stats'].keys()):
+                    stats = summary['field_stats'][field]
+                    # Use mean, max, std as representative features
+                    if timestep_idx < len(stats['mean']):
+                        field_vals.extend([
+                            stats['mean'][timestep_idx],
+                            stats['max'][timestep_idx],
+                            stats['std'][timestep_idx]
+                        ])
+                    else:
+                        field_vals.extend([0.0, 0.0, 0.0])
+                
                 all_values.append(field_vals)
                 
+                # Store metadata for spatial correlations
                 metadata.append({
                     'summary_idx': summary_idx,
                     'timestep_idx': timestep_idx,
                     'energy': summary['energy'],
                     'duration': summary['duration'],
                     'time': t,
-                    'name': summary['name'],
-                    'spherical_template': spherical_template,
-                    'radial_stats': radial_stats,
-                    'centroid': centroid
+                    'name': summary['name']
                 })
         
-        if all_embeddings:
+        if all_embeddings and all_values:
             all_embeddings = np.array(all_embeddings)
             all_values = np.array(all_values)
             
-            self.source_embeddings = all_embeddings
+            # Scale embeddings
+            self.embedding_scaler.fit(all_embeddings)
+            self.source_embeddings = self.embedding_scaler.transform(all_embeddings)
+            
+            # Scale values (for stable attention)
+            self.value_scaler.fit(all_values)
             self.source_values = all_values
+            
             self.source_metadata = metadata
             self.fitted = True
             
-            st.info(f"✅ Prepared {len(all_embeddings)} spherical embeddings")
-        
-        return len(all_embeddings)
+            st.info(f"✅ Prepared {len(all_embeddings)} embeddings with {all_embeddings.shape[1]} features")
     
-    def _compute_spherical_embedding(self, energy, duration, time, radial_stats):
-        """Compute embedding with spherical geometry features"""
-        # Physical parameters
+    def _compute_physics_embedding(self, energy, duration, time):
+        """Compute comprehensive physics-aware embedding"""
+        # Basic physical parameters
         logE = np.log1p(energy)
         power = energy / max(duration, 1e-6)
         energy_density = energy / (duration * duration + 1e-6)
         
-        # Spherical geometry features
-        mean_radius = radial_stats.get('mean_radius', 1.0)
-        std_radius = radial_stats.get('std_radius', 0.0)
-        radial_aspect = radial_stats.get('radial_aspect', 1.0)
-        
-        # Time parameters
+        # Dimensionless parameters
         time_ratio = time / max(duration, 1e-3)
+        heating_rate = power / max(time, 1e-6)
+        cooling_rate = 1.0 / (time + 1e-6)
         
-        # Thermal diffusion in spherical coordinates
-        thermal_penetration = np.sqrt(time) / mean_radius if mean_radius > 0 else 0
+        # Thermal diffusion proxies
+        thermal_diffusion = np.sqrt(time * 0.1) / max(duration, 1e-3)
+        thermal_penetration = np.sqrt(time) / 10.0
         
+        # Strain rate proxies
+        strain_rate = energy_density / (time + 1e-6)
+        stress_rate = power / (time + 1e-6)
+        
+        # Combined features
         return np.array([
             logE,
             duration,
@@ -307,110 +335,60 @@ class SphericalAttentionExtrapolator:
             power,
             energy_density,
             time_ratio,
-            mean_radius,
-            std_radius,
-            radial_aspect,
+            heating_rate,
+            cooling_rate,
+            thermal_diffusion,
             thermal_penetration,
+            strain_rate,
+            stress_rate,
             np.log1p(power),
             np.log1p(time)
         ], dtype=np.float32)
     
-    def _extract_spherical_field_values(self, summary, timestep_idx, radial_stats):
-        """Extract field values considering spherical geometry"""
-        field_vals = []
-        
-        for field in sorted(summary['field_stats'].keys()):
-            stats = summary['field_stats'][field]
-            
-            if timestep_idx < len(stats['mean']):
-                # Include radial weighting
-                mean_val = stats['mean'][timestep_idx]
-                max_val = stats['max'][timestep_idx]
-                std_val = stats['std'][timestep_idx]
-                
-                # Radial weighted statistics
-                radial_factor = 1.0 / (radial_stats.get('radial_aspect', 1.0) + 1e-6)
-                weighted_mean = mean_val * radial_factor
-                weighted_max = max_val * radial_factor
-                
-                field_vals.extend([
-                    mean_val,
-                    max_val,
-                    std_val,
-                    weighted_mean,
-                    weighted_max
-                ])
-            else:
-                field_vals.extend([0.0, 0.0, 0.0, 0.0, 0.0])
-        
-        return field_vals
-    
-    def _compute_spherical_similarity(self, query_embedding, query_meta, source_metadata):
-        """Compute similarity with spherical geometry consideration"""
+    def _compute_spatial_similarity(self, query_meta, source_metas):
+        """Compute spatial similarity based on parameter proximity"""
         similarities = []
-        
-        for meta in source_metadata:
-            # Parameter similarity
+        for meta in source_metas:
+            # Normalized differences
             e_diff = abs(query_meta['energy'] - meta['energy']) / 50.0
             d_diff = abs(query_meta['duration'] - meta['duration']) / 20.0
             t_diff = abs(query_meta['time'] - meta['time']) / 50.0
             
-            # Spherical geometry similarity
-            if hasattr(query_meta, 'radial_stats') and 'radial_stats' in meta:
-                r_diff = abs(query_meta['radial_stats']['mean_radius'] - 
-                           meta['radial_stats']['mean_radius']) / 10.0
-            else:
-                r_diff = 0
-            
-            total_diff = np.sqrt(e_diff**2 + d_diff**2 + t_diff**2 + r_diff**2)
+            # Combined similarity (inverse distance)
+            total_diff = np.sqrt(e_diff**2 + d_diff**2 + t_diff**2)
             similarity = np.exp(-total_diff / self.sigma_param)
             similarities.append(similarity)
         
         return np.array(similarities)
     
-    def predict_with_spherical_attention(self, energy_query, duration_query, time_query, reference_sim=None):
-        """Predict using attention mechanism with spherical geometry preservation"""
-        if not self.fitted:
-            return None
+    def _multi_head_attention(self, query_embedding, query_meta):
+        """Multi-head attention mechanism with spatial regulation"""
+        if not self.fitted or len(self.source_embeddings) == 0:
+            return None, None
         
-        # Compute query embedding
-        query_radial_stats = {'mean_radius': 1.0, 'std_radius': 0.1, 'radial_aspect': 1.1}
-        query_embedding = self._compute_spherical_embedding(
-            energy_query, duration_query, time_query, query_radial_stats
-        )
+        # Normalize query embedding
+        query_norm = self.embedding_scaler.transform([query_embedding])[0]
         
-        query_meta = {
-            'energy': energy_query,
-            'duration': duration_query,
-            'time': time_query,
-            'radial_stats': query_radial_stats
-        }
-        
-        # Compute similarities
-        similarities = self._compute_spherical_similarity(
-            query_embedding, query_meta, self.source_metadata
-        )
-        
-        # Apply multi-head attention
         n_sources = len(self.source_embeddings)
         head_weights = np.zeros((self.n_heads, n_sources))
         
+        # Multi-head attention
         for head in range(self.n_heads):
-            np.random.seed(42 + head)
-            proj_dim = min(6, query_embedding.shape[0])
-            proj_matrix = np.random.randn(query_embedding.shape[0], proj_dim)
+            np.random.seed(42 + head)  # Deterministic but different per head
+            proj_dim = min(8, query_norm.shape[0])
+            proj_matrix = np.random.randn(query_norm.shape[0], proj_dim)
             
-            query_proj = query_embedding @ proj_matrix
+            # Project embeddings
+            query_proj = query_norm @ proj_matrix
             source_proj = self.source_embeddings @ proj_matrix
             
+            # Compute attention scores
             distances = np.linalg.norm(query_proj - source_proj, axis=1)
             scores = np.exp(-distances**2 / (2 * self.sigma_param**2))
             
-            # Combine with spherical similarity
+            # Apply spatial regulation if enabled
             if self.spatial_weight > 0:
-                spatial_sim = self._compute_spherical_similarity(
-                    query_embedding, query_meta, self.source_metadata
-                )
+                spatial_sim = self._compute_spatial_similarity(query_meta, self.source_metadata)
                 scores = (1 - self.spatial_weight) * scores + self.spatial_weight * spatial_sim
             
             head_weights[head] = scores
@@ -418,141 +396,971 @@ class SphericalAttentionExtrapolator:
         # Combine head weights
         avg_weights = np.mean(head_weights, axis=0)
         
+        # Apply temperature scaling
+        if self.temperature != 1.0:
+            avg_weights = avg_weights ** (1.0 / self.temperature)
+        
         # Softmax normalization
         max_weight = np.max(avg_weights)
         exp_weights = np.exp(avg_weights - max_weight)
         attention_weights = exp_weights / (np.sum(exp_weights) + 1e-12)
         
-        # Weighted prediction
+        # Weighted prediction (using original values, not scaled)
         if len(self.source_values) > 0:
             prediction = np.sum(attention_weights[:, np.newaxis] * self.source_values, axis=0)
         else:
             prediction = np.zeros(1)
         
-        # Get best matching simulation for geometry reference
-        if reference_sim is None and len(attention_weights) > 0:
-            best_idx = np.argmax(attention_weights)
-            if best_idx < len(self.source_metadata):
-                reference_meta = self.source_metadata[best_idx]
-                reference_sim = reference_meta.get('name', None)
+        return prediction, attention_weights
+    
+    def interpolate_full_field(self, field_name, attention_weights, source_metadata, simulations):
+        """Compute interpolated full field using attention weights.
         
-        return {
+        Args:
+            field_name (str): Field to interpolate (e.g., 'temperature').
+            attention_weights (np.array): Weights from _multi_head_attention.
+            source_metadata (list): Metadata for sources.
+            simulations (dict): Loaded simulations with full fields.
+        
+        Returns:
+            np.array: Interpolated field values (n_points or n_points x components).
+        """
+        if not self.fitted or len(attention_weights) == 0:
+            return None
+        
+        # Assume common mesh: Get shape from first simulation
+        first_sim = next(iter(simulations.values()))
+        if 'fields' not in first_sim or field_name not in first_sim['fields']:
+            return None
+        
+        field_shape = first_sim['fields'][field_name].shape[1:]  # (n_points) or (n_points, components)
+        interpolated_field = np.zeros(field_shape, dtype=np.float32)
+        
+        total_weight = 0.0
+        for idx, weight in enumerate(attention_weights):
+            if weight < 1e-6:  # Skip negligible weights for efficiency
+                continue
+            
+            meta = source_metadata[idx]
+            sim_name = meta['name']
+            timestep_idx = meta['timestep_idx']
+            
+            if sim_name in simulations:
+                sim = simulations[sim_name]
+                if 'fields' in sim and field_name in sim['fields']:
+                    source_field = sim['fields'][field_name][timestep_idx]
+                    interpolated_field += weight * source_field
+                    total_weight += weight
+        
+        if total_weight > 0:
+            interpolated_field /= total_weight
+        else:
+            return None
+        
+        return interpolated_field
+    
+    def predict_field_statistics(self, energy_query, duration_query, time_query):
+        """Predict field statistics for given parameters"""
+        if not self.fitted:
+            return None
+        
+        # Compute query embedding and metadata
+        query_embedding = self._compute_physics_embedding(energy_query, duration_query, time_query)
+        query_meta = {
+            'energy': energy_query,
+            'duration': duration_query,
+            'time': time_query
+        }
+        
+        # Apply attention mechanism
+        prediction, attention_weights = self._multi_head_attention(query_embedding, query_meta)
+        
+        if prediction is None:
+            return None
+        
+        # Reconstruct field predictions
+        result = {
             'prediction': prediction,
             'attention_weights': attention_weights,
             'confidence': float(np.max(attention_weights)) if len(attention_weights) > 0 else 0.0,
-            'reference_simulation': reference_sim,
-            'metadata': self.source_metadata[np.argmax(attention_weights)] if len(attention_weights) > 0 else None
+            'field_predictions': {}
         }
+        
+        # Map predictions back to fields
+        if self.source_db:
+            # Get field order from first summary
+            field_order = sorted(self.source_db[0]['field_stats'].keys())
+            n_stats_per_field = 3  # mean, max, std
+            
+            for i, field in enumerate(field_order):
+                start_idx = i * n_stats_per_field
+                if start_idx + 2 < len(prediction):
+                    result['field_predictions'][field] = {
+                        'mean': float(prediction[start_idx]),
+                        'max': float(prediction[start_idx + 1]),
+                        'std': float(prediction[start_idx + 2])
+                    }
+        
+        return result
+    
+    def predict_time_series(self, energy_query, duration_query, time_points):
+        """Predict over a series of time points"""
+        results = {
+            'time_points': time_points,
+            'field_predictions': {},
+            'attention_maps': [],
+            'confidence_scores': []
+        }
+        
+        # Initialize field predictions structure
+        if self.source_db:
+            common_fields = set()
+            for summary in self.source_db:
+                common_fields.update(summary['field_stats'].keys())
+            
+            for field in common_fields:
+                results['field_predictions'][field] = {
+                    'mean': [], 'max': [], 'std': []
+                }
+        
+        for t in time_points:
+            pred = self.predict_field_statistics(energy_query, duration_query, t)
+            
+            if pred and 'field_predictions' in pred:
+                for field in pred['field_predictions']:
+                    if field in results['field_predictions']:
+                        stats = pred['field_predictions'][field]
+                        results['field_predictions'][field]['mean'].append(stats['mean'])
+                        results['field_predictions'][field]['max'].append(stats['max'])
+                        results['field_predictions'][field]['std'].append(stats['std'])
+                
+                results['attention_maps'].append(pred['attention_weights'])
+                results['confidence_scores'].append(pred['confidence'])
+            else:
+                # Fill with NaN if prediction failed
+                for field in results['field_predictions']:
+                    results['field_predictions'][field]['mean'].append(np.nan)
+                    results['field_predictions'][field]['max'].append(np.nan)
+                    results['field_predictions'][field]['std'].append(np.nan)
+                results['attention_maps'].append(np.array([]))
+                results['confidence_scores'].append(0.0)
+        
+        return results
 
 # =============================================
-# ENHANCED 3D VISUALIZATION WITH SPHERICAL SUPPORT
+# ADVANCED VISUALIZATION COMPONENTS WITH EXTENDED COLORMAPS
 # =============================================
-class SphericalVisualizationEngine:
-    """Visualization engine that preserves spherical geometry"""
+class EnhancedVisualizer:
+    """Comprehensive visualization with extended colormaps and advanced features"""
     
-    def __init__(self):
-        self.geometry_manager = SphericalGeometryManager()
-        self.colormaps = px.colors.sequential.Viridis
+    # Extended colormaps for better visualization
+    COLORSCALES = {
+        'temperature': ['#2c0078', '#4402a7', '#5e04d1', '#7b0ef6', '#9a38ff', '#b966ff', '#d691ff', '#f2bcff'],
+        'stress': ['#003f5c', '#2f4b7c', '#665191', '#a05195', '#d45087', '#f95d6a', '#ff7c43', '#ffa600'],
+        'displacement': ['#004c6d', '#346888', '#5886a5', '#7aa6c2', '#9dc6e0', '#c1e7ff'],
+        'default': ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+    }
     
-    def create_spherical_surface_plot(self, points, values, triangles=None, 
-                                     colormap='Viridis', opacity=0.9, show_edges=False):
-        """Create 3D surface plot preserving spherical geometry"""
+    # Extended colormap options for Plotly
+    EXTENDED_COLORMAPS = [
+        'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis',
+        'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland',
+        'Bluered', 'Electric', 'Thermal', 'Balance',
+        'Brwnyl', 'Darkmint', 'Emrld', 'Mint', 'Oranges',
+        'Purp', 'Purples', 'Sunset', 'Sunsetdark', 'Teal',
+        'Tealgrn', 'Twilight', 'Burg', 'Burgyl'
+    ]
+    
+    @staticmethod
+    def create_sunburst_chart(summaries, selected_field='temperature', highlight_sim=None):
+        """Create enhanced sunburst chart with highlighted target simulation"""
+        labels = []
+        parents = []
+        values = []
+        colors = []
+        
+        # Root node
+        labels.append("All Simulations")
+        parents.append("")
+        values.append(len(summaries))
+        colors.append("#1f77b4")
+        
+        # Group by energy first
+        energy_groups = {}
+        for summary in summaries:
+            energy_key = f"{summary['energy']:.1f} mJ"
+            if energy_key not in energy_groups:
+                energy_groups[energy_key] = []
+            energy_groups[energy_key].append(summary)
+        
+        # Add energy level nodes
+        for energy_key, energy_sims in energy_groups.items():
+            labels.append(f"Energy: {energy_key}")
+            parents.append("All Simulations")
+            values.append(len(energy_sims))
+            colors.append("#ff7f0e" if highlight_sim and any(s['name'] == highlight_sim for s in energy_sims) else "#2ca02c")
+            
+            # Add duration nodes for each energy group
+            for summary in energy_sims:
+                duration_key = f"τ: {summary['duration']:.1f} ns"
+                sim_label = f"{summary['name']}"
+                labels.append(sim_label)
+                parents.append(f"Energy: {energy_key}")
+                values.append(1)
+                
+                # Highlight target simulation
+                if highlight_sim and summary['name'] == highlight_sim:
+                    colors.append("#d62728")  # Red for target
+                else:
+                    colors.append("#9467bd")  # Purple for others
+                
+                # Add field statistics if available
+                if selected_field in summary['field_stats']:
+                    stats = summary['field_stats'][selected_field]
+                    if stats['max']:
+                        avg_max = np.mean(stats['max'])
+                        field_label = f"{selected_field}: {avg_max:.1f}"
+                        labels.append(field_label)
+                        parents.append(sim_label)
+                        values.append(avg_max if avg_max > 0 else 1e-6)
+                        colors.append("#8c564b")  # Brown for field values
+        
+        # Ensure all values are positive
+        values = [max(v, 1e-6) for v in values]
+        
+        fig = go.Figure(go.Sunburst(
+            labels=labels,
+            parents=parents,
+            values=values,
+            branchvalues="total",
+            marker=dict(
+                colors=colors,
+                colorscale='Viridis',
+                line=dict(width=2, color='white')
+            ),
+            hovertemplate='<b>%{label}</b><br>Value: %{value:.2f}<br>Parent: %{parent}<extra></extra>',
+            textinfo="label+value",
+            textfont=dict(size=12)
+        ))
+        
+        title = f"Simulation Hierarchy - {selected_field}"
+        if highlight_sim:
+            title += f" (Target: {highlight_sim})"
+        
+        fig.update_layout(
+            title=title,
+            height=700,
+            margin=dict(t=50, b=20, l=20, r=20)
+        )
+        
+        return fig
+    
+    @staticmethod
+    def create_radar_chart(summaries, simulation_names, target_sim=None):
+        """Create enhanced radar chart with highlighted target simulation"""
+        # Determine available fields
+        all_fields = set()
+        for summary in summaries:
+            all_fields.update(summary['field_stats'].keys())
+        
+        if not all_fields:
+            return go.Figure()
+        
+        # Select top 6 fields for clarity
+        selected_fields = list(all_fields)[:6]
+        
         fig = go.Figure()
         
-        if points is None or len(points) == 0:
-            return fig
-        
-        # Normalize values for coloring
-        if len(values) > 0:
-            vmin, vmax = np.nanmin(values), np.nanmax(values)
-            if vmax - vmin > 1e-10:
-                normalized_values = (values - vmin) / (vmax - vmin)
-            else:
-                normalized_values = np.zeros_like(values)
-        else:
-            normalized_values = np.zeros_like(values)
-        
-        # Check if we have triangles
-        if triangles is not None and len(triangles) > 0:
-            # Use Mesh3d for surface visualization
-            i, j, k = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+        for sim_name in simulation_names:
+            # Find summary
+            summary = next((s for s in summaries if s['name'] == sim_name), None)
+            if not summary:
+                continue
             
-            fig.add_trace(go.Mesh3d(
-                x=points[:, 0],
-                y=points[:, 1],
-                z=points[:, 2],
-                i=i, j=j, k=k,
-                intensity=values,
-                colorscale=colormap,
-                intensitymode='vertex',
-                opacity=opacity,
-                lighting=dict(
-                    ambient=0.8,
-                    diffuse=0.8,
-                    specular=0.5,
-                    roughness=0.5
-                ),
-                lightposition=dict(x=100, y=200, z=300),
-                showscale=True,
-                colorbar=dict(
-                    title="Field Value",
-                    thickness=20,
-                    len=0.75,
-                    x=1.02
-                ),
-                hoverinfo='none',
-                name='Spherical Surface'
+            r_values = []
+            theta_values = []
+            
+            for field in selected_fields:
+                if field in summary['field_stats']:
+                    stats = summary['field_stats'][field]
+                    # Use mean value across timesteps
+                    if stats['mean']:
+                        avg_value = np.mean(stats['mean'])
+                        r_values.append(avg_value if avg_value > 0 else 1e-6)
+                        theta_values.append(f"{field[:15]}...")
+                    else:
+                        r_values.append(1e-6)
+                        theta_values.append(f"{field[:15]}...")
+                else:
+                    r_values.append(1e-6)
+                    theta_values.append(f"{field[:15]}...")
+            
+            # Highlight target simulation
+            line_width = 4 if target_sim and sim_name == target_sim else 2
+            fill_opacity = 0.6 if target_sim and sim_name == target_sim else 0.3
+            color = 'red' if target_sim and sim_name == target_sim else None
+            
+            fig.add_trace(go.Scatterpolar(
+                r=r_values,
+                theta=theta_values,
+                fill='toself',
+                name=sim_name,
+                line=dict(width=line_width, color=color),
+                fillcolor=f'rgba(255,0,0,{fill_opacity})' if color else None,
+                opacity=0.8
             ))
+        
+        if fig.data:
+            # Find maximum value for scaling
+            max_values = []
+            for trace in fig.data:
+                max_values.append(max(trace.r))
             
-            if show_edges:
-                # Add wireframe edges
-                edges_x, edges_y, edges_z = [], [], []
-                for tri in triangles[:min(1000, len(triangles))]:  # Limit for performance
-                    for i in range(3):
-                        edges_x.extend([points[tri[i], 0], points[tri[(i+1)%3], 0], None])
-                        edges_y.extend([points[tri[i], 1], points[tri[(i+1)%3], 1], None])
-                        edges_z.extend([points[tri[i], 2], points[tri[(i+1)%3], 2], None])
+            if max_values:
+                max_r = max(max_values)
                 
-                fig.add_trace(go.Scatter3d(
-                    x=edges_x,
-                    y=edges_y,
-                    z=edges_z,
-                    mode='lines',
-                    line=dict(color='black', width=1),
-                    hoverinfo='none',
-                    showlegend=False,
-                    name='Edges'
+                # Add circular grid lines
+                fig.update_layout(
+                    polar=dict(
+                        radialaxis=dict(
+                            visible=True,
+                            range=[0, max_r * 1.2],
+                            tickfont=dict(size=10),
+                            gridcolor='lightgray',
+                            linecolor='gray'
+                        ),
+                        angularaxis=dict(
+                            tickfont=dict(size=11),
+                            rotation=90,
+                            direction="clockwise"
+                        ),
+                        bgcolor='white',
+                        gridshape='circular'
+                    ),
+                    showlegend=True,
+                    title="Radar Chart: Simulation Comparison",
+                    height=600,
+                    legend=dict(
+                        yanchor="top",
+                        y=0.99,
+                        xanchor="left",
+                        x=1.05
+                    )
+                )
+        
+        return fig
+    
+    @staticmethod
+    def create_attention_heatmap_3d(attention_weights, source_metadata):
+        """Create 3D heatmap of attention weights"""
+        if len(attention_weights) == 0:
+            return go.Figure()
+        
+        # Extract metadata for 3D coordinates
+        energies = []
+        durations = []
+        times = []
+        
+        for meta in source_metadata:
+            energies.append(meta['energy'])
+            durations.append(meta['duration'])
+            times.append(meta['time'])
+        
+        energies = np.array(energies)
+        durations = np.array(durations)
+        times = np.array(times)
+        
+        # Create 3D scatter plot with attention weights as color
+        fig = go.Figure(data=go.Scatter3d(
+            x=energies,
+            y=durations,
+            z=times,
+            mode='markers',
+            marker=dict(
+                size=10,
+                color=attention_weights,
+                colorscale='Viridis',
+                opacity=0.8,
+                colorbar=dict(
+                    title="Attention Weight",
+                    thickness=20,
+                    len=0.5
+                ),
+                showscale=True
+            ),
+            text=[f"E: {e:.1f} mJ<br>τ: {d:.1f} ns<br>t: {t:.1f} ns<br>Weight: {w:.4f}" 
+                  for e, d, t, w in zip(energies, durations, times, attention_weights)],
+            hovertemplate='%{text}<extra></extra>'
+        ))
+        
+        fig.update_layout(
+            title="3D Attention Weight Distribution",
+            scene=dict(
+                xaxis_title="Energy (mJ)",
+                yaxis_title="Duration (ns)",
+                zaxis_title="Time (ns)",
+                camera=dict(
+                    eye=dict(x=1.5, y=1.5, z=1.5)
+                )
+            ),
+            height=600,
+            margin=dict(l=0, r=0, t=40, b=0)
+        )
+        
+        return fig
+    
+    @staticmethod
+    def create_attention_network(attention_weights, source_metadata, top_k=10):
+        """Create network graph of attention relationships"""
+        if len(attention_weights) == 0 or len(source_metadata) == 0:
+            return go.Figure()
+        
+        # Aggregate attention by simulation
+        sim_attention = {}
+        for idx, (weight, meta) in enumerate(zip(attention_weights, source_metadata)):
+            sim_key = meta['name']
+            if sim_key not in sim_attention:
+                sim_attention[sim_key] = []
+            sim_attention[sim_key].append(weight)
+        
+        # Average attention per simulation
+        avg_attention = {k: np.mean(v) for k, v in sim_attention.items()}
+        
+        # Get top-k simulations
+        sorted_sims = sorted(avg_attention.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        
+        if not sorted_sims:
+            return go.Figure()
+        
+        # Create network graph
+        G = nx.Graph()
+        G.add_node("QUERY", size=50, color='red', label="Query")
+        
+        # Add simulation nodes
+        for i, (sim_name, weight) in enumerate(sorted_sims):
+            node_id = f"SIM_{i}"
+            # Find metadata for this simulation
+            sim_meta = next((m for m in source_metadata if m['name'] == sim_name), None)
+            
+            G.add_node(node_id,
+                      size=30 * weight / max(avg_attention.values()),
+                      color='blue',
+                      label=sim_name,
+                      energy=sim_meta['energy'] if sim_meta else 0,
+                      duration=sim_meta['duration'] if sim_meta else 0,
+                      weight=weight)
+            
+            # Add edge from query to simulation
+            G.add_edge("QUERY", node_id, weight=weight, width=3 * weight)
+        
+        # Spring layout for node positions
+        pos = nx.spring_layout(G, seed=42, k=2)
+        
+        # Create edge traces
+        edge_x = []
+        edge_y = []
+        edge_text = []
+        
+        for edge in G.edges():
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
+            edge_x.extend([x0, x1, None])
+            edge_y.extend([y0, y1, None])
+            
+            weight = G[edge[0]][edge[1]]['weight']
+            edge_text.append(f"Attention: {weight:.3f}")
+        
+        edge_trace = go.Scatter(
+            x=edge_x, y=edge_y,
+            line=dict(width=2, color='gray'),
+            hoverinfo='none',
+            mode='lines'
+        )
+        
+        # Create node traces
+        node_x = []
+        node_y = []
+        node_text = []
+        node_size = []
+        node_color = []
+        
+        for node in G.nodes():
+            x, y = pos[node]
+            node_x.append(x)
+            node_y.append(y)
+            
+            if node == "QUERY":
+                node_text.append("QUERY")
+                node_size.append(30)
+                node_color.append('red')
+            else:
+                sim_data = G.nodes[node]
+                energy = sim_data.get('energy', 0)
+                duration = sim_data.get('duration', 0)
+                weight = sim_data.get('weight', 0)
+                
+                node_text.append(
+                    f"Simulation: {sim_data['label']}<br>"
+                    f"Energy: {energy:.1f} mJ<br>"
+                    f"Duration: {duration:.1f} ns<br>"
+                    f"Attention: {weight:.3f}"
+                )
+                node_size.append(sim_data['size'] + 10)
+                node_color.append('blue')
+        
+        node_trace = go.Scatter(
+            x=node_x, y=node_y,
+            mode='markers+text',
+            text=[n if n == "QUERY" else f"Sim{i}" for i, n in enumerate(G.nodes()) if n != "QUERY"],
+            textposition="middle center",
+            hoverinfo='text',
+            hovertext=node_text,
+            marker=dict(
+                size=node_size,
+                color=node_color,
+                line=dict(width=2, color='white')
+            )
+        )
+        
+        fig = go.Figure(data=[edge_trace, node_trace])
+        fig.update_layout(
+            title=f"Attention Network (Top {len(sorted_sims)} Simulations)",
+            showlegend=False,
+            hovermode='closest',
+            margin=dict(b=0, l=0, r=0, t=40),
+            height=500,
+            plot_bgcolor='white',
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+        )
+        
+        return fig
+    
+    @staticmethod
+    def create_field_evolution_comparison(summaries, simulation_names, selected_field, target_sim=None):
+        """Create enhanced field evolution comparison plot"""
+        fig = go.Figure()
+        
+        for sim_name in simulation_names:
+            summary = next((s for s in summaries if s['name'] == sim_name), None)
+            
+            if summary and selected_field in summary['field_stats']:
+                stats = summary['field_stats'][selected_field]
+                
+                # Highlight target simulation
+                line_width = 4 if target_sim and sim_name == target_sim else 2
+                line_dash = 'solid' if target_sim and sim_name == target_sim else 'dash'
+                
+                # Plot mean
+                fig.add_trace(go.Scatter(
+                    x=summary['timesteps'],
+                    y=stats['mean'],
+                    mode='lines+markers',
+                    name=f"{sim_name} (mean)",
+                    line=dict(width=line_width, dash=line_dash),
+                    opacity=0.8
                 ))
+                
+                # Add confidence band (mean ± std)
+                if stats['std']:
+                    y_upper = np.array(stats['mean']) + np.array(stats['std'])
+                    y_lower = np.array(stats['mean']) - np.array(stats['std'])
+                    
+                    fig.add_trace(go.Scatter(
+                        x=summary['timesteps'] + summary['timesteps'][::-1],
+                        y=np.concatenate([y_upper, y_lower[::-1]]),
+                        fill='toself',
+                        fillcolor=f'rgba(128,128,128,{0.1 if target_sim and sim_name == target_sim else 0.05})',
+                        line=dict(color='rgba(255,255,255,0)'),
+                        showlegend=False,
+                        name=f"{sim_name} ± std"
+                    ))
+        
+        if fig.data:
+            fig.update_layout(
+                title=f"{selected_field} Evolution Comparison",
+                xaxis_title="Timestep (ns)",
+                yaxis_title=f"{selected_field} Value",
+                hovermode="x unified",
+                height=500,
+                showlegend=True,
+                legend=dict(
+                    yanchor="top",
+                    y=0.99,
+                    xanchor="left",
+                    x=1.02
+                )
+            )
+        
+        return fig
+
+# =============================================
+# MAIN INTEGRATED APPLICATION
+# =============================================
+def main():
+    st.set_page_config(
+        page_title="Enhanced FEA Laser Simulation Platform",
+        layout="wide",
+        initial_sidebar_state="expanded",
+        page_icon="🔬"
+    )
+    
+    # Custom CSS with enhanced styling
+    st.markdown("""
+    <style>
+    .main-header {
+        font-size: 3rem;
+        background: linear-gradient(90deg, #1E88E5, #4A00E0);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        text-align: center;
+        margin-bottom: 1.5rem;
+        font-weight: 800;
+    }
+    .sub-header {
+        font-size: 1.8rem;
+        color: #2c3e50;
+        margin-top: 1.5rem;
+        margin-bottom: 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 3px solid #3498db;
+        font-weight: 600;
+    }
+    .info-box {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1.5rem 0;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+    }
+    .warning-box {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1.5rem 0;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+    }
+    .success-box {
+        background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1.5rem 0;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+    }
+    .metric-card {
+        background: white;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        margin-bottom: 1rem;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 12px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: #f8f9fa;
+        border-radius: 8px 8px 0 0;
+        color: #495057;
+        font-weight: 600;
+        padding: 0 24px;
+        transition: all 0.3s ease;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        background-color: #e9ecef;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1E88E5;
+        color: white;
+    }
+    .stButton > button {
+        background: linear-gradient(90deg, #1E88E5, #4A00E0);
+        color: white;
+        border: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    st.markdown('<h1 class="main-header">🔬 Enhanced FEA Laser Simulation Platform</h1>', 
+                unsafe_allow_html=True)
+    
+    # Initialize session state
+    if 'data_loader' not in st.session_state:
+        st.session_state.data_loader = UnifiedFEADataLoader()
+        st.session_state.extrapolator = EnhancedPhysicsInformedAttentionExtrapolator()
+        st.session_state.visualizer = EnhancedVisualizer()
+        st.session_state.data_loaded = False
+        st.session_state.current_mode = "Data Viewer"
+        st.session_state.selected_colormap = "Viridis"
+    
+    # Sidebar
+    with st.sidebar:
+        st.markdown("### ⚙️ Navigation")
+        app_mode = st.radio(
+            "Select Mode",
+            ["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis"],
+            index=["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis"].index(
+                st.session_state.current_mode if 'current_mode' in st.session_state else "Data Viewer"
+            ),
+            key="nav_mode"
+        )
+        
+        st.session_state.current_mode = app_mode
+        
+        st.markdown("---")
+        st.markdown("### 📊 Data Settings")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            load_full_data = st.checkbox("Load Full Mesh", value=True, 
+                                        help="Load complete mesh data for 3D visualization")
+        with col2:
+            st.session_state.selected_colormap = st.selectbox(
+                "Colormap",
+                EnhancedVisualizer.EXTENDED_COLORMAPS,
+                index=0
+            )
+        
+        # Add warning for interpolation mode without full mesh
+        if st.session_state.current_mode == "Interpolation/Extrapolation" and not load_full_data:
+            st.warning("⚠️ Full mesh loading is required for 3D interpolation visualization. Please enable and reload.")
+        
+        if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
+            with st.spinner("Loading simulation data..."):
+                simulations, summaries = st.session_state.data_loader.load_all_simulations(
+                    load_full_mesh=load_full_data
+                )
+                st.session_state.simulations = simulations
+                st.session_state.summaries = summaries
+                
+                if simulations and summaries:
+                    st.session_state.extrapolator.load_summaries(summaries)
+                    st.session_state.data_loaded = True
+                    
+                    # Store available fields
+                    st.session_state.available_fields = set()
+                    for summary in summaries:
+                        st.session_state.available_fields.update(summary['field_stats'].keys())
+        
+        if st.session_state.data_loaded:
+            st.markdown("---")
+            st.markdown("### 📈 Loaded Data")
+            
+            with st.expander("Data Overview", expanded=True):
+                st.metric("Simulations", len(st.session_state.simulations))
+                st.metric("Available Fields", len(st.session_state.available_fields))
+                
+                if st.session_state.summaries:
+                    energies = [s['energy'] for s in st.session_state.summaries]
+                    durations = [s['duration'] for s in st.session_state.summaries]
+                    st.metric("Energy Range", f"{min(energies):.1f} - {max(energies):.1f} mJ")
+                    st.metric("Duration Range", f"{min(durations):.1f} - {max(durations):.1f} ns")
+    
+    # Main content based on selected mode
+    if app_mode == "Data Viewer":
+        render_data_viewer()
+    elif app_mode == "Interpolation/Extrapolation":
+        render_interpolation_extrapolation()
+    elif app_mode == "Comparative Analysis":
+        render_comparative_analysis()
+
+def render_data_viewer():
+    """Render the enhanced data visualization interface"""
+    st.markdown('<h2 class="sub-header">📁 Data Viewer</h2>', unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first using the "Load All Simulations" button in the sidebar.</p>
+        <p>Ensure your data follows this structure:</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        with st.expander("📁 Expected Directory Structure"):
+            st.code("""
+fea_solutions/
+├── q0p5mJ-delta4p2ns/        # Energy: 0.5 mJ, Duration: 4.2 ns
+│   ├── a_t0001.vtu           # Timestep 1
+│   ├── a_t0002.vtu           # Timestep 2
+│   ├── a_t0003.vtu           # Timestep 3
+│   └── ...
+├── q1p0mJ-delta2p0ns/        # Energy: 1.0 mJ, Duration: 2.0 ns
+│   ├── a_t0001.vtu
+│   ├── a_t0002.vtu
+│   └── ...
+└── q2p0mJ-delta1p0ns/        # Energy: 2.0 mJ, Duration: 1.0 ns
+    ├── a_t0001.vtu
+    └── ...
+            """)
+        return
+    
+    simulations = st.session_state.simulations
+    
+    # Simulation selection
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        sim_name = st.selectbox(
+            "Select Simulation",
+            sorted(simulations.keys()),
+            key="viewer_sim_select",
+            help="Choose a simulation to visualize"
+        )
+    
+    sim = simulations[sim_name]
+    
+    with col2:
+        st.metric("Energy", f"{sim['energy_mJ']:.2f} mJ")
+    with col3:
+        st.metric("Duration", f"{sim['duration_ns']:.2f} ns")
+    
+    if not sim.get('has_mesh', False):
+        st.warning("This simulation was loaded without mesh data. Please reload with 'Load Full Mesh' enabled.")
+        return
+    
+    if 'field_info' not in sim or not sim['field_info']:
+        st.error("No field data available for this simulation.")
+        return
+    
+    # Field and timestep selection
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        field = st.selectbox(
+            "Select Field",
+            sorted(sim['field_info'].keys()),
+            key="viewer_field_select",
+            help="Choose a field to visualize"
+        )
+    with col2:
+        timestep = st.slider(
+            "Timestep",
+            0, sim['n_timesteps'] - 1, 0,
+            key="viewer_timestep_slider",
+            help="Select timestep to display"
+        )
+    with col3:
+        colormap = st.selectbox(
+            "Colormap",
+            EnhancedVisualizer.EXTENDED_COLORMAPS,
+            index=EnhancedVisualizer.EXTENDED_COLORMAPS.index(st.session_state.selected_colormap),
+            key="viewer_colormap"
+        )
+    
+    # Main 3D visualization
+    if 'points' in sim and 'fields' in sim and field in sim['fields']:
+        pts = sim['points']
+        kind, _ = sim['field_info'][field]
+        raw = sim['fields'][field][timestep]
+        
+        if kind == "scalar":
+            values = np.where(np.isnan(raw), 0, raw)
+            label = field
         else:
-            # Fallback to point cloud
-            fig.add_trace(go.Scatter3d(
-                x=points[:, 0],
-                y=points[:, 1],
-                z=points[:, 2],
+            magnitude = np.linalg.norm(raw, axis=1)
+            values = np.where(np.isnan(magnitude), 0, magnitude)
+            label = f"{field} (magnitude)"
+        
+        # Create 3D visualization
+        if sim.get('triangles') is not None and len(sim['triangles']) > 0:
+            tri = sim['triangles']
+            
+            # Check triangle validity
+            valid_triangles = []
+            for triangle in tri:
+                if all(idx < len(pts) for idx in triangle):
+                    valid_triangles.append(triangle)
+            
+            if valid_triangles:
+                valid_triangles = np.array(valid_triangles)
+                mesh_data = go.Mesh3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
+                    intensity=values,
+                    colorscale=colormap,
+                    intensitymode='vertex',
+                    colorbar=dict(
+                        title=dict(text=label, font=dict(size=14)),
+                        thickness=20,
+                        len=0.75
+                    ),
+                    opacity=0.9,
+                    lighting=dict(
+                        ambient=0.8,
+                        diffuse=0.8,
+                        specular=0.5,
+                        roughness=0.5
+                    ),
+                    lightposition=dict(x=100, y=200, z=300),
+                    hovertemplate='<b>Value:</b> %{intensity:.3f}<br>' +
+                                 '<b>X:</b> %{x:.3f}<br>' +
+                                 '<b>Y:</b> %{y:.3f}<br>' +
+                                 '<b>Z:</b> %{z:.3f}<extra></extra>'
+                )
+            else:
+                # Fallback to scatter plot
+                mesh_data = go.Scatter3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    mode='markers',
+                    marker=dict(
+                        size=4,
+                        color=values,
+                        colorscale=colormap,
+                        opacity=0.8,
+                        colorbar=dict(
+                            title=dict(text=label, font=dict(size=14)),
+                            thickness=20,
+                            len=0.75
+                        ),
+                        showscale=True
+                    ),
+                    hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
+                                 '<b>X:</b> %{x:.3f}<br>' +
+                                 '<b>Y:</b> %{y:.3f}<br>' +
+                                 '<b>Z:</b> %{z:.3f}<extra></extra>'
+                )
+        else:
+            # Scatter plot for point cloud
+            mesh_data = go.Scatter3d(
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
                 mode='markers',
                 marker=dict(
                     size=4,
                     color=values,
                     colorscale=colormap,
-                    opacity=opacity,
-                    showscale=True,
+                    opacity=0.8,
                     colorbar=dict(
-                        title="Field Value",
+                        title=dict(text=label, font=dict(size=14)),
                         thickness=20,
                         len=0.75
-                    )
+                    ),
+                    showscale=True
                 ),
                 hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
-                            '<b>X:</b> %{x:.3f}<br>' +
-                            '<b>Y:</b> %{y:.3f}<br>' +
-                            '<b>Z:</b> %{z:.3f}<extra></extra>',
-                name='Point Cloud'
-            ))
+                             '<b>X:</b> %{x:.3f}<br>' +
+                             '<b>Y:</b> %{y:.3f}<br>' +
+                             '<b>Z:</b> %{z:.3f}<extra></extra>'
+            )
         
-        # Update layout for better spherical view
+        fig = go.Figure(data=mesh_data)
         fig.update_layout(
+            title=dict(
+                text=f"{label} at Timestep {timestep + 1}<br><sub>{sim_name}</sub>",
+                font=dict(size=20)
+            ),
             scene=dict(
-                aspectmode='data',
+                aspectmode="data",
                 camera=dict(
                     eye=dict(x=1.5, y=1.5, z=1.5),
                     up=dict(x=0, y=0, z=1)
@@ -561,1252 +1369,1403 @@ class SphericalVisualizationEngine:
                     title="X",
                     gridcolor="lightgray",
                     showbackground=True,
-                    backgroundcolor="rgba(255, 255, 255, 0.1)"
+                    backgroundcolor="white"
                 ),
                 yaxis=dict(
                     title="Y",
                     gridcolor="lightgray",
                     showbackground=True,
-                    backgroundcolor="rgba(255, 255, 255, 0.1)"
+                    backgroundcolor="white"
                 ),
                 zaxis=dict(
                     title="Z",
                     gridcolor="lightgray",
                     showbackground=True,
-                    backgroundcolor="rgba(255, 255, 255, 0.1)"
+                    backgroundcolor="white"
                 )
             ),
             height=700,
-            margin=dict(l=0, r=0, t=40, b=0),
-            showlegend=True
+            margin=dict(l=0, r=0, t=80, b=0)
         )
         
-        return fig
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Field statistics
+        st.markdown('<h3 class="sub-header">📊 Field Statistics</h3>', unsafe_allow_html=True)
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("Min", f"{np.min(values):.3f}")
+        with col2:
+            st.metric("Max", f"{np.max(values):.3f}")
+        with col3:
+            st.metric("Mean", f"{np.mean(values):.3f}")
+        with col4:
+            st.metric("Std Dev", f"{np.std(values):.3f}")
+        with col5:
+            st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
     
-    def create_spherical_comparison(self, points_list, values_list, names, 
-                                   colormap='Viridis', n_cols=2):
-        """Create comparison of multiple spherical fields"""
-        n_plots = len(points_list)
-        
-        if n_plots == 0:
-            return go.Figure()
-        
-        # Determine grid layout
-        rows = (n_plots + n_cols - 1) // n_cols
-        cols = min(n_plots, n_cols)
-        
-        fig = make_subplots(
-            rows=rows, cols=cols,
-            specs=[[{'type': 'surface'} for _ in range(cols)] for _ in range(rows)],
-            subplot_titles=names,
-            vertical_spacing=0.1,
-            horizontal_spacing=0.05
-        )
-        
-        for idx, (points, values, name) in enumerate(zip(points_list, values_list, names)):
-            row = idx // cols + 1
-            col = idx % cols + 1
-            
-            if points is not None and len(points) > 0 and values is not None and len(values) > 0:
-                # Create simplified visualization for comparison
-                fig.add_trace(
-                    go.Scatter3d(
-                        x=points[:, 0],
-                        y=points[:, 1],
-                        z=points[:, 2],
-                        mode='markers',
-                        marker=dict(
-                            size=3,
-                            color=values,
-                            colorscale=colormap,
-                            opacity=0.8,
-                            showscale=(idx == 0)
-                        ),
-                        name=name,
-                        showlegend=False
-                    ),
-                    row=row, col=col
-                )
-        
-        fig.update_layout(
-            height=300 * rows,
-            showlegend=False,
-            title_text="Spherical Field Comparison"
-        )
-        
-        # Update scene properties
-        for i in range(1, n_plots + 1):
-            row = (i-1) // cols + 1
-            col = (i-1) % cols + 1
-            fig.update_scenes(
-                aspectmode="data",
-                camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)),
-                row=row, col=col
-            )
-        
-        return fig
+    # Field evolution over time
+    st.markdown('<h3 class="sub-header">📈 Field Evolution Over Time</h3>', unsafe_allow_html=True)
     
-    def create_radial_profile_plot(self, points, values, n_bins=20):
-        """Create radial profile plot of field values"""
-        if points is None or len(points) == 0 or values is None or len(values) == 0:
-            return go.Figure()
+    # Find corresponding summary
+    summary = next((s for s in st.session_state.summaries if s['name'] == sim_name), None)
+    
+    if summary and field in summary['field_stats']:
+        stats = summary['field_stats'][field]
         
-        # Compute centroid
-        centroid = np.mean(points, axis=0)
+        fig_time = go.Figure()
         
-        # Compute distances from centroid
-        distances = np.linalg.norm(points - centroid, axis=1)
-        
-        # Bin the distances and compute statistics
-        bins = np.linspace(0, np.max(distances), n_bins + 1)
-        bin_indices = np.digitize(distances, bins) - 1
-        
-        bin_means = []
-        bin_stds = []
-        bin_centers = []
-        
-        for i in range(n_bins):
-            mask = bin_indices == i
-            if np.sum(mask) > 0:
-                bin_values = values[mask]
-                bin_means.append(np.mean(bin_values))
-                bin_stds.append(np.std(bin_values))
-                bin_centers.append((bins[i] + bins[i+1]) / 2)
-        
-        # Create plot
-        fig = go.Figure()
-        
-        if bin_means:
-            fig.add_trace(go.Scatter(
-                x=bin_centers,
-                y=bin_means,
-                mode='lines+markers',
+        if stats['mean']:
+            # Mean line
+            fig_time.add_trace(go.Scatter(
+                x=summary['timesteps'],
+                y=stats['mean'],
+                mode='lines',
                 name='Mean',
-                line=dict(width=3, color='blue'),
-                error_y=dict(
-                    type='data',
-                    array=bin_stds,
-                    visible=True,
-                    color='rgba(0, 100, 255, 0.3)'
-                )
+                line=dict(color='blue', width=3)
             ))
             
-            # Add trend line
-            if len(bin_centers) > 1:
-                z = np.polyfit(bin_centers, bin_means, 2)
-                p = np.poly1d(z)
-                x_smooth = np.linspace(min(bin_centers), max(bin_centers), 100)
-                y_smooth = p(x_smooth)
+            # Confidence band (mean ± std)
+            if stats['std']:
+                y_upper = np.array(stats['mean']) + np.array(stats['std'])
+                y_lower = np.array(stats['mean']) - np.array(stats['std'])
                 
-                fig.add_trace(go.Scatter(
-                    x=x_smooth,
-                    y=y_smooth,
+                fig_time.add_trace(go.Scatter(
+                    x=summary['timesteps'] + summary['timesteps'][::-1],
+                    y=np.concatenate([y_upper, y_lower[::-1]]),
+                    fill='toself',
+                    fillcolor='rgba(0, 100, 255, 0.2)',
+                    line=dict(color='rgba(255,255,255,0)'),
+                    showlegend=False,
+                    name='± Std Dev'
+                ))
+            
+            # Max line
+            if stats['max']:
+                fig_time.add_trace(go.Scatter(
+                    x=summary['timesteps'],
+                    y=stats['max'],
                     mode='lines',
-                    name='Trend',
-                    line=dict(width=2, color='red', dash='dash')
+                    name='Maximum',
+                    line=dict(color='red', width=2, dash='dash')
                 ))
         
-        fig.update_layout(
-            title="Radial Profile of Field Values",
-            xaxis_title="Distance from Center",
-            yaxis_title="Field Value",
+        fig_time.update_layout(
+            title=dict(
+                text=f"{field} Statistics Over Time",
+                font=dict(size=18)
+            ),
+            xaxis_title="Timestep (ns)",
+            yaxis_title=f"{field} Value",
+            hovermode="x unified",
             height=400,
-            showlegend=True
+            showlegend=True,
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01
+            )
         )
         
-        return fig
-
-# =============================================
-# MAIN APPLICATION WITH SPHERICAL INTERPOLATION
-# =============================================
-class SphericalFEAInterpolator:
-    """Main application with spherical geometry preservation"""
-    
-    def __init__(self):
-        self.data_loader = None
-        self.spherical_manager = SphericalGeometryManager()
-        self.attention_extrapolator = SphericalAttentionExtrapolator()
-        self.visualizer = SphericalVisualizationEngine()
+        st.plotly_chart(fig_time, use_container_width=True)
         
-        # Initialize session state
-        self._init_session_state()
-    
-    def _init_session_state(self):
-        """Initialize session state variables"""
-        defaults = {
-            'data_loaded': False,
-            'selected_colormap': "Viridis",
-            'current_mode': "Data Viewer",
-            'visualization_mode': 'surface',
-            'mesh_opacity': 0.9,
-            'show_edges': False,
-            'simulations': {},
-            'summaries': [],
-            'attention_ready': False,
-            'interpolated_solutions': {},
-            'spherical_templates': {}
-        }
-        
-        for key, value in defaults.items():
-            if key not in st.session_state:
-                st.session_state[key] = value
-    
-    def run(self):
-        """Run the main application"""
-        st.set_page_config(
-            page_title="Spherical FEA Interpolation Platform",
-            layout="wide",
-            initial_sidebar_state="expanded",
-            page_icon="🔮"
-        )
-        
-        # Apply custom CSS
-        self._apply_custom_css()
-        
-        # Render header
-        self._render_header()
-        
-        # Render sidebar
-        self._render_sidebar()
-        
-        # Render main content
-        self._render_main_content()
-    
-    def _apply_custom_css(self):
-        """Apply custom CSS styling"""
-        st.markdown("""
-        <style>
-        .main-header {
-            font-size: 3rem;
-            background: linear-gradient(90deg, #1E88E5, #8E2DE2);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            text-align: center;
-            margin-bottom: 1rem;
-            font-weight: 800;
-        }
-        .spherical-badge {
-            background: linear-gradient(90deg, #FF6B6B, #FF8E53);
-            color: white;
-            padding: 4px 12px;
-            border-radius: 15px;
-            font-size: 0.9rem;
-            font-weight: bold;
-            display: inline-block;
-            margin-left: 10px;
-        }
-        .metric-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 1rem;
-            border-radius: 10px;
-            margin: 0.5rem;
-            text-align: center;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-        }
-        </style>
-        """, unsafe_allow_html=True)
-    
-    def _render_header(self):
-        """Render application header"""
-        st.markdown('<h1 class="main-header">🔮 Spherical FEA Interpolation Platform</h1>', 
-                   unsafe_allow_html=True)
-        st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">'
-                   'Spherical Geometry Preservation | Attention-Based Interpolation | 3D Visualization</p>',
-                   unsafe_allow_html=True)
-    
-    def _render_sidebar(self):
-        """Render sidebar navigation"""
-        with st.sidebar:
-            st.markdown("### 🧭 Navigation")
-            
-            app_mode = st.selectbox(
-                "Select Mode",
-                ["Data Viewer", "Spherical Interpolation", "3D Visualization", 
-                 "Attention Analysis", "Export Solutions"],
-                index=0
-            )
-            
-            st.session_state.current_mode = app_mode
-            
-            st.markdown("---")
-            st.markdown("### 📂 Data Management")
-            
-            if st.button("🚀 Load Simulations", use_container_width=True):
-                self._load_simulations()
-            
-            if st.session_state.get('data_loaded', False):
-                st.success(f"✅ {len(st.session_state.simulations)} simulations loaded")
+        # Percentile analysis
+        with st.expander("📊 Detailed Percentile Analysis"):
+            if 'percentiles' in stats and stats['percentiles']:
+                percentiles_data = np.array(stats['percentiles'])
                 
-                st.markdown("---")
-                st.markdown("### 🎨 Visualization")
+                fig_percentiles = go.Figure()
                 
-                with st.expander("Display Settings", expanded=False):
-                    st.session_state.selected_colormap = st.selectbox(
-                        "Colormap",
-                        px.colors.named_colorscales(),
-                        index=0
-                    )
-                    
-                    st.session_state.mesh_opacity = st.slider(
-                        "Opacity", 0.1, 1.0, 0.9, 0.1
-                    )
-                    
-                    st.session_state.show_edges = st.checkbox("Show Edges", False)
-    
-    def _load_simulations(self):
-        """Load simulation data"""
-        # Simplified data loader for demo
-        # In production, this would load actual VTU files
-        
-        # Create sample spherical data for demonstration
-        simulations = {}
-        summaries = []
-        
-        # Create sample simulations with spherical geometry
-        energies = [0.5, 1.0, 2.0, 3.0, 5.0]
-        durations = [1.0, 2.0, 4.0, 8.0, 16.0]
-        
-        for i, (energy, duration) in enumerate(zip(energies, durations)):
-            sim_name = f"q{energy}mJ-delta{duration}ns"
-            
-            # Create spherical mesh
-            centroid = np.array([0, 0, 0])
-            radius = 1.0 + i * 0.1  # Slightly different radii
-            
-            # Create points on sphere
-            n_points = 1000
-            phi = np.random.uniform(0, 2*np.pi, n_points)
-            theta = np.arccos(np.random.uniform(-1, 1, n_points))
-            
-            x = radius * np.sin(theta) * np.cos(phi) + centroid[0]
-            y = radius * np.sin(theta) * np.sin(phi) + centroid[1]
-            z = radius * np.cos(theta) + centroid[2]
-            
-            points = np.column_stack([x, y, z])
-            
-            # Create field values (temperature-like distribution)
-            distances = np.linalg.norm(points - centroid, axis=1)
-            values = energy * np.exp(-distances**2 / (duration * 0.1))
-            values = values + np.random.normal(0, 0.1 * energy, n_points)
-            
-            # Store simulation
-            simulations[sim_name] = {
-                'name': sim_name,
-                'energy_mJ': energy,
-                'duration_ns': duration,
-                'points': points,
-                'field_values': values,
-                'centroid': centroid,
-                'radius': radius,
-                'n_points': n_points,
-                'has_mesh': True
-            }
-            
-            # Create summary
-            summary = {
-                'name': sim_name,
-                'energy': energy,
-                'duration': duration,
-                'timesteps': [1, 2, 3, 4, 5],
-                'field_stats': {
-                    'temperature': {
-                        'mean': [float(np.mean(values))] * 5,
-                        'max': [float(np.max(values))] * 5,
-                        'min': [float(np.min(values))] * 5,
-                        'std': [float(np.std(values))] * 5
-                    }
-                }
-            }
-            
-            summaries.append(summary)
-            
-            # Create spherical template
-            spherical_template = self.spherical_manager.create_spherical_template(points)
-            st.session_state.spherical_templates[sim_name] = spherical_template
-        
-        st.session_state.simulations = simulations
-        st.session_state.summaries = summaries
-        st.session_state.data_loaded = True
-        
-        # Prepare attention mechanism
-        n_embeddings = self.attention_extrapolator.prepare_spherical_embeddings(
-            simulations, summaries
-        )
-        st.session_state.attention_ready = n_embeddings > 0
-    
-    def _render_main_content(self):
-        """Render main content based on selected mode"""
-        mode = st.session_state.current_mode
-        
-        if mode == "Data Viewer":
-            self._render_data_viewer()
-        elif mode == "Spherical Interpolation":
-            self._render_spherical_interpolation()
-        elif mode == "3D Visualization":
-            self._render_3d_visualization()
-        elif mode == "Attention Analysis":
-            self._render_attention_analysis()
-        elif mode == "Export Solutions":
-            self._render_export_solutions()
-    
-    def _render_data_viewer(self):
-        """Render data viewer"""
-        st.markdown("## 📊 Data Viewer")
-        
-        if not st.session_state.get('data_loaded', False):
-            st.info("Please load simulations first using the sidebar button.")
-            return
-        
-        simulations = st.session_state.simulations
-        
-        # Simulation selector
-        col1, col2, col3 = st.columns([3, 1, 1])
-        with col1:
-            sim_name = st.selectbox(
-                "Select Simulation",
-                sorted(simulations.keys()),
-                key="viewer_sim_select"
-            )
-        
-        sim = simulations[sim_name]
-        
-        with col2:
-            st.metric("Energy", f"{sim['energy_mJ']:.2f} mJ")
-        with col3:
-            st.metric("Duration", f"{sim['duration_ns']:.2f} ns")
-        
-        # Display spherical information
-        st.markdown("#### 🌐 Spherical Geometry Information")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Points", f"{sim['n_points']:,}")
-        with col2:
-            st.metric("Radius", f"{sim['radius']:.3f}")
-        with col3:
-            centroid = sim['centroid']
-            st.metric("Centroid", f"[{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}]")
-        with col4:
-            st.metric("Field Range", 
-                     f"{np.min(sim['field_values']):.3f} - {np.max(sim['field_values']):.3f}")
-        
-        # 3D Visualization
-        st.markdown("#### 🎨 3D Visualization")
-        
-        fig = self.visualizer.create_spherical_surface_plot(
-            points=sim['points'],
-            values=sim['field_values'],
-            colormap=st.session_state.selected_colormap,
-            opacity=st.session_state.mesh_opacity,
-            show_edges=st.session_state.show_edges
-        )
-        
-        fig.update_layout(title=f"Simulation: {sim_name}")
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Radial profile
-        st.markdown("#### 📈 Radial Profile Analysis")
-        
-        radial_fig = self.visualizer.create_radial_profile_plot(
-            points=sim['points'],
-            values=sim['field_values'],
-            n_bins=15
-        )
-        st.plotly_chart(radial_fig, use_container_width=True)
-    
-    def _render_spherical_interpolation(self):
-        """Render spherical interpolation interface"""
-        st.markdown("## 🔮 Spherical Interpolation")
-        
-        if not st.session_state.get('data_loaded', False):
-            st.info("Please load simulations first.")
-            return
-        
-        if not st.session_state.get('attention_ready', False):
-            st.warning("Attention mechanism not ready. Please check data loading.")
-            return
-        
-        st.markdown("""
-        <div style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); 
-                    color: white; padding: 1.5rem; border-radius: 10px; margin: 1rem 0;">
-        <h4>🧠 Spherical Geometry Preservation</h4>
-        <p>This interpolation method preserves the spherical geometry of the solder joint 
-        while accurately predicting field values using attention mechanisms.</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Query parameters
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            energy_query = st.number_input(
-                "Energy (mJ)",
-                min_value=0.1,
-                max_value=10.0,
-                value=2.5,
-                step=0.1,
-                key="interp_energy"
-            )
-        with col2:
-            duration_query = st.number_input(
-                "Duration (ns)",
-                min_value=0.5,
-                max_value=20.0,
-                value=4.0,
-                step=0.1,
-                key="interp_duration"
-            )
-        with col3:
-            time_query = st.number_input(
-                "Time (ns)",
-                min_value=0.0,
-                max_value=50.0,
-                value=10.0,
-                step=1.0,
-                key="interp_time"
-            )
-        
-        # Reference geometry selection
-        simulations = st.session_state.simulations
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            reference_sim = st.selectbox(
-                "Reference Geometry",
-                sorted(simulations.keys()),
-                key="interp_ref_sim"
-            )
-        
-        with col2:
-            interpolation_method = st.selectbox(
-                "Interpolation Method",
-                ["Spherical RBF", "Attention-Weighted", "Physics-Informed"],
-                key="interp_method"
-            )
-        
-        # Advanced settings
-        with st.expander("⚙️ Advanced Settings", expanded=False):
-            col1, col2 = st.columns(2)
-            with col1:
-                sigma_param = st.slider(
-                    "Attention Width (σ)",
-                    0.1, 1.0, 0.3, 0.05,
-                    key="interp_sigma"
-                )
-            
-            with col2:
-                spatial_weight = st.slider(
-                    "Spatial Weight",
-                    0.0, 1.0, 0.5, 0.05,
-                    key="interp_spatial"
-                )
-            
-            self.attention_extrapolator.sigma_param = sigma_param
-            self.attention_extrapolator.spatial_weight = spatial_weight
-        
-        if st.button("🚀 Generate Interpolated Solution", use_container_width=True):
-            with st.spinner("Generating spherical interpolated solution..."):
-                self._generate_spherical_interpolation(
-                    energy_query, duration_query, time_query,
-                    reference_sim, interpolation_method
-                )
-    
-    def _generate_spherical_interpolation(self, energy, duration, time, 
-                                         reference_sim, method):
-        """Generate spherical interpolated solution"""
-        simulations = st.session_state.simulations
-        
-        if reference_sim not in simulations:
-            st.error(f"Reference simulation '{reference_sim}' not found")
-            return
-        
-        # Get reference geometry
-        ref_data = simulations[reference_sim]
-        ref_points = ref_data['points']
-        ref_centroid = ref_data['centroid']
-        ref_radius = ref_data['radius']
-        
-        # Get spherical template
-        spherical_template = st.session_state.spherical_templates.get(reference_sim)
-        
-        if spherical_template is None:
-            # Create new template
-            spherical_template = self.spherical_manager.create_spherical_template(ref_points)
-            st.session_state.spherical_templates[reference_sim] = spherical_template
-        
-        # Use attention mechanism to predict field statistics
-        prediction = self.attention_extrapolator.predict_with_spherical_attention(
-            energy_query=energy,
-            duration_query=duration,
-            time_query=time,
-            reference_sim=reference_sim
-        )
-        
-        if prediction is None:
-            st.error("Prediction failed")
-            return
-        
-        # Generate field values based on prediction
-        # This is a simplified demonstration - in reality, you would generate
-        # actual field values based on the predicted statistics
-        
-        # Create synthetic field with spherical distribution
-        distances = np.linalg.norm(ref_points - ref_centroid, axis=1)
-        normalized_distances = distances / ref_radius
-        
-        # Physics-based field generation
-        if 'temperature' in prediction.get('prediction', {}):
-            # Temperature-like field
-            base_value = energy / duration
-            radial_decay = np.exp(-normalized_distances**2 / (time * 0.1))
-            field_values = base_value * radial_decay
-            
-            # Add some noise for realism
-            noise = np.random.normal(0, 0.1 * base_value, len(field_values))
-            field_values = field_values + noise
-            
-            # Apply attention-based weighting
-            confidence = prediction.get('confidence', 0.5)
-            field_values = field_values * confidence
-        else:
-            # Generic field
-            field_values = energy * np.exp(-normalized_distances**2)
-        
-        # Store interpolated solution
-        interpolated_id = f"interp_E{energy:.1f}_D{duration:.1f}_T{time:.1f}"
-        
-        interpolated_solution = {
-            'id': interpolated_id,
-            'energy': energy,
-            'duration': duration,
-            'time': time,
-            'reference_sim': reference_sim,
-            'method': method,
-            'points': ref_points,  # Same geometry as reference
-            'field_values': field_values,
-            'centroid': ref_centroid,
-            'radius': ref_radius,
-            'confidence': prediction.get('confidence', 0.0),
-            'attention_weights': prediction.get('attention_weights', []),
-            'created_at': datetime.now().isoformat()
-        }
-        
-        # Store in session state
-        if 'interpolated_solutions' not in st.session_state:
-            st.session_state.interpolated_solutions = {}
-        
-        st.session_state.interpolated_solutions[interpolated_id] = interpolated_solution
-        
-        # Display results
-        st.success(f"✅ Interpolated solution generated: {interpolated_id}")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Confidence", f"{prediction['confidence']:.2%}")
-        with col2:
-            st.metric("Method", method)
-        with col3:
-            st.metric("Field Mean", f"{np.mean(field_values):.3f}")
-        with col4:
-            st.metric("Field Range", f"{np.ptp(field_values):.3f}")
-        
-        # Visualize
-        st.markdown("#### 🎨 Interpolated Field Visualization")
-        
-        tab1, tab2, tab3 = st.tabs(["3D Surface", "Radial Profile", "Comparison"])
-        
-        with tab1:
-            fig = self.visualizer.create_spherical_surface_plot(
-                points=ref_points,
-                values=field_values,
-                colormap=st.session_state.selected_colormap,
-                opacity=st.session_state.mesh_opacity,
-                show_edges=st.session_state.show_edges
-            )
-            
-            fig.update_layout(
-                title=f"Interpolated Solution: {interpolated_id}"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with tab2:
-            radial_fig = self.visualizer.create_radial_profile_plot(
-                points=ref_points,
-                values=field_values,
-                n_bins=15
-            )
-            st.plotly_chart(radial_fig, use_container_width=True)
-        
-        with tab3:
-            # Compare with reference simulation
-            ref_values = ref_data['field_values']
-            
-            points_list = [ref_points, ref_points]
-            values_list = [ref_values, field_values]
-            names = [f"Reference: {reference_sim}", f"Interpolated: {interpolated_id}"]
-            
-            comp_fig = self.visualizer.create_spherical_comparison(
-                points_list=points_list,
-                values_list=values_list,
-                names=names,
-                colormap=st.session_state.selected_colormap,
-                n_cols=2
-            )
-            st.plotly_chart(comp_fig, use_container_width=True)
-    
-    def _render_3d_visualization(self):
-        """Render 3D visualization interface"""
-        st.markdown("## 🌐 3D Visualization")
-        
-        # Get all available solutions
-        all_solutions = {}
-        
-        # Add original simulations
-        if st.session_state.get('data_loaded', False):
-            all_solutions.update(st.session_state.simulations)
-        
-        # Add interpolated solutions
-        if 'interpolated_solutions' in st.session_state:
-            all_solutions.update(st.session_state.interpolated_solutions)
-        
-        if not all_solutions:
-            st.info("No solutions available for visualization.")
-            return
-        
-        # Solution selector
-        solution_names = list(all_solutions.keys())
-        
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            selected_solution = st.selectbox(
-                "Select Solution",
-                solution_names,
-                key="viz_solution"
-            )
-        
-        solution = all_solutions[selected_solution]
-        
-        # Determine if it's interpolated
-        is_interpolated = 'interpolated_solutions' in st.session_state and \
-                         selected_solution in st.session_state.interpolated_solutions
-        
-        with col2:
-            if is_interpolated:
-                st.markdown('<div class="spherical-badge">INTERPOLATED</div>', 
-                           unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="spherical-badge">ORIGINAL</div>', 
-                           unsafe_allow_html=True)
-        
-        # Solution info
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Energy", f"{solution.get('energy', 0):.2f} mJ")
-        with col2:
-            st.metric("Duration", f"{solution.get('duration', 0):.2f} ns")
-        with col3:
-            if 'time' in solution:
-                st.metric("Time", f"{solution['time']:.1f} ns")
-            else:
-                st.metric("Type", "Original")
-        with col4:
-            if is_interpolated:
-                st.metric("Confidence", f"{solution.get('confidence', 0):.2%}")
-            else:
-                st.metric("Points", f"{len(solution['points']):,}")
-        
-        # Visualization options
-        st.markdown("#### 🎨 Visualization Options")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            viz_mode = st.selectbox(
-                "Visualization Mode",
-                ["Surface", "Point Cloud", "Wireframe"],
-                key="viz_mode"
-            )
-        with col2:
-            color_by = st.selectbox(
-                "Color By",
-                ["Field Value", "Radial Distance", "Custom"],
-                key="viz_color"
-            )
-        with col3:
-            show_statistics = st.checkbox("Show Statistics", True)
-        
-        # Prepare visualization data
-        points = solution['points']
-        field_values = solution.get('field_values', np.zeros(len(points)))
-        
-        # Color values based on selection
-        if color_by == "Radial Distance":
-            if 'centroid' in solution:
-                centroid = solution['centroid']
-                distances = np.linalg.norm(points - centroid, axis=1)
-                viz_values = distances
-            else:
-                viz_values = field_values
-        else:
-            viz_values = field_values
-        
-        # Create visualization
-        if viz_mode == "Surface":
-            fig = self.visualizer.create_spherical_surface_plot(
-                points=points,
-                values=viz_values,
-                colormap=st.session_state.selected_colormap,
-                opacity=st.session_state.mesh_opacity,
-                show_edges=st.session_state.show_edges
-            )
-        elif viz_mode == "Point Cloud":
-            # Create point cloud visualization
-            fig = go.Figure()
-            fig.add_trace(go.Scatter3d(
-                x=points[:, 0],
-                y=points[:, 1],
-                z=points[:, 2],
-                mode='markers',
-                marker=dict(
-                    size=4,
-                    color=viz_values,
-                    colorscale=st.session_state.selected_colormap,
-                    opacity=st.session_state.mesh_opacity,
-                    showscale=True,
-                    colorbar=dict(title="Value", thickness=20)
-                ),
-                name=selected_solution
-            ))
-            
-            fig.update_layout(
-                scene=dict(
-                    aspectmode='data',
-                    camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
-                ),
-                height=700
-            )
-        else:  # Wireframe
-            # Simplified wireframe visualization
-            fig = go.Figure()
-            
-            # Add a sample wireframe (in reality, would use actual edges)
-            fig.add_trace(go.Scatter3d(
-                x=points[::10, 0],  # Sample points
-                y=points[::10, 1],
-                z=points[::10, 2],
-                mode='markers+lines',
-                marker=dict(size=3, color=viz_values[::10]),
-                line=dict(color='gray', width=1),
-                name=selected_solution
-            ))
-            
-            fig.update_layout(
-                scene=dict(aspectmode='data'),
-                height=700
-            )
-        
-        fig.update_layout(title=f"Visualization: {selected_solution}")
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Statistics
-        if show_statistics and len(field_values) > 0:
-            st.markdown("#### 📊 Field Statistics")
-            
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1:
-                st.metric("Min", f"{np.min(field_values):.3f}")
-            with col2:
-                st.metric("Max", f"{np.max(field_values):.3f}")
-            with col3:
-                st.metric("Mean", f"{np.mean(field_values):.3f}")
-            with col4:
-                st.metric("Std Dev", f"{np.std(field_values):.3f}")
-            with col5:
-                st.metric("Range", f"{np.ptp(field_values):.3f}")
-    
-    def _render_attention_analysis(self):
-        """Render attention analysis interface"""
-        st.markdown("## 🧠 Attention Mechanism Analysis")
-        
-        if not st.session_state.get('attention_ready', False):
-            st.warning("Attention mechanism not ready.")
-            return
-        
-        # Query parameters
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            energy = st.number_input(
-                "Query Energy (mJ)",
-                min_value=0.1,
-                max_value=10.0,
-                value=3.0,
-                step=0.1,
-                key="attn_energy"
-            )
-        with col2:
-            duration = st.number_input(
-                "Query Duration (ns)",
-                min_value=0.5,
-                max_value=20.0,
-                value=5.0,
-                step=0.1,
-                key="attn_duration"
-            )
-        with col3:
-            time = st.number_input(
-                "Query Time (ns)",
-                min_value=0.0,
-                max_value=50.0,
-                value=12.0,
-                step=1.0,
-                key="attn_time"
-            )
-        
-        if st.button("Analyze Attention", use_container_width=True):
-            with st.spinner("Computing attention weights..."):
-                # Get prediction
-                prediction = self.attention_extrapolator.predict_with_spherical_attention(
-                    energy_query=energy,
-                    duration_query=duration,
-                    time_query=time
-                )
+                percentile_labels = ['10th', '25th', '50th', '75th', '90th']
+                colors = ['lightblue', 'blue', 'darkblue', 'red', 'darkred']
                 
-                if prediction is None:
-                    st.error("Attention analysis failed")
-                    return
+                for i in range(5):
+                    fig_percentiles.add_trace(go.Scatter(
+                        x=summary['timesteps'],
+                        y=percentiles_data[:, i],
+                        mode='lines',
+                        name=percentile_labels[i],
+                        line=dict(color=colors[i], width=2)
+                    ))
                 
-                attention_weights = prediction.get('attention_weights', [])
-                confidence = prediction.get('confidence', 0.0)
-                
-                st.success(f"✅ Analysis complete - Confidence: {confidence:.2%}")
-                
-                # Display attention weights
-                st.markdown("#### 📊 Attention Weights Distribution")
-                
-                # Create histogram
-                fig = go.Figure()
-                fig.add_trace(go.Histogram(
-                    x=attention_weights,
-                    nbinsx=20,
-                    marker_color='skyblue',
-                    opacity=0.7,
-                    name='Attention Weights'
-                ))
-                
-                fig.update_layout(
-                    title="Distribution of Attention Weights",
-                    xaxis_title="Attention Weight",
-                    yaxis_title="Frequency",
+                fig_percentiles.update_layout(
+                    title="Field Value Percentiles Over Time",
+                    xaxis_title="Timestep (ns)",
+                    yaxis_title=f"{field} Value",
                     height=400
                 )
                 
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Top attention sources
-                if len(attention_weights) > 0:
-                    # Get metadata for each source
-                    source_metadata = self.attention_extrapolator.source_metadata
-                    
-                    # Sort by attention weight
-                    sorted_indices = np.argsort(attention_weights)[::-1]
-                    
-                    # Display top sources
-                    st.markdown("#### 🏆 Top Attention Sources")
-                    
-                    top_sources = []
-                    for idx in sorted_indices[:10]:
-                        if idx < len(source_metadata):
-                            meta = source_metadata[idx]
-                            weight = attention_weights[idx]
-                            
-                            top_sources.append({
-                                'Simulation': meta.get('name', 'Unknown'),
-                                'Energy (mJ)': meta.get('energy', 0),
-                                'Duration (ns)': meta.get('duration', 0),
-                                'Time (ns)': meta.get('time', 0),
-                                'Attention Weight': weight
-                            })
-                    
-                    if top_sources:
-                        df_top = pd.DataFrame(top_sources)
-                        st.dataframe(
-                            df_top.style.format({
-                                'Energy (mJ)': '{:.2f}',
-                                'Duration (ns)': '{:.2f}',
-                                'Time (ns)': '{:.1f}',
-                                'Attention Weight': '{:.4f}'
-                            }).background_gradient(subset=['Attention Weight'], cmap='YlOrRd'),
-                            use_container_width=True
-                        )
-                
-                # Create attention network visualization
-                st.markdown("#### 🔗 Attention Network")
-                
-                # Simplified network visualization
-                if len(attention_weights) > 0:
-                    # Create graph
-                    G = nx.Graph()
-                    G.add_node("QUERY", size=50, color='red', label="Query")
-                    
-                    # Add top sources as nodes
-                    for i, idx in enumerate(sorted_indices[:8]):
-                        if idx < len(source_metadata):
-                            meta = source_metadata[idx]
-                            weight = attention_weights[idx]
-                            
-                            node_id = f"S{i}"
-                            G.add_node(node_id,
-                                      size=30 * weight,
-                                      color='blue',
-                                      label=meta.get('name', f"Source {i}"),
-                                      weight=weight)
-                            
-                            # Add edge from query to source
-                            G.add_edge("QUERY", node_id, weight=weight)
-                    
-                    # Create network visualization
-                    pos = nx.spring_layout(G, seed=42)
-                    
-                    edge_x, edge_y = [], []
-                    for edge in G.edges():
-                        x0, y0 = pos[edge[0]]
-                        x1, y1 = pos[edge[1]]
-                        edge_x.extend([x0, x1, None])
-                        edge_y.extend([y0, y1, None])
-                    
-                    edge_trace = go.Scatter(
-                        x=edge_x, y=edge_y,
-                        line=dict(width=2, color='gray'),
-                        hoverinfo='none',
-                        mode='lines'
-                    )
-                    
-                    node_x, node_y, node_text, node_size, node_color = [], [], [], [], []
-                    for node in G.nodes():
-                        x, y = pos[node]
-                        node_x.append(x)
-                        node_y.append(y)
-                        
-                        if node == "QUERY":
-                            node_text.append("QUERY")
-                            node_size.append(30)
-                            node_color.append('red')
-                        else:
-                            node_data = G.nodes[node]
-                            node_text.append(node_data['label'])
-                            node_size.append(node_data['size'])
-                            node_color.append(node_data['color'])
-                    
-                    node_trace = go.Scatter(
-                        x=node_x, y=node_y,
-                        mode='markers+text',
-                        text=node_text,
-                        textposition="top center",
-                        marker=dict(
-                            size=node_size,
-                            color=node_color,
-                            line=dict(width=2, color='white')
-                        ),
-                        hoverinfo='text',
-                        name='Nodes'
-                    )
-                    
-                    network_fig = go.Figure(data=[edge_trace, node_trace])
-                    network_fig.update_layout(
-                        title="Attention Network Visualization",
-                        showlegend=False,
-                        hovermode='closest',
-                        height=500,
-                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
-                    )
-                    
-                    st.plotly_chart(network_fig, use_container_width=True)
+                st.plotly_chart(fig_percentiles, use_container_width=True)
+    else:
+        st.info(f"No time series data available for {field}")
+
+def render_interpolation_extrapolation():
+    """Render the enhanced interpolation/extrapolation interface"""
+    st.markdown('<h2 class="sub-header">🔮 Interpolation/Extrapolation Engine</h2>', 
+               unsafe_allow_html=True)
     
-    def _render_export_solutions(self):
-        """Render export interface"""
-        st.markdown("## 💾 Export Solutions")
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first to enable interpolation/extrapolation capabilities.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    st.markdown("""
+    <div class="info-box">
+    <h3>🧠 Physics-Informed Attention Mechanism</h3>
+    <p>This engine uses a <strong>transformer-inspired multi-head attention mechanism</strong> with <strong>spatial locality regulation</strong> to interpolate and extrapolate simulation results. The model learns from existing FEA simulations and can predict outcomes for new parameter combinations with quantified confidence.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Display loaded simulations summary
+    with st.expander("📋 Loaded Simulations Summary", expanded=True):
+        if st.session_state.summaries:
+            df_summary = pd.DataFrame([{
+                'Simulation': s['name'],
+                'Energy (mJ)': s['energy'],
+                'Duration (ns)': s['duration'],
+                'Timesteps': len(s['timesteps']),
+                'Fields': ', '.join(sorted(s['field_stats'].keys())[:3]) + ('...' if len(s['field_stats']) > 3 else '')
+            } for s in st.session_state.summaries])
+            
+            st.dataframe(
+                df_summary.style.format({
+                    'Energy (mJ)': '{:.2f}',
+                    'Duration (ns)': '{:.2f}'
+                }).background_gradient(subset=['Energy (mJ)', 'Duration (ns)'], cmap='Blues'),
+                use_container_width=True,
+                height=300
+            )
+    
+    # Query parameters
+    st.markdown('<h3 class="sub-header">🎯 Query Parameters</h3>', unsafe_allow_html=True)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        # Get parameter ranges from loaded data
+        if st.session_state.summaries:
+            energies = [s['energy'] for s in st.session_state.summaries]
+            min_energy, max_energy = min(energies), max(energies)
+        else:
+            min_energy, max_energy = 0.1, 50.0
         
-        # Get all solutions
-        all_solutions = {}
+        energy_query = st.number_input(
+            "Energy (mJ)",
+            min_value=float(min_energy * 0.5),
+            max_value=float(max_energy * 2.0),
+            value=float((min_energy + max_energy) / 2),
+            step=0.1,
+            key="interp_energy",
+            help=f"Training range: {min_energy:.1f} - {max_energy:.1f} mJ"
+        )
+    
+    with col2:
+        if st.session_state.summaries:
+            durations = [s['duration'] for s in st.session_state.summaries]
+            min_duration, max_duration = min(durations), max(durations)
+        else:
+            min_duration, max_duration = 0.5, 20.0
         
-        # Add original simulations
-        if st.session_state.get('data_loaded', False):
-            all_solutions.update(st.session_state.simulations)
+        duration_query = st.number_input(
+            "Pulse Duration (ns)",
+            min_value=float(min_duration * 0.5),
+            max_value=float(max_duration * 2.0),
+            value=float((min_duration + max_duration) / 2),
+            step=0.1,
+            key="interp_duration",
+            help=f"Training range: {min_duration:.1f} - {max_duration:.1f} ns"
+        )
+    
+    with col3:
+        max_time = st.number_input(
+            "Max Prediction Time (ns)",
+            min_value=1,
+            max_value=100,
+            value=20,
+            step=1,
+            key="interp_maxtime"
+        )
+    
+    with col4:
+        time_resolution = st.selectbox(
+            "Time Resolution",
+            ["1 ns", "2 ns", "5 ns", "10 ns"],
+            index=0,
+            key="interp_resolution"
+        )
+    
+    # Generate time points
+    time_step_map = {"1 ns": 1, "2 ns": 2, "5 ns": 5, "10 ns": 10}
+    time_step = time_step_map[time_resolution]
+    time_points = np.arange(1, max_time + 1, time_step)
+    
+    # Model parameters
+    with st.expander("⚙️ Attention Mechanism Parameters", expanded=False):
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            sigma_param = st.slider(
+                "Kernel Width (σ)",
+                min_value=0.1,
+                max_value=1.0,
+                value=0.3,
+                step=0.05,
+                key="interp_sigma",
+                help="Controls the attention focus width"
+            )
+        with col2:
+            spatial_weight = st.slider(
+                "Spatial Weight",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.5,
+                step=0.05,
+                key="interp_spatial",
+                help="Weight for spatial locality regulation"
+            )
+        with col3:
+            n_heads = st.slider(
+                "Attention Heads",
+                min_value=1,
+                max_value=8,
+                value=4,
+                step=1,
+                key="interp_heads",
+                help="Number of parallel attention heads"
+            )
+        with col4:
+            temperature = st.slider(
+                "Temperature",
+                min_value=0.1,
+                max_value=2.0,
+                value=1.0,
+                step=0.1,
+                key="interp_temp",
+                help="Softmax temperature for attention weights"
+            )
         
-        # Add interpolated solutions
-        if 'interpolated_solutions' in st.session_state:
-            all_solutions.update(st.session_state.interpolated_solutions)
+        # Update extrapolator parameters
+        st.session_state.extrapolator.sigma_param = sigma_param
+        st.session_state.extrapolator.spatial_weight = spatial_weight
+        st.session_state.extrapolator.n_heads = n_heads
+        st.session_state.extrapolator.temperature = temperature
+    
+    # Run prediction
+    if st.button("🚀 Run Physics-Informed Prediction", type="primary", use_container_width=True):
+        with st.spinner("Running multi-head attention prediction with spatial locality regulation..."):
+            results = st.session_state.extrapolator.predict_time_series(
+                energy_query, duration_query, time_points
+            )
+            
+            if results and 'field_predictions' in results and results['field_predictions']:
+                st.markdown("""
+                <div class="success-box">
+                <h3>✅ Prediction Successful</h3>
+                <p>Physics-informed predictions generated using multi-head attention with spatial locality regulation.</p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Enhanced tabs with 3D rendering
+                tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Predictions", "🧠 Attention", "🌐 3D Analysis", "📊 Details", "🖼️ 3D Rendering"])
+                
+                with tab1:
+                    render_prediction_results(results, time_points, energy_query, duration_query)
+                
+                with tab2:
+                    render_attention_visualization(results, energy_query, duration_query, time_points)
+                
+                with tab3:
+                    render_3d_analysis(results, time_points, energy_query, duration_query)
+                
+                with tab4:
+                    render_detailed_results(results, time_points, energy_query, duration_query)
+                
+                with tab5:
+                    render_3d_interpolation_visualization(results, time_points, energy_query, duration_query)
+            else:
+                st.error("Prediction failed. Please check input parameters and ensure sufficient training data.")
+
+def render_prediction_results(results, time_points, energy_query, duration_query):
+    """Render prediction results visualization"""
+    # Determine which fields to plot
+    available_fields = list(results['field_predictions'].keys())
+    
+    if not available_fields:
+        st.warning("No field predictions available.")
+        return
+    
+    # Create subplots
+    n_fields = min(len(available_fields), 4)
+    fig = make_subplots(
+        rows=n_fields, cols=1,
+        subplot_titles=[f"Predicted {field}" for field in available_fields[:n_fields]],
+        vertical_spacing=0.1,
+        shared_xaxes=True
+    )
+    
+    for idx, field in enumerate(available_fields[:n_fields]):
+        row = idx + 1
         
-        if not all_solutions:
-            st.info("No solutions available for export.")
-            return
+        # Plot mean prediction
+        if results['field_predictions'][field]['mean']:
+            fig.add_trace(
+                go.Scatter(
+                    x=time_points,
+                    y=results['field_predictions'][field]['mean'],
+                    mode='lines+markers',
+                    name=f'{field} (mean)',
+                    line=dict(width=3, color='blue'),
+                    fillcolor='rgba(0, 0, 255, 0.1)'
+                ),
+                row=row, col=1
+            )
+        
+        # Add confidence band (mean ± std)
+        if (results['field_predictions'][field]['mean'] and 
+            results['field_predictions'][field]['std']):
+            
+            mean_vals = results['field_predictions'][field]['mean']
+            std_vals = results['field_predictions'][field]['std']
+            
+            y_upper = np.array(mean_vals) + np.array(std_vals)
+            y_lower = np.array(mean_vals) - np.array(std_vals)
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=np.concatenate([time_points, time_points[::-1]]),
+                    y=np.concatenate([y_upper, y_lower[::-1]]),
+                    fill='toself',
+                    fillcolor='rgba(0, 0, 255, 0.2)',
+                    line=dict(color='rgba(255,255,255,0)'),
+                    showlegend=False,
+                    name=f'{field} ± std'
+                ),
+                row=row, col=1
+            )
+    
+    fig.update_layout(
+        height=300 * n_fields,
+        title_text=f"Field Predictions (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
+        showlegend=True,
+        hovermode="x unified"
+    )
+    
+    # Update y-axes
+    for i in range(1, n_fields + 1):
+        fig.update_yaxes(title_text="Value", row=i, col=1)
+    
+    fig.update_xaxes(title_text="Time (ns)", row=n_fields, col=1)
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Confidence plot
+    if results['confidence_scores']:
+        fig_conf = go.Figure()
+        fig_conf.add_trace(go.Scatter(
+            x=time_points,
+            y=results['confidence_scores'],
+            mode='lines+markers',
+            line=dict(color='orange', width=3),
+            fill='tozeroy',
+            fillcolor='rgba(255, 165, 0, 0.2)',
+            name='Prediction Confidence'
+        ))
+        
+        fig_conf.update_layout(
+            title="Prediction Confidence Over Time",
+            xaxis_title="Time (ns)",
+            yaxis_title="Confidence",
+            height=400,
+            yaxis_range=[0, 1]
+        )
+        
+        st.plotly_chart(fig_conf, use_container_width=True)
+        
+        # Confidence insights
+        avg_conf = np.mean(results['confidence_scores'])
+        min_conf = np.min(results['confidence_scores'])
+        max_conf = np.max(results['confidence_scores'])
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Average Confidence", f"{avg_conf:.3f}")
+        with col2:
+            st.metric("Minimum Confidence", f"{min_conf:.3f}")
+        with col3:
+            st.metric("Maximum Confidence", f"{max_conf:.3f}")
+        
+        if avg_conf < 0.3:
+            st.warning("⚠️ **Low Confidence**: Query parameters are far from training data. Extrapolation risk is high.")
+        elif avg_conf < 0.6:
+            st.info("ℹ️ **Moderate Confidence**: Query parameters are in extrapolation region.")
+        else:
+            st.success("✅ **High Confidence**: Query parameters are well-supported by training data.")
+
+def render_attention_visualization(results, energy_query, duration_query, time_points):
+    """Render attention mechanism visualizations"""
+    if not results['attention_maps'] or len(results['attention_maps'][0]) == 0:
+        st.info("No attention data available.")
+        return
+    
+    st.markdown('<h4 class="sub-header">🧠 Attention Mechanism Visualization</h4>', unsafe_allow_html=True)
+    
+    # Select timestep for attention visualization
+    selected_timestep_idx = st.slider(
+        "Select timestep for attention visualization",
+        0, len(time_points) - 1, 0,
+        key="attention_timestep"
+    )
+    
+    attention_weights = results['attention_maps'][selected_timestep_idx]
+    selected_time = time_points[selected_timestep_idx]
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # 3D attention heatmap
+        st.markdown("##### 3D Attention Distribution")
+        heatmap_3d = st.session_state.visualizer.create_attention_heatmap_3d(
+            attention_weights,
+            st.session_state.extrapolator.source_metadata
+        )
+        if heatmap_3d.data:
+            st.plotly_chart(heatmap_3d, use_container_width=True)
+        else:
+            st.info("Insufficient data for 3D heatmap")
+    
+    with col2:
+        # Attention network
+        st.markdown("##### Attention Network")
+        network_fig = st.session_state.visualizer.create_attention_network(
+            attention_weights,
+            st.session_state.extrapolator.source_metadata,
+            top_k=8
+        )
+        if network_fig.data:
+            st.plotly_chart(network_fig, use_container_width=True)
+        else:
+            st.info("Insufficient data for network visualization")
+    
+    # Attention weight distribution
+    st.markdown("##### Attention Weight Distribution")
+    
+    fig_dist = go.Figure()
+    fig_dist.add_trace(go.Histogram(
+        x=attention_weights,
+        nbinsx=30,
+        marker_color='skyblue',
+        opacity=0.7,
+        name='Attention Weights'
+    ))
+    
+    fig_dist.update_layout(
+        title=f"Attention Weight Distribution at t={selected_time} ns",
+        xaxis_title="Attention Weight",
+        yaxis_title="Frequency",
+        height=400
+    )
+    
+    st.plotly_chart(fig_dist, use_container_width=True)
+    
+    # Top attention sources
+    if len(attention_weights) > 0:
+        # Get top attention sources
+        top_indices = np.argsort(attention_weights)[-10:][::-1]
+        
+        st.markdown("##### Top 10 Attention Sources")
+        
+        top_sources_data = []
+        for idx in top_indices:
+            if idx < len(st.session_state.extrapolator.source_metadata):
+                meta = st.session_state.extrapolator.source_metadata[idx]
+                top_sources_data.append({
+                    'Simulation': meta['name'],
+                    'Energy (mJ)': meta['energy'],
+                    'Duration (ns)': meta['duration'],
+                    'Time (ns)': meta['time'],
+                    'Attention Weight': attention_weights[idx]
+                })
+        
+        if top_sources_data:
+            df_top = pd.DataFrame(top_sources_data)
+            st.dataframe(
+                df_top.style.format({
+                    'Energy (mJ)': '{:.2f}',
+                    'Duration (ns)': '{:.2f}',
+                    'Time (ns)': '{:.1f}',
+                    'Attention Weight': '{:.4f}'
+                }).background_gradient(subset=['Attention Weight'], cmap='YlOrRd'),
+                use_container_width=True
+            )
+
+def render_3d_analysis(results, time_points, energy_query, duration_query):
+    """Render 3D analysis visualizations"""
+    st.markdown('<h4 class="sub-header">🌐 3D Parameter Space Analysis</h4>', unsafe_allow_html=True)
+    
+    # Create 3D parameter space visualization
+    if st.session_state.summaries:
+        # Extract training data
+        train_energies = []
+        train_durations = []
+        train_max_temps = []
+        train_max_stresses = []
+        
+        for summary in st.session_state.summaries:
+            train_energies.append(summary['energy'])
+            train_durations.append(summary['duration'])
+            
+            if 'temperature' in summary['field_stats']:
+                train_max_temps.append(np.max(summary['field_stats']['temperature']['max']))
+            else:
+                train_max_temps.append(0)
+            
+            if 'principal stress' in summary['field_stats']:
+                train_max_stresses.append(np.max(summary['field_stats']['principal stress']['max']))
+            else:
+                train_max_stresses.append(0)
+        
+        # Add query point
+        query_max_temp = np.max(results['field_predictions'].get('temperature', {}).get('max', [0]))
+        query_max_stress = np.max(results['field_predictions'].get('principal stress', {}).get('max', [0]))
+        
+        # Create 3D scatter plot
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Temperature parameter space
+            fig_temp = go.Figure()
+            
+            # Training points
+            fig_temp.add_trace(go.Scatter3d(
+                x=train_energies,
+                y=train_durations,
+                z=train_max_temps,
+                mode='markers',
+                marker=dict(
+                    size=8,
+                    color=train_max_temps,
+                    colorscale='Viridis',
+                    opacity=0.7,
+                    colorbar=dict(title="Max Temp")
+                ),
+                name='Training Data',
+                hovertemplate='Training<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Max Temp: %{z:.1f}<extra></extra>'
+            ))
+            
+            # Query point
+            fig_temp.add_trace(go.Scatter3d(
+                x=[energy_query],
+                y=[duration_query],
+                z=[query_max_temp],
+                mode='markers',
+                marker=dict(
+                    size=12,
+                    color='red',
+                    symbol='diamond'
+                ),
+                name='Query Point',
+                hovertemplate='Query<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Pred Temp: %{z:.1f}<extra></extra>'
+            ))
+            
+            fig_temp.update_layout(
+                title="Parameter Space - Maximum Temperature",
+                scene=dict(
+                    xaxis_title="Energy (mJ)",
+                    yaxis_title="Duration (ns)",
+                    zaxis_title="Max Temperature"
+                ),
+                height=500
+            )
+            
+            st.plotly_chart(fig_temp, use_container_width=True)
+        
+        with col2:
+            # Stress parameter space
+            fig_stress = go.Figure()
+            
+            # Training points
+            fig_stress.add_trace(go.Scatter3d(
+                x=train_energies,
+                y=train_durations,
+                z=train_max_stresses,
+                mode='markers',
+                marker=dict(
+                    size=8,
+                    color=train_max_stresses,
+                    colorscale='Plasma',
+                    opacity=0.7,
+                    colorbar=dict(title="Max Stress")
+                ),
+                name='Training Data',
+                hovertemplate='Training<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Max Stress: %{z:.1f}<extra></extra>'
+            ))
+            
+            # Query point
+            fig_stress.add_trace(go.Scatter3d(
+                x=[energy_query],
+                y=[duration_query],
+                z=[query_max_stress],
+                mode='markers',
+                marker=dict(
+                    size=12,
+                    color='red',
+                    symbol='diamond'
+                ),
+                name='Query Point',
+                hovertemplate='Query<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Pred Stress: %{z:.1f}<extra></extra>'
+            ))
+            
+            fig_stress.update_layout(
+                title="Parameter Space - Maximum Stress",
+                scene=dict(
+                    xaxis_title="Energy (mJ)",
+                    yaxis_title="Duration (ns)",
+                    zaxis_title="Max Stress"
+                ),
+                height=500
+            )
+            
+            st.plotly_chart(fig_stress, use_container_width=True)
+
+def render_detailed_results(results, time_points, energy_query, duration_query):
+    """Render detailed prediction results"""
+    st.markdown('<h4 class="sub-header">📊 Detailed Prediction Results</h4>', unsafe_allow_html=True)
+    
+    # Create results table
+    data_rows = []
+    for idx, t in enumerate(time_points):
+        row = {'Time (ns)': t}
+        
+        for field in results['field_predictions']:
+            if field in results['field_predictions']:
+                if idx < len(results['field_predictions'][field]['mean']):
+                    row[f'{field}_mean'] = results['field_predictions'][field]['mean'][idx]
+                    row[f'{field}_max'] = results['field_predictions'][field]['max'][idx]
+                    row[f'{field}_std'] = results['field_predictions'][field]['std'][idx]
+        
+        if idx < len(results['confidence_scores']):
+            row['confidence'] = results['confidence_scores'][idx]
+        
+        data_rows.append(row)
+    
+    if data_rows:
+        df_results = pd.DataFrame(data_rows)
+        
+        # Format numeric columns
+        format_dict = {}
+        for col in df_results.columns:
+            if col != 'Time (ns)':
+                format_dict[col] = "{:.3f}"
+        
+        # Display with highlighting
+        styled_df = df_results.style.format(format_dict)
+        
+        # Add conditional formatting for confidence
+        def highlight_confidence(val):
+            if isinstance(val, (int, float)):
+                if val < 0.3:
+                    return 'background-color: #ffcccc'
+                elif val < 0.6:
+                    return 'background-color: #fff4cc'
+                else:
+                    return 'background-color: #ccffcc'
+            return ''
+        
+        if 'confidence' in df_results.columns:
+            styled_df = styled_df.applymap(highlight_confidence, subset=['confidence'])
+        
+        st.dataframe(styled_df, use_container_width=True, height=400)
+        
+        # Statistics summary
+        st.markdown("##### 📈 Prediction Statistics")
+        
+        if 'confidence' in df_results.columns:
+            conf_stats = df_results['confidence'].describe()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Mean Confidence", f"{conf_stats['mean']:.3f}")
+            with col2:
+                st.metric("Min Confidence", f"{conf_stats['min']:.3f}")
+            with col3:
+                st.metric("Max Confidence", f"{conf_stats['max']:.3f}")
+            with col4:
+                st.metric("Std Dev", f"{conf_stats['std']:.3f}")
         
         # Export options
+        st.markdown("##### 💾 Export Results")
+        
         col1, col2 = st.columns(2)
+        
         with col1:
-            export_format = st.selectbox(
-                "Export Format",
-                ["CSV", "JSON", "NPZ", "VTK"],
-                key="export_format"
+            # CSV export
+            csv = df_results.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download as CSV",
+                data=csv,
+                file_name=f"predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.csv",
+                mime="text/csv",
+                use_container_width=True
             )
         
         with col2:
-            export_type = st.selectbox(
-                "Export Type",
-                ["Selected Solution", "All Solutions", "Comparison Data"],
-                key="export_type"
+            # JSON export
+            json_str = df_results.to_json(orient='records', indent=2)
+            st.download_button(
+                label="📥 Download as JSON",
+                data=json_str.encode('utf-8'),
+                file_name=f"predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.json",
+                mime="application/json",
+                use_container_width=True
             )
-        
-        # Solution selection
-        if export_type == "Selected Solution":
-            solution_names = list(all_solutions.keys())
-            selected_solution = st.selectbox(
-                "Select Solution",
-                solution_names,
-                key="export_solution"
-            )
-            
-            solutions_to_export = {selected_solution: all_solutions[selected_solution]}
-        elif export_type == "All Solutions":
-            solutions_to_export = all_solutions
-        else:  # Comparison Data
-            # Select multiple solutions for comparison
-            solution_names = list(all_solutions.keys())
-            selected_solutions = st.multiselect(
-                "Select Solutions for Comparison",
-                solution_names,
-                default=solution_names[:min(3, len(solution_names))]
-            )
-            
-            solutions_to_export = {name: all_solutions[name] for name in selected_solutions}
-        
-        # Export button
-        if st.button("Export Data", use_container_width=True):
-            with st.spinner("Preparing export..."):
-                self._export_data(solutions_to_export, export_format)
+
+def render_3d_interpolation_visualization(results, time_points, energy_query, duration_query):
+    """Render 3D visualization of interpolated/extrapolated fields"""
+    st.markdown('<h4 class="sub-header">🖼️ 3D Interpolation Visualization</h4>', unsafe_allow_html=True)
     
-    def _export_data(self, solutions, format):
-        """Export data in specified format"""
-        if format == "CSV":
-            # Create CSV export
-            csv_data = []
+    if not st.session_state.get('simulations'):
+        st.warning("No full simulations loaded for 3D rendering. Please reload with 'Load Full Mesh' enabled.")
+        return
+    
+    # Check if simulations have full mesh data
+    first_sim = next(iter(st.session_state.simulations.values()))
+    if not first_sim.get('has_mesh', False):
+        st.warning("Full mesh data not available. Please reload simulations with 'Load Full Mesh' enabled.")
+        return
+    
+    # Select field and timestep for 3D rendering
+    available_fields = list(results['field_predictions'].keys())
+    if not available_fields:
+        st.warning("No predicted fields available for 3D rendering.")
+        return
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        selected_field_3d = st.selectbox(
+            "Select Field for 3D Rendering", 
+            available_fields, 
+            key="interp_3d_field"
+        )
+    
+    with col2:
+        timestep_idx_3d = st.slider(
+            "Select Timestep for 3D", 
+            0, len(time_points) - 1, 0, 
+            key="interp_3d_timestep"
+        )
+        selected_time_3d = time_points[timestep_idx_3d]
+    
+    with col3:
+        # Add visualization options
+        render_mode = st.selectbox(
+            "Rendering Mode",
+            ["Surface Mesh", "Point Cloud", "Wireframe"],
+            index=0,
+            key="render_mode"
+        )
+    
+    # Get attention weights for selected timestep
+    if timestep_idx_3d < len(results['attention_maps']):
+        attention_weights_3d = results['attention_maps'][timestep_idx_3d]
+        
+        # Compute interpolated field
+        with st.spinner(f"Interpolating {selected_field_3d} field at t={selected_time_3d} ns..."):
+            interpolated_values = st.session_state.extrapolator.interpolate_full_field(
+                selected_field_3d,
+                attention_weights_3d,
+                st.session_state.extrapolator.source_metadata,
+                st.session_state.simulations
+            )
+        
+        if interpolated_values is None:
+            st.error(f"Failed to interpolate field '{selected_field_3d}'. Ensure field exists in source simulations.")
+            return
+        
+        # Get common mesh from first simulation
+        first_sim = next(iter(st.session_state.simulations.values()))
+        pts = first_sim['points']
+        triangles = first_sim.get('triangles')
+        
+        # Handle scalar/vector fields
+        if interpolated_values.ndim == 1:
+            values = np.nan_to_num(interpolated_values)  # Replace NaNs
+            label = selected_field_3d
+        else:
+            # For vector fields, use magnitude
+            magnitude = np.linalg.norm(interpolated_values, axis=1)
+            values = np.nan_to_num(magnitude)
+            label = f"{selected_field_3d} (magnitude)"
+        
+        # Display confidence information
+        if timestep_idx_3d < len(results['confidence_scores']):
+            confidence = results['confidence_scores'][timestep_idx_3d]
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Interpolation Confidence", f"{confidence:.3f}")
+            with col2:
+                st.metric("Field Range", f"{np.min(values):.3f} - {np.max(values):.3f}")
+            with col3:
+                st.metric("Active Sources", f"{np.sum(attention_weights_3d > 1e-3)}")
+        
+        # Create 3D visualization based on selected mode
+        if render_mode == "Surface Mesh" and triangles is not None and len(triangles) > 0:
+            # Validate triangles
+            valid_triangles = triangles[np.all(triangles < len(pts), axis=1)]
             
-            for name, solution in solutions.items():
-                points = solution.get('points', [])
-                values = solution.get('field_values', [])
-                
-                if len(points) > 0 and len(values) > 0:
-                    for i, (point, value) in enumerate(zip(points, values)):
-                        csv_data.append({
-                            'solution': name,
-                            'point_id': i,
-                            'x': point[0],
-                            'y': point[1],
-                            'z': point[2],
-                            'value': value,
-                            'energy': solution.get('energy', ''),
-                            'duration': solution.get('duration', ''),
-                            'time': solution.get('time', '')
-                        })
-            
-            if csv_data:
-                df = pd.DataFrame(csv_data)
-                csv = df.to_csv(index=False)
-                
-                st.download_button(
-                    label="📥 Download CSV",
-                    data=csv,
-                    file_name="spherical_solutions.csv",
-                    mime="text/csv"
+            if len(valid_triangles) > 0:
+                mesh_data = go.Mesh3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
+                    intensity=values,
+                    colorscale=st.session_state.selected_colormap,
+                    intensitymode='vertex',
+                    colorbar=dict(
+                        title=dict(text=label, font=dict(size=14)),
+                        thickness=20,
+                        len=0.75
+                    ),
+                    opacity=0.9,
+                    lighting=dict(
+                        ambient=0.8,
+                        diffuse=0.8,
+                        specular=0.5,
+                        roughness=0.5
+                    ),
+                    lightposition=dict(x=100, y=200, z=300),
+                    hovertemplate='<b>Value:</b> %{intensity:.3f}<br>' +
+                                 '<b>X:</b> %{x:.3f}<br>' +
+                                 '<b>Y:</b> %{y:.3f}<br>' +
+                                 '<b>Z:</b> %{z:.3f}<extra></extra>'
                 )
             else:
-                st.warning("No data to export")
+                # Fallback to scatter if no valid triangles
+                render_mode = "Point Cloud"
         
-        elif format == "JSON":
-            # Create JSON export
-            export_data = {}
+        if render_mode == "Point Cloud" or (render_mode == "Surface Mesh" and (triangles is None or len(triangles) == 0)):
+            # Create point cloud visualization
+            mesh_data = go.Scatter3d(
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                mode='markers',
+                marker=dict(
+                    size=4,
+                    color=values,
+                    colorscale=st.session_state.selected_colormap,
+                    opacity=0.8,
+                    colorbar=dict(
+                        title=dict(text=label, font=dict(size=14)),
+                        thickness=20,
+                        len=0.75
+                    ),
+                    showscale=True
+                ),
+                hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
+                             '<b>X:</b> %{x:.3f}<br>' +
+                             '<b>Y:</b> %{y:.3f}<br>' +
+                             '<b>Z:</b> %{z:.3f}<extra></extra>'
+            )
+        
+        elif render_mode == "Wireframe" and triangles is not None and len(triangles) > 0:
+            # Create wireframe visualization
+            valid_triangles = triangles[np.all(triangles < len(pts), axis=1)]
             
-            for name, solution in solutions.items():
-                # Convert numpy arrays to lists
-                export_solution = {}
-                for key, value in solution.items():
-                    if isinstance(value, np.ndarray):
-                        export_solution[key] = value.tolist()
-                    elif isinstance(value, np.float32) or isinstance(value, np.float64):
-                        export_solution[key] = float(value)
-                    elif isinstance(value, np.int32) or isinstance(value, np.int64):
-                        export_solution[key] = int(value)
-                    else:
-                        export_solution[key] = value
+            # Extract edges for wireframe
+            edges = set()
+            for tri in valid_triangles[:1000]:  # Limit for performance
+                edges.add(tuple(sorted([tri[0], tri[1]])))
+                edges.add(tuple(sorted([tri[1], tri[2]])))
+                edges.add(tuple(sorted([tri[2], tri[0]])))
+            
+            # Create line traces for edges
+            lines_x, lines_y, lines_z = [], [], []
+            for edge in list(edges)[:2000]:  # Limit for performance
+                lines_x.extend([pts[edge[0], 0], pts[edge[1], 0], None])
+                lines_y.extend([pts[edge[0], 1], pts[edge[1], 1], None])
+                lines_z.extend([pts[edge[0], 2], pts[edge[1], 2], None])
+            
+            # Create mesh for coloring
+            mesh_data = [
+                go.Scatter3d(
+                    x=lines_x, y=lines_y, z=lines_z,
+                    mode='lines',
+                    line=dict(color='darkgray', width=1),
+                    hoverinfo='none',
+                    name='Wireframe'
+                ),
+                go.Scatter3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    mode='markers',
+                    marker=dict(
+                        size=3,
+                        color=values,
+                        colorscale=st.session_state.selected_colormap,
+                        opacity=0.7,
+                        colorbar=dict(title=label),
+                        showscale=True
+                    ),
+                    hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
+                                 '<b>X:</b> %{x:.3f}<br>' +
+                                 '<b>Y:</b> %{y:.3f}<br>' +
+                                 '<b>Z:</b> %{z:.3f}<extra></extra>',
+                    name='Values'
+                )
+            ]
+        else:
+            mesh_data = go.Scatter3d(
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                mode='markers',
+                marker=dict(
+                    size=4,
+                    color=values,
+                    colorscale=st.session_state.selected_colormap,
+                    opacity=0.8,
+                    colorbar=dict(title=label),
+                    showscale=True
+                ),
+                hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
+                             '<b>X:</b> %{x:.3f}<br>' +
+                             '<b>Y:</b> %{y:.3f}<br>' +
+                             '<b>Z:</b> %{z:.3f}<extra></extra>'
+            )
+        
+        # Create figure
+        fig_3d = go.Figure(data=mesh_data)
+        fig_3d.update_layout(
+            title=dict(
+                text=f"Interpolated {label} at t={selected_time_3d} ns<br><sub>E={energy_query:.1f} mJ, τ={duration_query:.1f} ns | Confidence: {confidence:.3f}</sub>",
+                font=dict(size=18)
+            ),
+            scene=dict(
+                aspectmode="data",
+                camera=dict(
+                    eye=dict(x=1.5, y=1.5, z=1.5),
+                    up=dict(x=0, y=0, z=1)
+                ),
+                xaxis=dict(
+                    title="X",
+                    gridcolor="lightgray",
+                    showbackground=True,
+                    backgroundcolor="white"
+                ),
+                yaxis=dict(
+                    title="Y",
+                    gridcolor="lightgray",
+                    showbackground=True,
+                    backgroundcolor="white"
+                ),
+                zaxis=dict(
+                    title="Z",
+                    gridcolor="lightgray",
+                    showbackground=True,
+                    backgroundcolor="white"
+                )
+            ),
+            height=700,
+            margin=dict(l=0, r=0, t=80, b=0)
+        )
+        
+        st.plotly_chart(fig_3d, use_container_width=True)
+        
+        # Additional analysis
+        with st.expander("📊 Field Analysis", expanded=False):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Histogram of field values
+                fig_hist = go.Figure()
+                fig_hist.add_trace(go.Histogram(
+                    x=values,
+                    nbinsx=50,
+                    marker_color='skyblue',
+                    opacity=0.7,
+                    name='Value Distribution'
+                ))
+                fig_hist.update_layout(
+                    title=f"{label} Value Distribution",
+                    xaxis_title="Value",
+                    yaxis_title="Frequency",
+                    height=300
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+            
+            with col2:
+                # Top contributing sources
+                top_k = 5
+                top_indices = np.argsort(attention_weights_3d)[-top_k:][::-1]
                 
-                export_data[name] = export_solution
-            
-            json_str = json.dumps(export_data, indent=2)
-            
-            st.download_button(
-                label="📥 Download JSON",
-                data=json_str,
-                file_name="spherical_solutions.json",
-                mime="application/json"
-            )
+                top_sources = []
+                for idx in top_indices:
+                    if idx < len(st.session_state.extrapolator.source_metadata):
+                        meta = st.session_state.extrapolator.source_metadata[idx]
+                        top_sources.append({
+                            'Simulation': meta['name'],
+                            'Weight': attention_weights_3d[idx],
+                            'Energy': meta['energy'],
+                            'Duration': meta['duration'],
+                            'Time': meta['time']
+                        })
+                
+                if top_sources:
+                    df_top = pd.DataFrame(top_sources)
+                    st.markdown(f"**Top {len(top_sources)} Contributing Sources:**")
+                    st.dataframe(
+                        df_top.style.format({
+                            'Weight': '{:.4f}',
+                            'Energy': '{:.2f}',
+                            'Duration': '{:.2f}',
+                            'Time': '{:.1f}'
+                        }).background_gradient(subset=['Weight'], cmap='YlOrRd'),
+                        use_container_width=True,
+                        height=200
+                    )
         
-        elif format == "NPZ":
-            # Create NPZ export (numpy compressed format)
-            import io
-            import zipfile
-            
-            # Create in-memory zip file
-            zip_buffer = io.BytesIO()
-            
-            with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
-                for name, solution in solutions.items():
-                    # Save points and values
-                    points = solution.get('points', np.array([]))
-                    values = solution.get('field_values', np.array([]))
-                    
-                    if len(points) > 0:
-                        # Create numpy arrays
-                        npz_buffer = io.BytesIO()
-                        np.savez(npz_buffer, 
-                                points=points, 
-                                values=values,
-                                metadata={
-                                    'name': name,
-                                    'energy': solution.get('energy', 0),
-                                    'duration': solution.get('duration', 0),
-                                    'time': solution.get('time', 0)
-                                })
-                        
-                        # Add to zip
-                        zip_file.writestr(f"{name}.npz", npz_buffer.getvalue())
-            
-            st.download_button(
-                label="📥 Download NPZ Zip",
-                data=zip_buffer.getvalue(),
-                file_name="spherical_solutions.zip",
-                mime="application/zip"
-            )
+        # Export options
+        st.markdown("##### 💾 Export 3D Data")
+        col1, col2 = st.columns(2)
         
-        else:  # VTK
-            st.info("VTK export is under development.")
-            st.markdown("""
-            **Planned VTK features:**
-            - Export spherical meshes with field data
-            - ParaView-compatible format
-            - Time series support
-            - Material properties
-            """)
+        with col1:
+            # Export as VTU using meshio
+            try:
+                import meshio
+                # Create a simple mesh for export
+                cells = [("triangle", valid_triangles)] if 'valid_triangles' in locals() and len(valid_triangles) > 0 else []
+                mesh = meshio.Mesh(pts, cells, point_data={label: values})
+                
+                # Save to buffer
+                buffer = BytesIO()
+                meshio.write(buffer, mesh, file_format="vtu")
+                buffer.seek(0)
+                
+                st.download_button(
+                    label="📥 Download as VTU",
+                    data=buffer,
+                    file_name=f"interpolated_{label}_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns_t{selected_time_3d}ns.vtu",
+                    mime="application/octet-stream",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.warning(f"VTU export not available: {e}")
+        
+        with col2:
+            # Export as CSV
+            df_export = pd.DataFrame({
+                'X': pts[:, 0],
+                'Y': pts[:, 1],
+                'Z': pts[:, 2],
+                label: values
+            })
+            csv = df_export.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download as CSV",
+                data=csv,
+                file_name=f"interpolated_{label}_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns_t{selected_time_3d}ns.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+    else:
+        st.warning("No attention weights available for selected timestep.")
 
-# =============================================
-# MAIN APPLICATION ENTRY POINT
-# =============================================
-def main():
-    """Main entry point"""
-    try:
-        app = SphericalFEAInterpolator()
-        app.run()
-    except Exception as e:
-        st.error(f"Application error: {str(e)}")
-        st.error(traceback.format_exc())
+def render_comparative_analysis():
+    """Render enhanced comparative analysis interface"""
+    st.markdown('<h2 class="sub-header">📊 Comparative Analysis</h2>', unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first to enable comparative analysis.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    simulations = st.session_state.simulations
+    summaries = st.session_state.summaries
+    
+    # Target simulation selection
+    st.markdown('<h3 class="sub-header">🎯 Select Target Simulation</h3>', unsafe_allow_html=True)
+    
+    available_simulations = sorted(simulations.keys())
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        target_simulation = st.selectbox(
+            "Select target simulation for highlighting",
+            available_simulations,
+            key="target_sim_select",
+            help="This simulation will be highlighted in all visualizations"
+        )
+    
+    with col2:
+        n_comparisons = st.number_input(
+            "Number of comparisons",
+            min_value=1,
+            max_value=10,
+            value=5,
+            step=1,
+            key="n_comparisons"
+        )
+    
+    # Select comparison simulations (excluding target)
+    comparison_sims = [sim for sim in available_simulations if sim != target_simulation]
+    selected_comparisons = st.multiselect(
+        "Select simulations for comparison",
+        comparison_sims,
+        default=comparison_sims[:min(n_comparisons - 1, len(comparison_sims))],
+        help="Select simulations to compare with the target"
+    )
+    
+    # Include target in visualization list
+    visualization_sims = [target_simulation] + selected_comparisons
+    
+    if not visualization_sims:
+        st.info("Please select at least one simulation for comparison.")
+        return
+    
+    # Field selection
+    st.markdown('<h3 class="sub-header">📈 Select Field for Analysis</h3>', unsafe_allow_html=True)
+    
+    # Get available fields from selected simulations
+    available_fields = set()
+    for sim_name in visualization_sims:
+        if sim_name in simulations:
+            available_fields.update(simulations[sim_name]['field_info'].keys())
+    
+    if not available_fields:
+        st.error("No field data available for selected simulations.")
+        return
+    
+    selected_field = st.selectbox(
+        "Select field for analysis",
+        sorted(available_fields),
+        key="comparison_field",
+        help="Choose a field to compare across simulations"
+    )
+    
+    # Visualization tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Sunburst", "🎯 Radar", "⏱️ Evolution", "🌐 3D Analysis"])
+    
+    with tab1:
+        # Sunburst chart
+        st.markdown("##### 📊 Hierarchical Sunburst Chart")
+        sunburst_fig = st.session_state.visualizer.create_sunburst_chart(
+            summaries,
+            selected_field,
+            highlight_sim=target_simulation
+        )
+        if sunburst_fig.data:
+            st.plotly_chart(sunburst_fig, use_container_width=True)
+        else:
+            st.info("Insufficient data for sunburst chart")
+    
+    with tab2:
+        # Radar chart
+        st.markdown("##### 🎯 Multi-Field Radar Comparison")
+        radar_fig = st.session_state.visualizer.create_radar_chart(
+            summaries,
+            visualization_sims,
+            target_sim=target_simulation
+        )
+        if radar_fig.data:
+            st.plotly_chart(radar_fig, use_container_width=True)
+        else:
+            st.info("Insufficient data for radar chart")
+    
+    with tab3:
+        # Field evolution comparison
+        st.markdown("##### ⏱️ Field Evolution Over Time")
+        evolution_fig = st.session_state.visualizer.create_field_evolution_comparison(
+            summaries,
+            visualization_sims,
+            selected_field,
+            target_sim=target_simulation
+        )
+        if evolution_fig.data:
+            st.plotly_chart(evolution_fig, use_container_width=True)
+        else:
+            st.info(f"No {selected_field} data available for selected simulations")
+    
+    with tab4:
+        # 3D parameter space analysis
+        st.markdown("##### 🌐 3D Parameter Space Analysis")
+        
+        if summaries:
+            # Extract data for 3D plot
+            energies = []
+            durations = []
+            max_vals = []
+            sim_names = []
+            is_target = []
+            
+            for summary in summaries:
+                if summary['name'] in visualization_sims and selected_field in summary['field_stats']:
+                    energies.append(summary['energy'])
+                    durations.append(summary['duration'])
+                    sim_names.append(summary['name'])
+                    is_target.append(summary['name'] == target_simulation)
+                    
+                    stats = summary['field_stats'][selected_field]
+                    if stats['max']:
+                        max_vals.append(np.max(stats['max']))
+                    else:
+                        max_vals.append(0)
+            
+            if energies and durations and max_vals:
+                # Create 3D scatter plot
+                fig_3d = go.Figure()
+                
+                # Separate target and comparison points
+                target_indices = [i for i, target in enumerate(is_target) if target]
+                comp_indices = [i for i, target in enumerate(is_target) if not target]
+                
+                # Comparison points
+                if comp_indices:
+                    fig_3d.add_trace(go.Scatter3d(
+                        x=[energies[i] for i in comp_indices],
+                        y=[durations[i] for i in comp_indices],
+                        z=[max_vals[i] for i in comp_indices],
+                        mode='markers',
+                        marker=dict(
+                            size=8,
+                            color=[max_vals[i] for i in comp_indices],
+                            colorscale='Viridis',
+                            opacity=0.7,
+                            colorbar=dict(title=f"Max {selected_field}")
+                        ),
+                        name='Comparison Sims',
+                        text=[sim_names[i] for i in comp_indices],
+                        hovertemplate='%{text}<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Value: %{z:.1f}<extra></extra>'
+                    ))
+                
+                # Target point
+                if target_indices:
+                    for idx in target_indices:
+                        fig_3d.add_trace(go.Scatter3d(
+                            x=[energies[idx]],
+                            y=[durations[idx]],
+                            z=[max_vals[idx]],
+                            mode='markers',
+                            marker=dict(
+                                size=15,
+                                color='red',
+                                symbol='diamond'
+                            ),
+                            name='Target Sim',
+                            text=sim_names[idx],
+                            hovertemplate='<b>%{text}</b><br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Value: %{z:.1f}<extra></extra>'
+                        ))
+                
+                fig_3d.update_layout(
+                    title=f"Parameter Space - {selected_field}",
+                    scene=dict(
+                        xaxis_title="Energy (mJ)",
+                        yaxis_title="Duration (ns)",
+                        zaxis_title=f"Max {selected_field}"
+                    ),
+                    height=600
+                )
+                
+                st.plotly_chart(fig_3d, use_container_width=True)
+                
+                # Add convex hull for parameter space
+                if len(energies) >= 3:
+                    st.markdown("##### 📏 Parameter Space Coverage")
+                    
+                    # Calculate convex hull or bounding box
+                    min_e, max_e = min(energies), max(energies)
+                    min_d, max_d = min(durations), max(durations)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Energy Range", f"{min_e:.1f} - {max_e:.1f} mJ")
+                    with col2:
+                        st.metric("Duration Range", f"{min_d:.1f} - {max_d:.1f} ns")
+                    with col3:
+                        area = (max_e - min_e) * (max_d - min_d)
+                        st.metric("Parameter Space Area", f"{area:.1f} mJ·ns")
+    
+    # Comparative statistics table
+    st.markdown('<h3 class="sub-header">📋 Comparative Statistics</h3>', unsafe_allow_html=True)
+    
+    stats_data = []
+    for sim_name in visualization_sims:
+        summary = next((s for s in summaries if s['name'] == sim_name), None)
+        if summary and selected_field in summary['field_stats']:
+            stats = summary['field_stats'][selected_field]
+            
+            if stats['mean'] and stats['max']:
+                row = {
+                    'Simulation': sim_name,
+                    'Type': 'Target' if sim_name == target_simulation else 'Comparison',
+                    'Energy (mJ)': summary['energy'],
+                    'Duration (ns)': summary['duration'],
+                    f'Mean {selected_field}': np.mean(stats['mean']),
+                    f'Max {selected_field}': np.max(stats['max']),
+                    f'Std Dev {selected_field}': np.mean(stats['std']) if stats['std'] else 0,
+                    'Peak Timestep': np.argmax(stats['max']) + 1 if stats['max'] else 0
+                }
+                stats_data.append(row)
+    
+    if stats_data:
+        df_stats = pd.DataFrame(stats_data)
+        
+        # Apply styling
+        def highlight_target(row):
+            if row['Type'] == 'Target':
+                return ['background-color: #ffcccc'] * len(row)
+            return [''] * len(row)
+        
+        styled_df = df_stats.style.apply(highlight_target, axis=1)
+        
+        # Format numeric columns
+        format_dict = {}
+        for col in df_stats.columns:
+            if col not in ['Simulation', 'Type']:
+                if 'Mean' in col or 'Max' in col or 'Std Dev' in col:
+                    format_dict[col] = "{:.3f}"
+                elif 'Energy' in col or 'Duration' in col:
+                    format_dict[col] = "{:.2f}"
+        
+        styled_df = styled_df.format(format_dict)
+        
+        st.dataframe(styled_df, use_container_width=True)
+        
+        # Export options
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            csv = df_stats.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Comparison as CSV",
+                data=csv,
+                file_name=f"comparison_{selected_field}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        with col2:
+            # Generate insights
+            with st.expander("💡 Analysis Insights"):
+                if len(stats_data) > 1:
+                    # Calculate relative differences
+                    target_data = [row for row in stats_data if row['Type'] == 'Target'][0]
+                    comp_data = [row for row in stats_data if row['Type'] == 'Comparison']
+                    
+                    if target_data and comp_data:
+                        st.write("**Target vs Comparison Simulations:**")
+                        
+                        for comp in comp_data:
+                            energy_diff = abs(target_data['Energy (mJ)'] - comp['Energy (mJ)']) / target_data['Energy (mJ)']
+                            duration_diff = abs(target_data['Duration (ns)'] - comp['Duration (ns)']) / target_data['Duration (ns)']
+                            field_diff = abs(target_data[f'Mean {selected_field}'] - comp[f'Mean {selected_field}']) / target_data[f'Mean {selected_field}']
+                            
+                            st.write(f"- **{comp['Simulation']}**: "
+                                   f"Energy diff: {energy_diff:.1%}, "
+                                   f"Duration diff: {duration_diff:.1%}, "
+                                   f"Field diff: {field_diff:.1%}")
 
 if __name__ == "__main__":
     main()
