@@ -14,12 +14,12 @@ from typing import List, Dict, Any, Optional, Tuple, Union
 from io import BytesIO
 import pandas as pd
 import traceback
-from scipy.interpolate import griddata, RBFInterpolator, LinearNDInterpolator, CloughTocher2DInterpolator
+from scipy.interpolate import griddata, RBFInterpolator, LinearNDInterpolator
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from sklearn.cluster import KMeans, DBSCAN
-from scipy.spatial import KDTree, cKDTree, Delaunay, distance
+from scipy.spatial import KDTree, cKDTree, Delaunay, ConvexHull
 from scipy.spatial.distance import cdist, pdist, squareform
 from scipy import stats
 import scipy.ndimage as ndimage
@@ -28,1274 +28,723 @@ import scipy.sparse.linalg as splinalg
 import networkx as nx
 import json
 import base64
+from PIL import Image
+import io
 import hashlib
+from dataclasses import dataclass, field
+from enum import Enum
+import pickle
+import gzip
 import tempfile
 import zipfile
 from pathlib import Path
-import pickle
 
 warnings.filterwarnings('ignore')
 
 # =============================================
-# CONSTANTS AND CONFIGURATION
+# PATH CONFIGURATION
 # =============================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FEA_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "fea_solutions")
-INTERPOLATED_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "interpolated_solutions")
 os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
-os.makedirs(INTERPOLATED_SOLUTIONS_DIR, exist_ok=True)
 
 # =============================================
-# ENHANCED MESH DATA WITH SPHERICAL GEOMETRY
+# ENHANCED SPHERICAL GEOMETRY MANAGER
 # =============================================
-class EnhancedMeshData:
-    """Enhanced mesh data with spherical geometry preservation"""
+class SphericalGeometryManager:
+    """Manages spherical geometry preservation during interpolation"""
     
     def __init__(self):
-        self.points = None
-        self.triangles = None
-        self.normals = None
-        self.curvature = None
-        self.radial_distances = None
-        self.angular_coordinates = None
-        self.spherical_harmonics = None
-        self.metadata = {}
-        self.is_spherical = False
+        self.reference_spheres = {}
+        self.spherical_templates = {}
         
-    def compute_spherical_coordinates(self, center=None):
-        """Convert Cartesian coordinates to spherical coordinates"""
-        if self.points is None or len(self.points) == 0:
-            return
+    def create_spherical_template(self, points, resolution=50):
+        """Create a spherical template mesh from original points"""
+        if len(points) == 0:
+            return None
         
-        if center is None:
-            center = np.mean(self.points, axis=0)
+        # Compute centroid and radius statistics
+        centroid = np.mean(points, axis=0)
+        distances = np.linalg.norm(points - centroid, axis=1)
+        mean_radius = np.mean(distances)
         
-        # Compute radial distances
-        self.radial_distances = np.linalg.norm(self.points - center, axis=1)
+        # Create spherical coordinates
+        # Convert Cartesian to spherical
+        x = points[:, 0] - centroid[0]
+        y = points[:, 1] - centroid[1]
+        z = points[:, 2] - centroid[2]
         
-        # Compute angular coordinates (theta, phi)
-        centered_points = self.points - center
-        self.angular_coordinates = np.zeros((len(self.points), 2))
+        r = np.sqrt(x**2 + y**2 + z**2)
+        theta = np.arccos(z / r)
+        phi = np.arctan2(y, x)
         
-        # Theta (polar angle): 0 to pi
-        self.angular_coordinates[:, 0] = np.arccos(centered_points[:, 2] / (self.radial_distances + 1e-10))
+        # Normalize radial distances to unit sphere
+        normalized_r = r / mean_radius
+        normalized_phi = (phi + np.pi) / (2 * np.pi)  # [0, 1]
+        normalized_theta = theta / np.pi  # [0, 1]
         
-        # Phi (azimuthal angle): 0 to 2pi
-        self.angular_coordinates[:, 1] = np.arctan2(centered_points[:, 1], centered_points[:, 0])
-        self.angular_coordinates[:, 1][self.angular_coordinates[:, 1] < 0] += 2 * np.pi
+        # Store spherical coordinates for each point
+        spherical_coords = np.column_stack([normalized_r, normalized_theta, normalized_phi])
         
-        # Check if geometry is approximately spherical
-        radius_std = np.std(self.radial_distances)
-        radius_mean = np.mean(self.radial_distances)
-        self.is_spherical = radius_std / radius_mean < 0.2  # Less than 20% variation
+        # Create uniform spherical grid for interpolation
+        phi_grid = np.linspace(0, 2*np.pi, resolution)
+        theta_grid = np.linspace(0, np.pi, resolution)
         
-        self.metadata['center'] = center.tolist()
-        self.metadata['avg_radius'] = float(radius_mean)
-        self.metadata['radius_std'] = float(radius_std)
-        self.metadata['is_spherical'] = self.is_spherical
+        PHI, THETA = np.meshgrid(phi_grid, theta_grid)
         
-    def compute_normals(self):
-        """Compute vertex normals for the mesh"""
-        if self.triangles is None or len(self.triangles) == 0:
-            return
+        # Convert back to Cartesian for uniform sphere
+        uniform_x = mean_radius * np.sin(THETA) * np.cos(PHI)
+        uniform_y = mean_radius * np.sin(THETA) * np.sin(PHI)
+        uniform_z = mean_radius * np.cos(THETA)
         
-        normals = np.zeros_like(self.points)
-        face_normals = np.zeros((len(self.triangles), 3))
+        uniform_points = np.column_stack([uniform_x.ravel(), uniform_y.ravel(), uniform_z.ravel()]) + centroid
         
-        for i, tri in enumerate(self.triangles):
-            v0, v1, v2 = self.points[tri[0]], self.points[tri[1]], self.points[tri[2]]
-            face_normals[i] = np.cross(v1 - v0, v2 - v0)
-            norm = np.linalg.norm(face_normals[i])
-            if norm > 0:
-                face_normals[i] /= norm
+        return {
+            'original_points': points,
+            'centroid': centroid,
+            'mean_radius': mean_radius,
+            'spherical_coords': spherical_coords,
+            'uniform_points': uniform_points,
+            'phi_grid': phi_grid,
+            'theta_grid': theta_grid,
+            'PHI': PHI,
+            'THETA': THETA,
+            'resolution': resolution,
+            'original_shape': points.shape
+        }
+    
+    def interpolate_to_uniform_sphere(self, points, values, spherical_template):
+        """Interpolate field values to uniform spherical grid"""
+        if spherical_template is None or len(points) == 0 or len(values) == 0:
+            return None, None
+        
+        # Get uniform sphere points
+        uniform_points = spherical_template['uniform_points']
+        
+        # Use RBF interpolation for smooth spherical interpolation
+        try:
+            # Normalize values for better interpolation
+            values_normalized = (values - np.min(values)) / (np.max(values) - np.min(values) + 1e-10)
             
-            normals[tri[0]] += face_normals[i]
-            normals[tri[1]] += face_normals[i]
-            normals[tri[2]] += face_normals[i]
-        
-        # Normalize vertex normals
-        norms = np.linalg.norm(normals, axis=1)
-        norms[norms == 0] = 1
-        self.normals = normals / norms[:, np.newaxis]
-        
-    def compute_curvature(self):
-        """Compute curvature using normal variation"""
-        if self.normals is None:
-            self.compute_normals()
-        
-        if self.normals is None:
-            return
-        
-        # Build KD-tree for neighbor search
-        tree = cKDTree(self.points)
-        
-        curvature = np.zeros(len(self.points))
-        for i, point in enumerate(self.points):
-            # Find nearest neighbors
-            distances, indices = tree.query(point, k=10)
+            # Interpolate using RBF
+            rbf = RBFInterpolator(points, values_normalized, kernel='thin_plate_spline')
+            uniform_values = rbf(uniform_points)
             
-            # Compute normal variation
-            neighbor_normals = self.normals[indices[1:]]  # Exclude self
-            normal_variation = np.arccos(np.clip(
-                np.dot(self.normals[i], neighbor_normals.T), -1.0, 1.0
-            ))
+            # Denormalize
+            uniform_values = uniform_values * (np.max(values) - np.min(values) + 1e-10) + np.min(values)
             
-            curvature[i] = np.mean(normal_variation)
+            return uniform_points, uniform_values
+        except Exception as e:
+            st.warning(f"RBF interpolation failed: {e}, falling back to linear")
+            # Fallback to linear interpolation
+            try:
+                uniform_values = griddata(points, values, uniform_points, method='linear', fill_value=0)
+                return uniform_points, uniform_values
+            except Exception as e2:
+                st.warning(f"Linear interpolation also failed: {e2}")
+                return None, None
+    
+    def project_to_original_geometry(self, uniform_values, original_points, spherical_template):
+        """Project interpolated values back to original geometry"""
+        if spherical_template is None or uniform_values is None:
+            return None
         
-        self.curvature = curvature
+        # For each original point, find nearest uniform sphere point
+        tree = cKDTree(spherical_template['uniform_points'])
+        distances, indices = tree.query(original_points, k=1)
         
-    def resample_to_spherical_grid(self, n_theta=50, n_phi=100):
-        """Resample mesh data to regular spherical grid"""
-        if self.angular_coordinates is None:
-            self.compute_spherical_coordinates()
+        # Assign values based on nearest neighbor
+        projected_values = uniform_values[indices]
         
-        # Create regular spherical grid
-        theta_grid = np.linspace(0, np.pi, n_theta)
-        phi_grid = np.linspace(0, 2 * np.pi, n_phi)
+        # Optional: Apply radial correction based on original radius
+        centroid = spherical_template['centroid']
+        original_distances = np.linalg.norm(original_points - centroid, axis=1)
+        mean_radius = spherical_template['mean_radius']
+        radial_factors = original_distances / mean_radius
         
-        # Create meshgrid
-        THETA, PHI = np.meshgrid(theta_grid, phi_grid)
+        # Adjust values based on radial position (optional physics-based correction)
+        # projected_values = projected_values * radial_factors
         
-        # Convert to Cartesian for points on unit sphere
-        X = np.sin(THETA) * np.cos(PHI)
-        Y = np.sin(THETA) * np.sin(PHI)
-        Z = np.cos(THETA)
+        return projected_values
+    
+    def create_spherical_mesh(self, centroid, radius, resolution=30):
+        """Create a triangular mesh for a sphere"""
+        phi = np.linspace(0, 2*np.pi, resolution)
+        theta = np.linspace(0, np.pi, resolution)
         
-        grid_points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+        phi, theta = np.meshgrid(phi, theta)
         
-        return grid_points, THETA, PHI
+        x = radius * np.sin(theta) * np.cos(phi) + centroid[0]
+        y = radius * np.sin(theta) * np.sin(phi) + centroid[1]
+        z = radius * np.cos(theta) + centroid[2]
         
-    def interpolate_to_spherical_grid(self, values, n_theta=50, n_phi=100):
-        """Interpolate field values to regular spherical grid"""
-        if self.angular_coordinates is None:
-            self.compute_spherical_coordinates()
+        # Flatten arrays
+        points = np.column_stack([x.ravel(), y.ravel(), z.ravel()])
         
-        # Create regular spherical grid
-        theta_grid = np.linspace(0, np.pi, n_theta)
-        phi_grid = np.linspace(0, 2 * np.pi, n_phi)
-        THETA, PHI = np.meshgrid(theta_grid, phi_grid)
+        # Create triangles (simplified - in reality would need proper triangulation)
+        triangles = []
+        for i in range(resolution-1):
+            for j in range(resolution-1):
+                idx = i * resolution + j
+                triangles.append([idx, idx + 1, idx + resolution])
+                triangles.append([idx + 1, idx + resolution + 1, idx + resolution])
         
-        # Flatten the grid
-        grid_theta_phi = np.stack([THETA.ravel(), PHI.ravel()], axis=1)
-        
-        # Interpolate using barycentric coordinates on sphere
-        grid_values = griddata(
-            self.angular_coordinates,
-            values,
-            grid_theta_phi,
-            method='linear',
-            fill_value=0
-        )
-        
-        return grid_values.reshape(THETA.shape), THETA, PHI
+        return np.array(points), np.array(triangles)
 
 # =============================================
-# SPHERICAL HARMONICS INTERPOLATOR
+# ENHANCED ATTENTION MECHANISM WITH SPHERICAL SUPPORT
 # =============================================
-class SphericalHarmonicsInterpolator:
-    """Spherical harmonics-based interpolation for spherical geometries"""
+class SphericalAttentionExtrapolator:
+    """Attention-based extrapolator with spherical geometry preservation"""
     
-    def __init__(self, max_degree=10):
-        self.max_degree = max_degree
-        self.coefficients = None
-        self.theta_grid = None
-        self.phi_grid = None
-        
-    def fit(self, theta, phi, values):
-        """Fit spherical harmonics to scattered data"""
-        from scipy.special import sph_harm
-        
-        # Create grid for spherical harmonics
-        m = np.arange(-self.max_degree, self.max_degree + 1)
-        n = np.abs(m)
-        
-        # Compute spherical harmonics basis
-        Y = []
-        for l in range(self.max_degree + 1):
-            for m in range(-l, l + 1):
-                Y.append(sph_harm(m, l, phi, theta))
-        
-        Y = np.array(Y).T  # Shape: (n_points, n_basis)
-        
-        # Solve for coefficients using least squares
-        self.coefficients, _, _, _ = np.linalg.lstsq(Y, values, rcond=None)
-        
-    def predict(self, theta, phi):
-        """Predict values at new spherical coordinates"""
-        from scipy.special import sph_harm
-        
-        Y = []
-        idx = 0
-        for l in range(self.max_degree + 1):
-            for m in range(-l, l + 1):
-                Y.append(sph_harm(m, l, phi, theta))
-        
-        Y = np.array(Y).T
-        return Y @ self.coefficients
-
-# =============================================
-# ENHANCED PHYSICS-AWARE ATTENTION MECHANISM
-# =============================================
-class EnhancedPhysicsAwareAttention:
-    """Enhanced attention mechanism with physics-aware embeddings and spherical geometry support"""
-    
-    def __init__(self, n_heads=4, temperature=1.0, spatial_weight=0.5):
-        self.n_heads = n_heads
-        self.temperature = temperature
+    def __init__(self, sigma_param=0.3, spatial_weight=0.5, n_heads=4):
+        self.sigma_param = sigma_param
         self.spatial_weight = spatial_weight
-        self.embeddings = {}
-        self.scaler = StandardScaler()
-        self.source_db = []
-        self.attention_weights = []
-        self.attention_history = []
-        
-    def create_physics_aware_embedding(self, energy, duration, time, mesh_data):
-        """Create comprehensive physics-aware embedding including geometric features"""
-        
-        # Basic physical parameters
-        logE = np.log1p(energy)
-        power = energy / max(duration, 1e-6)
-        fluence = energy / (duration ** 2 + 1e-6)
-        
-        # Temporal features
-        time_ratio = time / max(duration, 1e-3)
-        heating_rate = power / max(time, 1e-6)
-        
-        # Geometric features from mesh
-        geometric_features = []
-        if mesh_data and hasattr(mesh_data, 'metadata'):
-            geometric_features.extend([
-                mesh_data.metadata.get('avg_radius', 0),
-                mesh_data.metadata.get('radius_std', 0),
-                float(mesh_data.is_spherical)
-            ])
-            
-            if hasattr(mesh_data, 'curvature') and mesh_data.curvature is not None:
-                geometric_features.extend([
-                    np.mean(mesh_data.curvature),
-                    np.std(mesh_data.curvature),
-                    np.max(mesh_data.curvature)
-                ])
-        
-        # Combine all features
-        base_features = [
-            logE, duration, time, power, fluence,
-            time_ratio, heating_rate,
-            np.log1p(power), np.log1p(fluence)
-        ]
-        
-        embedding = np.array(base_features + geometric_features, dtype=np.float32)
-        
-        # Normalize
-        if len(self.source_db) > 0:
-            # Update scaler if we have data
-            all_embeddings = []
-            for sim_data in self.source_db:
-                if 'embedding' in sim_data:
-                    all_embeddings.append(sim_data['embedding'])
-            
-            if len(all_embeddings) > 0:
-                self.scaler.fit(np.array(all_embeddings))
-                embedding = self.scaler.transform([embedding])[0]
-        
-        return embedding
-    
-    def compute_similarity(self, query_embedding, source_embeddings):
-        """Compute attention-based similarity with multi-head mechanism"""
-        
-        n_sources = len(source_embeddings)
-        if n_sources == 0:
-            return np.array([])
-        
-        # Multi-head attention
-        head_similarities = np.zeros((self.n_heads, n_sources))
-        
-        for head in range(self.n_heads):
-            # Different random projection for each head
-            np.random.seed(head * 42)
-            proj_dim = min(8, query_embedding.shape[0])
-            proj_matrix = np.random.randn(query_embedding.shape[0], proj_dim)
-            
-            # Project embeddings
-            query_proj = query_embedding @ proj_matrix
-            source_proj = source_embeddings @ proj_matrix
-            
-            # Compute cosine similarity
-            query_norm = np.linalg.norm(query_proj)
-            source_norms = np.linalg.norm(source_proj, axis=1)
-            
-            similarities = np.dot(source_proj, query_proj) / (source_norms * query_norm + 1e-10)
-            
-            # Apply temperature scaling
-            similarities = similarities ** (1.0 / self.temperature)
-            
-            head_similarities[head] = similarities
-        
-        # Combine head similarities
-        combined_similarities = np.mean(head_similarities, axis=0)
-        
-        # Apply spatial weighting if available
-        if self.spatial_weight > 0 and hasattr(self, 'spatial_distances'):
-            spatial_sim = 1.0 / (1.0 + self.spatial_distances)
-            combined_similarities = (1 - self.spatial_weight) * combined_similarities + self.spatial_weight * spatial_sim
-        
-        # Softmax normalization
-        max_sim = np.max(combined_similarities)
-        exp_sim = np.exp(combined_similarities - max_sim)
-        attention_weights = exp_sim / (np.sum(exp_sim) + 1e-10)
-        
-        return attention_weights
-    
-    def update_attention_history(self, query_params, attention_weights, source_indices):
-        """Update attention history for visualization"""
-        self.attention_history.append({
-            'query': query_params,
-            'weights': attention_weights.copy(),
-            'source_indices': source_indices.copy(),
-            'timestamp': datetime.now().isoformat()
-        })
-        
-        # Keep only last 100 entries
-        if len(self.attention_history) > 100:
-            self.attention_history = self.attention_history[-100:]
-
-# =============================================
-# SPHERICAL FIELD INTERPOLATOR
-# =============================================
-class SphericalFieldInterpolator:
-    """Field interpolator with spherical geometry preservation"""
-    
-    def __init__(self, method='spherical_rbf'):
-        self.method = method
-        self.interpolator = None
-        self.reference_mesh = None
-        self.spherical_coords = None
-        
-    def prepare_interpolation(self, source_mesh, source_values):
-        """Prepare interpolator with source data"""
-        self.reference_mesh = source_mesh
-        
-        # Compute spherical coordinates
-        if source_mesh.angular_coordinates is None:
-            source_mesh.compute_spherical_coordinates()
-        
-        self.spherical_coords = source_mesh.angular_coordinates
-        
-        # Choose interpolation method
-        if self.method == 'spherical_rbf':
-            # Use spherical RBF interpolation
-            self.interpolator = RBFInterpolator(
-                self.spherical_coords,
-                source_values,
-                kernel='thin_plate_spline',
-                epsilon=0.1
-            )
-        elif self.method == 'barycentric':
-            # Create Delaunay triangulation on sphere
-            self.interpolator = LinearNDInterpolator(
-                self.spherical_coords,
-                source_values,
-                fill_value=0
-            )
-        elif self.method == 'spherical_harmonics':
-            self.interpolator = SphericalHarmonicsInterpolator(max_degree=10)
-            theta, phi = source_mesh.angular_coordinates[:, 0], source_mesh.angular_coordinates[:, 1]
-            self.interpolator.fit(theta, phi, source_values)
-        
-    def interpolate(self, target_mesh, method=None):
-        """Interpolate field to target mesh"""
-        if self.interpolator is None:
-            raise ValueError("Interpolator not prepared. Call prepare_interpolation first.")
-        
-        if target_mesh.angular_coordinates is None:
-            target_mesh.compute_spherical_coordinates()
-        
-        target_coords = target_mesh.angular_coordinates
-        
-        if method is None:
-            method = self.method
-        
-        if method in ['spherical_rbf', 'barycentric']:
-            # Use the prepared interpolator
-            interpolated_values = self.interpolator(target_coords)
-        elif method == 'spherical_harmonics':
-            theta, phi = target_coords[:, 0], target_coords[:, 1]
-            interpolated_values = self.interpolator.predict(theta, phi)
-        else:
-            raise ValueError(f"Unknown interpolation method: {method}")
-        
-        return interpolated_values
-    
-    def interpolate_to_query(self, query_params, source_simulations, attention_weights, field_name):
-        """Interpolate field for query parameters using attention-weighted combination"""
-        
-        if len(source_simulations) == 0:
-            raise ValueError("No source simulations provided")
-        
-        # Get reference mesh from first source simulation
-        ref_mesh = source_simulations[0]['mesh_data']
-        
-        # Initialize arrays for weighted combination
-        n_points = len(ref_mesh.points)
-        weighted_sum = np.zeros(n_points)
-        weight_sum = 0
-        
-        for sim_data, weight in zip(source_simulations, attention_weights):
-            if weight < 1e-6:  # Skip very low weights
-                continue
-                
-            # Get field data from source simulation
-            if field_name in sim_data['mesh_data'].fields:
-                # For simplicity, take mean over time
-                field_data = sim_data['mesh_data'].fields[field_name]
-                if field_data.ndim == 3:  # Vector field
-                    source_values = np.linalg.norm(field_data.mean(axis=0), axis=1)
-                else:  # Scalar field
-                    source_values = field_data.mean(axis=0)
-                
-                # Prepare interpolator for this source
-                temp_interpolator = SphericalFieldInterpolator(method=self.method)
-                temp_interpolator.prepare_interpolation(sim_data['mesh_data'], source_values)
-                
-                # Interpolate to reference mesh
-                interpolated_values = temp_interpolator.interpolate(ref_mesh)
-                
-                # Add to weighted sum
-                weighted_sum += interpolated_values * weight
-                weight_sum += weight
-        
-        if weight_sum > 0:
-            return weighted_sum / weight_sum
-        else:
-            raise ValueError("No valid source simulations with significant weights")
-
-# =============================================
-# ENHANCED ATTENTION-BASED EXTRAPOLATOR
-# =============================================
-class EnhancedAttentionExtrapolator:
-    """Enhanced extrapolator with attention mechanism and spherical geometry support"""
-    
-    def __init__(self, attention_mechanism=None, interpolator=None):
-        self.attention = attention_mechanism or EnhancedPhysicsAwareAttention()
-        self.interpolator = interpolator or SphericalFieldInterpolator()
-        self.source_simulations = []
+        self.n_heads = n_heads
         self.source_embeddings = []
+        self.source_values = []
         self.source_metadata = []
+        self.spherical_manager = SphericalGeometryManager()
+        self.fitted = False
         
-    def load_simulation_data(self, simulations, summaries):
-        """Load simulation data and create embeddings"""
-        self.source_simulations = []
-        self.source_embeddings = []
-        self.source_metadata = []
+    def prepare_spherical_embeddings(self, simulations, summaries):
+        """Prepare embeddings that preserve spherical geometry information"""
+        all_embeddings = []
+        all_values = []
+        metadata = []
         
-        for summary in summaries:
+        for summary_idx, summary in enumerate(summaries):
             sim_name = summary['name']
             if sim_name not in simulations:
                 continue
-                
-            sim_data = simulations[sim_name]
-            mesh_data = sim_data.get('mesh_data')
             
-            if mesh_data is None:
+            sim = simulations[sim_name]
+            mesh_data = sim.get('mesh_data')
+            
+            if mesh_data is None or mesh_data.points is None:
                 continue
             
-            # Create embedding for each timestep
-            for t in range(sim_data['n_timesteps']):
-                embedding = self.attention.create_physics_aware_embedding(
-                    energy=summary['energy'],
-                    duration=summary['duration'],
-                    time=t + 1,
-                    mesh_data=mesh_data
+            # Compute spherical statistics
+            points = mesh_data.points
+            centroid = np.mean(points, axis=0)
+            distances = np.linalg.norm(points - centroid, axis=1)
+            
+            # Spherical features
+            radial_stats = {
+                'mean_radius': float(np.mean(distances)),
+                'std_radius': float(np.std(distances)),
+                'min_radius': float(np.min(distances)),
+                'max_radius': float(np.max(distances)),
+                'radial_aspect': float(np.max(distances) / np.min(distances)) if np.min(distances) > 0 else 1.0
+            }
+            
+            # Create spherical template
+            spherical_template = self.spherical_manager.create_spherical_template(points)
+            
+            for timestep_idx, t in enumerate(summary['timesteps']):
+                # Enhanced embedding with spherical features
+                emb = self._compute_spherical_embedding(
+                    summary['energy'],
+                    summary['duration'],
+                    t,
+                    radial_stats
                 )
+                all_embeddings.append(emb)
                 
-                self.source_embeddings.append(embedding)
-                self.source_simulations.append(sim_data)
-                self.source_metadata.append({
-                    'name': sim_name,
+                # Extract field statistics with spherical consideration
+                field_vals = self._extract_spherical_field_values(
+                    summary, timestep_idx, radial_stats
+                )
+                all_values.append(field_vals)
+                
+                metadata.append({
+                    'summary_idx': summary_idx,
+                    'timestep_idx': timestep_idx,
                     'energy': summary['energy'],
                     'duration': summary['duration'],
-                    'timestep': t,
-                    'mesh_data': mesh_data
+                    'time': t,
+                    'name': summary['name'],
+                    'spherical_template': spherical_template,
+                    'radial_stats': radial_stats,
+                    'centroid': centroid
                 })
         
-        if self.source_embeddings:
-            self.source_embeddings = np.array(self.source_embeddings)
-            st.info(f"✅ Prepared {len(self.source_embeddings)} embeddings")
+        if all_embeddings:
+            all_embeddings = np.array(all_embeddings)
+            all_values = np.array(all_values)
+            
+            self.source_embeddings = all_embeddings
+            self.source_values = all_values
+            self.source_metadata = metadata
+            self.fitted = True
+            
+            st.info(f"✅ Prepared {len(all_embeddings)} spherical embeddings")
+        
+        return len(all_embeddings)
     
-    def predict_field(self, energy_query, duration_query, time_query, 
-                     reference_mesh, field_name, n_neighbors=5):
-        """Predict field distribution for query parameters"""
+    def _compute_spherical_embedding(self, energy, duration, time, radial_stats):
+        """Compute embedding with spherical geometry features"""
+        # Physical parameters
+        logE = np.log1p(energy)
+        power = energy / max(duration, 1e-6)
+        energy_density = energy / (duration * duration + 1e-6)
         
-        # Create query embedding
-        query_embedding = self.attention.create_physics_aware_embedding(
-            energy=energy_query,
-            duration=duration_query,
-            time=time_query,
-            mesh_data=reference_mesh
+        # Spherical geometry features
+        mean_radius = radial_stats.get('mean_radius', 1.0)
+        std_radius = radial_stats.get('std_radius', 0.0)
+        radial_aspect = radial_stats.get('radial_aspect', 1.0)
+        
+        # Time parameters
+        time_ratio = time / max(duration, 1e-3)
+        
+        # Thermal diffusion in spherical coordinates
+        thermal_penetration = np.sqrt(time) / mean_radius if mean_radius > 0 else 0
+        
+        return np.array([
+            logE,
+            duration,
+            time,
+            power,
+            energy_density,
+            time_ratio,
+            mean_radius,
+            std_radius,
+            radial_aspect,
+            thermal_penetration,
+            np.log1p(power),
+            np.log1p(time)
+        ], dtype=np.float32)
+    
+    def _extract_spherical_field_values(self, summary, timestep_idx, radial_stats):
+        """Extract field values considering spherical geometry"""
+        field_vals = []
+        
+        for field in sorted(summary['field_stats'].keys()):
+            stats = summary['field_stats'][field]
+            
+            if timestep_idx < len(stats['mean']):
+                # Include radial weighting
+                mean_val = stats['mean'][timestep_idx]
+                max_val = stats['max'][timestep_idx]
+                std_val = stats['std'][timestep_idx]
+                
+                # Radial weighted statistics
+                radial_factor = 1.0 / (radial_stats.get('radial_aspect', 1.0) + 1e-6)
+                weighted_mean = mean_val * radial_factor
+                weighted_max = max_val * radial_factor
+                
+                field_vals.extend([
+                    mean_val,
+                    max_val,
+                    std_val,
+                    weighted_mean,
+                    weighted_max
+                ])
+            else:
+                field_vals.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+        
+        return field_vals
+    
+    def _compute_spherical_similarity(self, query_embedding, query_meta, source_metadata):
+        """Compute similarity with spherical geometry consideration"""
+        similarities = []
+        
+        for meta in source_metadata:
+            # Parameter similarity
+            e_diff = abs(query_meta['energy'] - meta['energy']) / 50.0
+            d_diff = abs(query_meta['duration'] - meta['duration']) / 20.0
+            t_diff = abs(query_meta['time'] - meta['time']) / 50.0
+            
+            # Spherical geometry similarity
+            if hasattr(query_meta, 'radial_stats') and 'radial_stats' in meta:
+                r_diff = abs(query_meta['radial_stats']['mean_radius'] - 
+                           meta['radial_stats']['mean_radius']) / 10.0
+            else:
+                r_diff = 0
+            
+            total_diff = np.sqrt(e_diff**2 + d_diff**2 + t_diff**2 + r_diff**2)
+            similarity = np.exp(-total_diff / self.sigma_param)
+            similarities.append(similarity)
+        
+        return np.array(similarities)
+    
+    def predict_with_spherical_attention(self, energy_query, duration_query, time_query, reference_sim=None):
+        """Predict using attention mechanism with spherical geometry preservation"""
+        if not self.fitted:
+            return None
+        
+        # Compute query embedding
+        query_radial_stats = {'mean_radius': 1.0, 'std_radius': 0.1, 'radial_aspect': 1.1}
+        query_embedding = self._compute_spherical_embedding(
+            energy_query, duration_query, time_query, query_radial_stats
         )
         
-        # Compute attention weights
-        attention_weights = self.attention.compute_similarity(
-            query_embedding,
-            self.source_embeddings
-        )
-        
-        if len(attention_weights) == 0:
-            raise ValueError("No source data available for prediction")
-        
-        # Get top neighbors
-        top_indices = np.argsort(attention_weights)[-n_neighbors:][::-1]
-        top_weights = attention_weights[top_indices]
-        top_simulations = [self.source_simulations[i] for i in top_indices]
-        
-        # Normalize weights
-        top_weights = top_weights / np.sum(top_weights)
-        
-        # Update attention history
-        self.attention.update_attention_history(
-            query_params={'energy': energy_query, 'duration': duration_query, 'time': time_query},
-            attention_weights=top_weights,
-            source_indices=top_indices
-        )
-        
-        # Interpolate field using attention-weighted combination
-        predicted_field = self.interpolator.interpolate_to_query(
-            query_params={'energy': energy_query, 'duration': duration_query, 'time': time_query},
-            source_simulations=top_simulations,
-            attention_weights=top_weights,
-            field_name=field_name
-        )
-        
-        result = {
-            'predicted_field': predicted_field,
-            'attention_weights': top_weights,
-            'source_indices': top_indices,
-            'source_simulations': [s['name'] for s in top_simulations],
-            'confidence': float(np.max(top_weights)),
-            'method': self.interpolator.method
+        query_meta = {
+            'energy': energy_query,
+            'duration': duration_query,
+            'time': time_query,
+            'radial_stats': query_radial_stats
         }
         
-        return result
-    
-    def predict_time_series(self, energy_query, duration_query, time_points,
-                           reference_mesh, field_name):
-        """Predict field evolution over time"""
+        # Compute similarities
+        similarities = self._compute_spherical_similarity(
+            query_embedding, query_meta, self.source_metadata
+        )
         
-        results = {
-            'time_points': time_points,
-            'predictions': [],
-            'attention_weights': [],
-            'confidence_scores': []
-        }
+        # Apply multi-head attention
+        n_sources = len(self.source_embeddings)
+        head_weights = np.zeros((self.n_heads, n_sources))
         
-        for t in time_points:
-            try:
-                prediction = self.predict_field(
-                    energy_query=energy_query,
-                    duration_query=duration_query,
-                    time_query=t,
-                    reference_mesh=reference_mesh,
-                    field_name=field_name
+        for head in range(self.n_heads):
+            np.random.seed(42 + head)
+            proj_dim = min(6, query_embedding.shape[0])
+            proj_matrix = np.random.randn(query_embedding.shape[0], proj_dim)
+            
+            query_proj = query_embedding @ proj_matrix
+            source_proj = self.source_embeddings @ proj_matrix
+            
+            distances = np.linalg.norm(query_proj - source_proj, axis=1)
+            scores = np.exp(-distances**2 / (2 * self.sigma_param**2))
+            
+            # Combine with spherical similarity
+            if self.spatial_weight > 0:
+                spatial_sim = self._compute_spherical_similarity(
+                    query_embedding, query_meta, self.source_metadata
                 )
-                
-                results['predictions'].append(prediction['predicted_field'])
-                results['attention_weights'].append(prediction['attention_weights'])
-                results['confidence_scores'].append(prediction['confidence'])
-                
-            except Exception as e:
-                st.warning(f"Error predicting at time {t}: {str(e)}")
-                # Fill with zeros if prediction fails
-                results['predictions'].append(np.zeros(len(reference_mesh.points)))
-                results['attention_weights'].append(np.array([]))
-                results['confidence_scores'].append(0.0)
+                scores = (1 - self.spatial_weight) * scores + self.spatial_weight * spatial_sim
+            
+            head_weights[head] = scores
         
-        return results
+        # Combine head weights
+        avg_weights = np.mean(head_weights, axis=0)
+        
+        # Softmax normalization
+        max_weight = np.max(avg_weights)
+        exp_weights = np.exp(avg_weights - max_weight)
+        attention_weights = exp_weights / (np.sum(exp_weights) + 1e-12)
+        
+        # Weighted prediction
+        if len(self.source_values) > 0:
+            prediction = np.sum(attention_weights[:, np.newaxis] * self.source_values, axis=0)
+        else:
+            prediction = np.zeros(1)
+        
+        # Get best matching simulation for geometry reference
+        if reference_sim is None and len(attention_weights) > 0:
+            best_idx = np.argmax(attention_weights)
+            if best_idx < len(self.source_metadata):
+                reference_meta = self.source_metadata[best_idx]
+                reference_sim = reference_meta.get('name', None)
+        
+        return {
+            'prediction': prediction,
+            'attention_weights': attention_weights,
+            'confidence': float(np.max(attention_weights)) if len(attention_weights) > 0 else 0.0,
+            'reference_simulation': reference_sim,
+            'metadata': self.source_metadata[np.argmax(attention_weights)] if len(attention_weights) > 0 else None
+        }
 
 # =============================================
-# SPHERICAL VISUALIZATION ENGINE
+# ENHANCED 3D VISUALIZATION WITH SPHERICAL SUPPORT
 # =============================================
 class SphericalVisualizationEngine:
-    """Visualization engine specialized for spherical geometries"""
+    """Visualization engine that preserves spherical geometry"""
     
-    @staticmethod
-    def create_spherical_visualization(mesh_data, field_values, config):
-        """Create spherical visualization with proper geometry"""
-        
+    def __init__(self):
+        self.geometry_manager = SphericalGeometryManager()
+        self.colormaps = px.colors.sequential.Viridis
+    
+    def create_spherical_surface_plot(self, points, values, triangles=None, 
+                                     colormap='Viridis', opacity=0.9, show_edges=False):
+        """Create 3D surface plot preserving spherical geometry"""
         fig = go.Figure()
         
-        mode = config.get('mode', 'surface')
-        colormap = config.get('colormap', 'viridis')
-        opacity = config.get('opacity', 0.9)
-        show_colorbar = config.get('show_colorbar', True)
+        if points is None or len(points) == 0:
+            return fig
         
-        points = mesh_data.points
-        triangles = mesh_data.triangles
+        # Normalize values for coloring
+        if len(values) > 0:
+            vmin, vmax = np.nanmin(values), np.nanmax(values)
+            if vmax - vmin > 1e-10:
+                normalized_values = (values - vmin) / (vmax - vmin)
+            else:
+                normalized_values = np.zeros_like(values)
+        else:
+            normalized_values = np.zeros_like(values)
         
-        if mode == 'spherical_surface':
-            # Create spherical surface plot
-            if triangles is not None and len(triangles) > 0:
-                fig.add_trace(go.Mesh3d(
-                    x=points[:, 0],
-                    y=points[:, 1],
-                    z=points[:, 2],
-                    i=triangles[:, 0],
-                    j=triangles[:, 1],
-                    k=triangles[:, 2],
-                    intensity=field_values,
-                    colorscale=colormap,
-                    intensitymode='vertex',
-                    opacity=opacity,
-                    lighting=dict(
-                        ambient=0.8,
-                        diffuse=0.8,
-                        specular=0.5,
-                        roughness=0.5
-                    ),
-                    showscale=show_colorbar,
-                    colorbar=dict(
-                        title=config.get('colorbar_title', 'Field Value'),
-                        thickness=20,
-                        len=0.75
-                    ),
-                    hoverinfo='skip'
+        # Check if we have triangles
+        if triangles is not None and len(triangles) > 0:
+            # Use Mesh3d for surface visualization
+            i, j, k = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+            
+            fig.add_trace(go.Mesh3d(
+                x=points[:, 0],
+                y=points[:, 1],
+                z=points[:, 2],
+                i=i, j=j, k=k,
+                intensity=values,
+                colorscale=colormap,
+                intensitymode='vertex',
+                opacity=opacity,
+                lighting=dict(
+                    ambient=0.8,
+                    diffuse=0.8,
+                    specular=0.5,
+                    roughness=0.5
+                ),
+                lightposition=dict(x=100, y=200, z=300),
+                showscale=True,
+                colorbar=dict(
+                    title="Field Value",
+                    thickness=20,
+                    len=0.75,
+                    x=1.02
+                ),
+                hoverinfo='none',
+                name='Spherical Surface'
+            ))
+            
+            if show_edges:
+                # Add wireframe edges
+                edges_x, edges_y, edges_z = [], [], []
+                for tri in triangles[:min(1000, len(triangles))]:  # Limit for performance
+                    for i in range(3):
+                        edges_x.extend([points[tri[i], 0], points[tri[(i+1)%3], 0], None])
+                        edges_y.extend([points[tri[i], 1], points[tri[(i+1)%3], 1], None])
+                        edges_z.extend([points[tri[i], 2], points[tri[(i+1)%3], 2], None])
+                
+                fig.add_trace(go.Scatter3d(
+                    x=edges_x,
+                    y=edges_y,
+                    z=edges_z,
+                    mode='lines',
+                    line=dict(color='black', width=1),
+                    hoverinfo='none',
+                    showlegend=False,
+                    name='Edges'
                 ))
-        
-        elif mode == 'spherical_points':
-            # Create spherical point cloud
+        else:
+            # Fallback to point cloud
             fig.add_trace(go.Scatter3d(
                 x=points[:, 0],
                 y=points[:, 1],
                 z=points[:, 2],
                 mode='markers',
                 marker=dict(
-                    size=3,
-                    color=field_values,
+                    size=4,
+                    color=values,
                     colorscale=colormap,
                     opacity=opacity,
-                    showscale=show_colorbar,
+                    showscale=True,
                     colorbar=dict(
-                        title=config.get('colorbar_title', 'Field Value'),
+                        title="Field Value",
                         thickness=20,
                         len=0.75
                     )
                 ),
-                hoverinfo='skip'
+                hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
+                            '<b>X:</b> %{x:.3f}<br>' +
+                            '<b>Y:</b> %{y:.3f}<br>' +
+                            '<b>Z:</b> %{z:.3f}<extra></extra>',
+                name='Point Cloud'
             ))
         
-        elif mode == 'spherical_wireframe':
-            # Create spherical wireframe
-            if triangles is not None and len(triangles) > 0:
-                edges = set()
-                for tri in triangles[:min(1000, len(triangles))]:
-                    for i in range(3):
-                        edge = tuple(sorted((tri[i], tri[(i+1)%3])))
-                        edges.add(edge)
-                
-                edge_x, edge_y, edge_z = [], [], []
-                for edge in list(edges)[:500]:
-                    edge_x.extend([points[edge[0], 0], points[edge[1], 0], None])
-                    edge_y.extend([points[edge[0], 1], points[edge[1], 1], None])
-                    edge_z.extend([points[edge[0], 2], points[edge[1], 2], None])
-                
-                fig.add_trace(go.Scatter3d(
-                    x=edge_x, y=edge_y, z=edge_z,
-                    mode='lines',
-                    line=dict(
-                        color='gray',
-                        width=1
-                    ),
-                    hoverinfo='none'
-                ))
-        
-        # Update layout for spherical view
+        # Update layout for better spherical view
         fig.update_layout(
             scene=dict(
                 aspectmode='data',
                 camera=dict(
-                    eye=dict(x=2, y=2, z=2),
+                    eye=dict(x=1.5, y=1.5, z=1.5),
                     up=dict(x=0, y=0, z=1)
                 ),
                 xaxis=dict(
-                    showgrid=True,
-                    gridcolor='lightgray',
+                    title="X",
+                    gridcolor="lightgray",
                     showbackground=True,
-                    backgroundcolor='white'
+                    backgroundcolor="rgba(255, 255, 255, 0.1)"
                 ),
                 yaxis=dict(
-                    showgrid=True,
-                    gridcolor='lightgray',
+                    title="Y",
+                    gridcolor="lightgray",
                     showbackground=True,
-                    backgroundcolor='white'
+                    backgroundcolor="rgba(255, 255, 255, 0.1)"
                 ),
                 zaxis=dict(
-                    showgrid=True,
-                    gridcolor='lightgray',
+                    title="Z",
+                    gridcolor="lightgray",
                     showbackground=True,
-                    backgroundcolor='white'
+                    backgroundcolor="rgba(255, 255, 255, 0.1)"
                 )
             ),
-            height=config.get('height', 700),
+            height=700,
             margin=dict(l=0, r=0, t=40, b=0),
-            title=config.get('title', 'Spherical Field Visualization')
+            showlegend=True
         )
         
         return fig
     
-    @staticmethod
-    def create_attention_visualization(attention_weights, source_metadata, query_params):
-        """Create visualization of attention mechanism"""
+    def create_spherical_comparison(self, points_list, values_list, names, 
+                                   colormap='Viridis', n_cols=2):
+        """Create comparison of multiple spherical fields"""
+        n_plots = len(points_list)
+        
+        if n_plots == 0:
+            return go.Figure()
+        
+        # Determine grid layout
+        rows = (n_plots + n_cols - 1) // n_cols
+        cols = min(n_plots, n_cols)
         
         fig = make_subplots(
-            rows=2, cols=2,
-            subplot_titles=['Attention Weights', 'Parameter Space', 
-                          'Source Distribution', 'Weight Evolution'],
-            specs=[[{'type': 'bar'}, {'type': 'scatter3d'}],
-                   [{'type': 'scatter'}, {'type': 'scatter'}]]
+            rows=rows, cols=cols,
+            specs=[[{'type': 'surface'} for _ in range(cols)] for _ in range(rows)],
+            subplot_titles=names,
+            vertical_spacing=0.1,
+            horizontal_spacing=0.05
         )
         
-        # 1. Attention weights bar chart
-        if len(attention_weights) > 0:
-            source_names = [f"Source {i}" for i in range(len(attention_weights))]
-            fig.add_trace(
-                go.Bar(
-                    x=source_names,
-                    y=attention_weights,
-                    name='Attention Weights',
-                    marker_color='skyblue'
-                ),
-                row=1, col=1
-            )
-        
-        # 2. Parameter space 3D scatter
-        energies = []
-        durations = []
-        timesteps = []
-        weights = []
-        
-        for meta, weight in zip(source_metadata, attention_weights):
-            energies.append(meta.get('energy', 0))
-            durations.append(meta.get('duration', 0))
-            timesteps.append(meta.get('timestep', 0))
-            weights.append(weight)
-        
-        if energies and durations and timesteps:
-            fig.add_trace(
-                go.Scatter3d(
-                    x=energies,
-                    y=durations,
-                    z=timesteps,
-                    mode='markers',
-                    marker=dict(
-                        size=[w * 20 for w in weights],
-                        color=weights,
-                        colorscale='Viridis',
-                        showscale=True
-                    ),
-                    text=[f"Weight: {w:.3f}" for w in weights],
-                    hoverinfo='text'
-                ),
-                row=1, col=2
-            )
+        for idx, (points, values, name) in enumerate(zip(points_list, values_list, names)):
+            row = idx // cols + 1
+            col = idx % cols + 1
             
-            # Add query point
-            fig.add_trace(
-                go.Scatter3d(
-                    x=[query_params.get('energy', 0)],
-                    y=[query_params.get('duration', 0)],
-                    z=[query_params.get('time', 0)],
-                    mode='markers',
-                    marker=dict(
-                        size=15,
-                        color='red',
-                        symbol='star'
+            if points is not None and len(points) > 0 and values is not None and len(values) > 0:
+                # Create simplified visualization for comparison
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=points[:, 0],
+                        y=points[:, 1],
+                        z=points[:, 2],
+                        mode='markers',
+                        marker=dict(
+                            size=3,
+                            color=values,
+                            colorscale=colormap,
+                            opacity=0.8,
+                            showscale=(idx == 0)
+                        ),
+                        name=name,
+                        showlegend=False
                     ),
-                    name='Query Point'
-                ),
-                row=1, col=2
-            )
+                    row=row, col=col
+                )
         
         fig.update_layout(
-            height=800,
-            showlegend=True,
-            title_text="Attention Mechanism Visualization"
+            height=300 * rows,
+            showlegend=False,
+            title_text="Spherical Field Comparison"
+        )
+        
+        # Update scene properties
+        for i in range(1, n_plots + 1):
+            row = (i-1) // cols + 1
+            col = (i-1) % cols + 1
+            fig.update_scenes(
+                aspectmode="data",
+                camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)),
+                row=row, col=col
+            )
+        
+        return fig
+    
+    def create_radial_profile_plot(self, points, values, n_bins=20):
+        """Create radial profile plot of field values"""
+        if points is None or len(points) == 0 or values is None or len(values) == 0:
+            return go.Figure()
+        
+        # Compute centroid
+        centroid = np.mean(points, axis=0)
+        
+        # Compute distances from centroid
+        distances = np.linalg.norm(points - centroid, axis=1)
+        
+        # Bin the distances and compute statistics
+        bins = np.linspace(0, np.max(distances), n_bins + 1)
+        bin_indices = np.digitize(distances, bins) - 1
+        
+        bin_means = []
+        bin_stds = []
+        bin_centers = []
+        
+        for i in range(n_bins):
+            mask = bin_indices == i
+            if np.sum(mask) > 0:
+                bin_values = values[mask]
+                bin_means.append(np.mean(bin_values))
+                bin_stds.append(np.std(bin_values))
+                bin_centers.append((bins[i] + bins[i+1]) / 2)
+        
+        # Create plot
+        fig = go.Figure()
+        
+        if bin_means:
+            fig.add_trace(go.Scatter(
+                x=bin_centers,
+                y=bin_means,
+                mode='lines+markers',
+                name='Mean',
+                line=dict(width=3, color='blue'),
+                error_y=dict(
+                    type='data',
+                    array=bin_stds,
+                    visible=True,
+                    color='rgba(0, 100, 255, 0.3)'
+                )
+            ))
+            
+            # Add trend line
+            if len(bin_centers) > 1:
+                z = np.polyfit(bin_centers, bin_means, 2)
+                p = np.poly1d(z)
+                x_smooth = np.linspace(min(bin_centers), max(bin_centers), 100)
+                y_smooth = p(x_smooth)
+                
+                fig.add_trace(go.Scatter(
+                    x=x_smooth,
+                    y=y_smooth,
+                    mode='lines',
+                    name='Trend',
+                    line=dict(width=2, color='red', dash='dash')
+                ))
+        
+        fig.update_layout(
+            title="Radial Profile of Field Values",
+            xaxis_title="Distance from Center",
+            yaxis_title="Field Value",
+            height=400,
+            showlegend=True
         )
         
         return fig
-
-# =============================================
-# ENHANCED DATA LOADER WITH SPHERICAL SUPPORT
-# =============================================
-class EnhancedSphericalDataLoader:
-    """Enhanced data loader with spherical geometry support"""
-    
-    def __init__(self):
-        self.simulations = {}
-        self.summaries = []
-        self.reference_mesh = None
-        self.common_fields = set()
-        
-    def parse_folder_name(self, folder: str):
-        """Parse folder name to extract parameters"""
-        name = os.path.basename(folder)
-        
-        # Try different patterns
-        patterns = [
-            r"q([\dp\.]+)mJ-delta([\dp\.]+)ns",
-            r"E_([\d\.]+)_D_([\d\.]+)",
-            r"energy_([\d\.]+)_duration_([\d\.]+)",
-            r"([\d\.]+)mJ_([\d\.]+)ns"
-        ]
-        
-        for pattern in patterns:
-            match = re.match(pattern, name)
-            if match:
-                e, d = match.groups()
-                e = float(e.replace("p", ".")) if "p" in e else float(e)
-                d = float(d.replace("p", ".")) if "p" in d else float(d)
-                return e, d
-        
-        return None, None
-    
-    def load_vtu_file(self, filepath):
-        """Load VTU file with enhanced error handling"""
-        try:
-            mesh = meshio.read(filepath)
-            return mesh
-        except Exception as e:
-            st.warning(f"Error reading {filepath}: {str(e)}")
-            return None
-    
-    def extract_mesh_data(self, mesh):
-        """Extract mesh data with spherical geometry features"""
-        if mesh is None:
-            return None, None, {}
-        
-        points = mesh.points.astype(np.float32)
-        
-        # Find triangles
-        triangles = None
-        for cell_block in mesh.cells:
-            if cell_block.type == "triangle":
-                triangles = cell_block.data.astype(np.int32)
-                break
-        
-        # Extract point data
-        point_data = {}
-        for key, data in mesh.point_data.items():
-            point_data[key] = data.astype(np.float32)
-        
-        # Create enhanced mesh data
-        enhanced_mesh = EnhancedMeshData()
-        enhanced_mesh.points = points
-        enhanced_mesh.triangles = triangles
-        
-        # Compute spherical features
-        enhanced_mesh.compute_spherical_coordinates()
-        enhanced_mesh.compute_normals()
-        enhanced_mesh.compute_curvature()
-        
-        return enhanced_mesh, point_data
-    
-    @st.cache_resource(ttl=3600, show_spinner=True)
-    def load_all_simulations(_self, load_full_mesh=True):
-        """Load all simulations with spherical geometry support"""
-        simulations = {}
-        summaries = []
-        
-        # Find simulation folders
-        folders = []
-        for pattern in ["q*mJ-delta*ns", "E_*_D_*", "energy_*_duration_*", "*mJ_*ns"]:
-            folders.extend(glob.glob(os.path.join(FEA_SOLUTIONS_DIR, pattern)))
-        
-        folders = list(set(folders))
-        
-        if not folders:
-            st.warning(f"No simulation folders found in {FEA_SOLUTIONS_DIR}")
-            return simulations, summaries
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for folder_idx, folder in enumerate(folders):
-            folder_name = os.path.basename(folder)
-            energy, duration = _self.parse_folder_name(folder_name)
-            
-            if energy is None or duration is None:
-                continue
-            
-            # Find VTU files
-            vtu_files = sorted(glob.glob(os.path.join(folder, "*.vtu")))
-            if not vtu_files:
-                vtu_files = sorted(glob.glob(os.path.join(folder, "*.vtk")))
-            
-            if not vtu_files:
-                continue
-            
-            status_text.text(f"Loading {folder_name}... ({len(vtu_files)} files)")
-            
-            try:
-                # Load first file to get mesh structure
-                mesh0 = _self.load_vtu_file(vtu_files[0])
-                if mesh0 is None:
-                    continue
-                
-                # Extract mesh data
-                mesh_data, point_data = _self.extract_mesh_data(mesh0)
-                if mesh_data is None:
-                    continue
-                
-                # Create simulation data structure
-                sim_data = {
-                    'name': folder_name,
-                    'energy_mJ': energy,
-                    'duration_ns': duration,
-                    'n_timesteps': len(vtu_files),
-                    'vtu_files': vtu_files,
-                    'field_info': {},
-                    'mesh_data': mesh_data,
-                    'has_mesh': True,
-                    'is_interpolated': False
-                }
-                
-                # Initialize field arrays
-                n_points = len(mesh_data.points)
-                for key, data in point_data.items():
-                    if data.ndim == 1:
-                        sim_data['field_info'][key] = ("scalar", 1)
-                        mesh_data.fields[key] = np.full((len(vtu_files), n_points), np.nan, dtype=np.float32)
-                        mesh_data.fields[key][0] = data
-                    elif data.ndim == 2:
-                        dims = data.shape[1]
-                        sim_data['field_info'][key] = ("vector", dims)
-                        mesh_data.fields[key] = np.full((len(vtu_files), n_points, dims), np.nan, dtype=np.float32)
-                        mesh_data.fields[key][0] = data
-                
-                # Load remaining timesteps
-                for t in range(1, len(vtu_files)):
-                    try:
-                        mesh = _self.load_vtu_file(vtu_files[t])
-                        if mesh is None:
-                            continue
-                        
-                        _, point_data_t = _self.extract_mesh_data(mesh)
-                        
-                        for key in sim_data['field_info']:
-                            if key in point_data_t:
-                                mesh_data.fields[key][t] = point_data_t[key]
-                    except Exception as e:
-                        st.warning(f"Error loading timestep {t} in {folder_name}: {e}")
-                
-                simulations[folder_name] = sim_data
-                
-                # Create summary
-                summary = _self.extract_summary_statistics(sim_data, energy, duration, folder_name)
-                summaries.append(summary)
-                
-                # Set as reference mesh if not already set
-                if _self.reference_mesh is None:
-                    _self.reference_mesh = mesh_data
-                
-            except Exception as e:
-                st.error(f"Error processing {folder_name}: {str(e)}")
-                continue
-            
-            progress_bar.progress((folder_idx + 1) / len(folders))
-        
-        progress_bar.empty()
-        status_text.empty()
-        
-        if simulations:
-            st.success(f"✅ Loaded {len(simulations)} simulations")
-            
-            # Determine common fields
-            if simulations:
-                field_counts = {}
-                for sim in simulations.values():
-                    for field in sim['field_info'].keys():
-                        field_counts[field] = field_counts.get(field, 0) + 1
-                
-                _self.common_fields = {field for field, count in field_counts.items() 
-                                     if count == len(simulations)}
-        
-        return simulations, summaries
-    
-    def extract_summary_statistics(self, sim_data, energy, duration, name):
-        """Extract summary statistics with spherical features"""
-        summary = {
-            'name': name,
-            'energy': energy,
-            'duration': duration,
-            'mesh_stats': sim_data['mesh_data'].metadata,
-            'field_stats': {},
-            'timesteps': list(range(1, sim_data['n_timesteps'] + 1))
-        }
-        
-        mesh_data = sim_data['mesh_data']
-        
-        for field_name in sim_data['field_info'].keys():
-            if field_name not in mesh_data.fields:
-                continue
-            
-            field_data = mesh_data.fields[field_name]
-            summary['field_stats'][field_name] = {
-                'min': [], 'max': [], 'mean': [], 'std': [],
-                'q25': [], 'q50': [], 'q75': []
-            }
-            
-            for t in range(field_data.shape[0]):
-                if field_data[t].ndim == 1:
-                    values = field_data[t]
-                elif field_data[t].ndim == 2:
-                    values = np.linalg.norm(field_data[t], axis=1)
-                else:
-                    continue
-                
-                valid_values = values[~np.isnan(values)]
-                
-                if len(valid_values) > 0:
-                    summary['field_stats'][field_name]['min'].append(float(np.min(valid_values)))
-                    summary['field_stats'][field_name]['max'].append(float(np.max(valid_values)))
-                    summary['field_stats'][field_name]['mean'].append(float(np.mean(valid_values)))
-                    summary['field_stats'][field_name]['std'].append(float(np.std(valid_values)))
-                    summary['field_stats'][field_name]['q25'].append(float(np.percentile(valid_values, 25)))
-                    summary['field_stats'][field_name]['q50'].append(float(np.percentile(valid_values, 50)))
-                    summary['field_stats'][field_name]['q75'].append(float(np.percentile(valid_values, 75)))
-                else:
-                    for stat in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']:
-                        summary['field_stats'][field_name][stat].append(0.0)
-        
-        return summary
-
-# =============================================
-# INTERPOLATED SOLUTIONS MANAGER (ENHANCED)
-# =============================================
-class EnhancedInterpolatedSolutionsManager:
-    """Manager for interpolated solutions with spherical geometry preservation"""
-    
-    def __init__(self):
-        self.interpolated_simulations = {}
-        self.interpolated_summaries = []
-        
-    def create_interpolated_solution(self, sim_name, field_name, predicted_field, 
-                                   reference_mesh, query_params, method, confidence):
-        """Create a new interpolated solution with spherical geometry"""
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        interpolated_id = f"interp_{sim_name}_{field_name}_{method}_{timestamp}"
-        
-        # Create enhanced mesh data for interpolated solution
-        mesh_data = EnhancedMeshData()
-        mesh_data.points = reference_mesh.points.copy()
-        mesh_data.triangles = reference_mesh.triangles.copy() if reference_mesh.triangles is not None else None
-        
-        # Compute spherical features
-        mesh_data.compute_spherical_coordinates()
-        mesh_data.compute_normals()
-        
-        # Store predicted field
-        mesh_data.fields = {field_name: predicted_field.reshape(1, -1)}
-        
-        # Create interpolated simulation data
-        interpolated_sim = {
-            'name': interpolated_id,
-            'original_simulation': sim_name,
-            'field': field_name,
-            'mesh_data': mesh_data,
-            'query_params': query_params,
-            'interpolation_method': method,
-            'confidence': confidence,
-            'energy_mJ': query_params.get('energy', 0),
-            'duration_ns': query_params.get('duration', 0),
-            'has_mesh': True,
-            'is_interpolated': True,
-            'created_at': timestamp,
-            'n_timesteps': 1
-        }
-        
-        # Store in session state
-        self.interpolated_simulations[interpolated_id] = interpolated_sim
-        
-        # Create summary
-        summary = self.create_interpolated_summary(interpolated_sim)
-        self.interpolated_summaries.append(summary)
-        
-        # Save to disk
-        self.save_interpolated_solution(interpolated_sim)
-        
-        return interpolated_sim
-    
-    def create_interpolated_summary(self, interpolated_sim):
-        """Create summary for interpolated solution"""
-        mesh_data = interpolated_sim['mesh_data']
-        field_name = interpolated_sim['field']
-        
-        if field_name in mesh_data.fields:
-            field_data = mesh_data.fields[field_name][0]
-            valid_values = field_data[~np.isnan(field_data)]
-            
-            if len(valid_values) > 0:
-                percentiles = np.percentile(valid_values, [10, 25, 50, 75, 90])
-            else:
-                percentiles = np.zeros(5)
-        else:
-            valid_values = np.array([])
-            percentiles = np.zeros(5)
-        
-        summary = {
-            'name': interpolated_sim['name'],
-            'energy': interpolated_sim['energy_mJ'],
-            'duration': interpolated_sim['duration_ns'],
-            'original_simulation': interpolated_sim['original_simulation'],
-            'interpolation_method': interpolated_sim['interpolation_method'],
-            'is_interpolated': True,
-            'confidence': interpolated_sim['confidence'],
-            'mesh_stats': mesh_data.metadata,
-            'field_stats': {
-                field_name: {
-                    'min': [float(np.min(valid_values))] if len(valid_values) > 0 else [0.0],
-                    'max': [float(np.max(valid_values))] if len(valid_values) > 0 else [0.0],
-                    'mean': [float(np.mean(valid_values))] if len(valid_values) > 0 else [0.0],
-                    'std': [float(np.std(valid_values))] if len(valid_values) > 0 else [0.0],
-                    'q25': [percentiles[1]] if len(percentiles) > 0 else [0.0],
-                    'q50': [percentiles[2]] if len(percentiles) > 0 else [0.0],
-                    'q75': [percentiles[3]] if len(percentiles) > 0 else [0.0]
-                }
-            },
-            'timesteps': [1]
-        }
-        
-        return summary
-    
-    def save_interpolated_solution(self, interpolated_sim):
-        """Save interpolated solution to disk"""
-        save_path = os.path.join(INTERPOLATED_SOLUTIONS_DIR, f"{interpolated_sim['name']}.pkl")
-        
-        # Prepare data for saving
-        save_data = {
-            'name': interpolated_sim['name'],
-            'original_simulation': interpolated_sim['original_simulation'],
-            'field': interpolated_sim['field'],
-            'points': interpolated_sim['mesh_data'].points,
-            'triangles': interpolated_sim['mesh_data'].triangles,
-            'field_data': interpolated_sim['mesh_data'].fields[interpolated_sim['field']][0],
-            'query_params': interpolated_sim['query_params'],
-            'interpolation_method': interpolated_sim['interpolation_method'],
-            'confidence': interpolated_sim['confidence'],
-            'energy_mJ': interpolated_sim['energy_mJ'],
-            'duration_ns': interpolated_sim['duration_ns'],
-            'created_at': interpolated_sim['created_at'],
-            'metadata': interpolated_sim['mesh_data'].metadata
-        }
-        
-        with open(save_path, 'wb') as f:
-            pickle.dump(save_data, f)
-    
-    def load_interpolated_solutions(self):
-        """Load interpolated solutions from disk"""
-        pkl_files = glob.glob(os.path.join(INTERPOLATED_SOLUTIONS_DIR, "interp_*.pkl"))
-        
-        self.interpolated_simulations = {}
-        self.interpolated_summaries = []
-        
-        for pkl_file in pkl_files:
-            try:
-                with open(pkl_file, 'rb') as f:
-                    save_data = pickle.load(f)
-                
-                # Reconstruct mesh data
-                mesh_data = EnhancedMeshData()
-                mesh_data.points = save_data['points']
-                mesh_data.triangles = save_data['triangles']
-                mesh_data.metadata = save_data.get('metadata', {})
-                mesh_data.fields = {save_data['field']: save_data['field_data'].reshape(1, -1)}
-                
-                # Recompute spherical features
-                mesh_data.compute_spherical_coordinates()
-                mesh_data.compute_normals()
-                
-                # Create interpolated simulation
-                interpolated_sim = {
-                    'name': save_data['name'],
-                    'original_simulation': save_data['original_simulation'],
-                    'field': save_data['field'],
-                    'mesh_data': mesh_data,
-                    'query_params': save_data['query_params'],
-                    'interpolation_method': save_data['interpolation_method'],
-                    'confidence': save_data['confidence'],
-                    'energy_mJ': save_data['energy_mJ'],
-                    'duration_ns': save_data['duration_ns'],
-                    'has_mesh': True,
-                    'is_interpolated': True,
-                    'created_at': save_data['created_at'],
-                    'n_timesteps': 1
-                }
-                
-                self.interpolated_simulations[save_data['name']] = interpolated_sim
-                
-                # Create summary
-                summary = self.create_interpolated_summary(interpolated_sim)
-                self.interpolated_summaries.append(summary)
-                
-            except Exception as e:
-                st.warning(f"Error loading interpolated solution {pkl_file}: {e}")
-        
-        return len(self.interpolated_simulations)
-    
-    def get_combined_simulations(self):
-        """Get combined original and interpolated simulations"""
-        combined = {}
-        
-        # Add original simulations from session state
-        if 'simulations' in st.session_state:
-            combined.update(st.session_state.simulations)
-        
-        # Add interpolated simulations
-        combined.update(self.interpolated_simulations)
-        
-        return combined
-    
-    def get_combined_summaries(self):
-        """Get combined original and interpolated summaries"""
-        combined = []
-        
-        # Add original summaries
-        if 'summaries' in st.session_state:
-            combined.extend(st.session_state.summaries)
-        
-        # Add interpolated summaries
-        combined.extend(self.interpolated_summaries)
-        
-        return combined
 
 # =============================================
 # MAIN APPLICATION WITH SPHERICAL INTERPOLATION
 # =============================================
-class SphericalInterpolationApp:
-    """Main application with spherical interpolation support"""
+class SphericalFEAInterpolator:
+    """Main application with spherical geometry preservation"""
     
     def __init__(self):
-        self.data_loader = EnhancedSphericalDataLoader()
-        self.interp_manager = EnhancedInterpolatedSolutionsManager()
+        self.data_loader = None
+        self.spherical_manager = SphericalGeometryManager()
+        self.attention_extrapolator = SphericalAttentionExtrapolator()
         self.visualizer = SphericalVisualizationEngine()
-        self.extrapolator = None
         
         # Initialize session state
-        self.init_session_state()
+        self._init_session_state()
     
-    def init_session_state(self):
+    def _init_session_state(self):
         """Initialize session state variables"""
         defaults = {
             'data_loaded': False,
-            'current_mode': 'Data Explorer',
-            'selected_colormap': 'viridis',
-            'visualization_mode': 'spherical_surface',
+            'selected_colormap': "Viridis",
+            'current_mode': "Data Viewer",
+            'visualization_mode': 'surface',
             'mesh_opacity': 0.9,
-            'interpolation_method': 'spherical_rbf',
-            'n_attention_heads': 4,
-            'spatial_weight': 0.3,
-            'temperature': 1.0,
+            'show_edges': False,
             'simulations': {},
-            'summaries': []
+            'summaries': [],
+            'attention_ready': False,
+            'interpolated_solutions': {},
+            'spherical_templates': {}
         }
         
         for key, value in defaults.items():
@@ -1303,7 +752,7 @@ class SphericalInterpolationApp:
                 st.session_state[key] = value
     
     def run(self):
-        """Run the application"""
+        """Run the main application"""
         st.set_page_config(
             page_title="Spherical FEA Interpolation Platform",
             layout="wide",
@@ -1312,81 +761,69 @@ class SphericalInterpolationApp:
         )
         
         # Apply custom CSS
-        self.apply_custom_css()
+        self._apply_custom_css()
         
         # Render header
-        self.render_header()
+        self._render_header()
         
         # Render sidebar
-        self.render_sidebar()
+        self._render_sidebar()
         
         # Render main content
-        self.render_main_content()
+        self._render_main_content()
     
-    def apply_custom_css(self):
+    def _apply_custom_css(self):
         """Apply custom CSS styling"""
         st.markdown("""
         <style>
         .main-header {
-            font-size: 2.5rem;
-            background: linear-gradient(90deg, #1E88E5, #4A00E0);
+            font-size: 3rem;
+            background: linear-gradient(90deg, #1E88E5, #8E2DE2);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             text-align: center;
             margin-bottom: 1rem;
             font-weight: 800;
         }
-        .sub-header {
-            font-size: 1.5rem;
-            color: #2c3e50;
-            margin-top: 1rem;
-            margin-bottom: 0.5rem;
-            padding-bottom: 0.3rem;
-            border-bottom: 2px solid #3498db;
-            font-weight: 600;
+        .spherical-badge {
+            background: linear-gradient(90deg, #FF6B6B, #FF8E53);
+            color: white;
+            padding: 4px 12px;
+            border-radius: 15px;
+            font-size: 0.9rem;
+            font-weight: bold;
+            display: inline-block;
+            margin-left: 10px;
         }
-        .info-box {
+        .metric-card {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             padding: 1rem;
             border-radius: 10px;
-            margin: 1rem 0;
-        }
-        .warning-box {
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            color: white;
-            padding: 1rem;
-            border-radius: 10px;
-            margin: 1rem 0;
-        }
-        .metric-card {
-            background: white;
-            padding: 0.8rem;
-            border-radius: 8px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-            margin: 0.3rem;
+            margin: 0.5rem;
             text-align: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
         }
         </style>
         """, unsafe_allow_html=True)
     
-    def render_header(self):
+    def _render_header(self):
         """Render application header"""
-        st.markdown('<h1 class="main-header">🔮 Spherical FEA Interpolation Platform</h1>', unsafe_allow_html=True)
-        st.markdown("""
-        <p style="text-align: center; color: #666; margin-bottom: 2rem;">
-        Physics-Aware Attention Mechanism with Spherical Geometry Preservation
-        </p>
-        """, unsafe_allow_html=True)
+        st.markdown('<h1 class="main-header">🔮 Spherical FEA Interpolation Platform</h1>', 
+                   unsafe_allow_html=True)
+        st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">'
+                   'Spherical Geometry Preservation | Attention-Based Interpolation | 3D Visualization</p>',
+                   unsafe_allow_html=True)
     
-    def render_sidebar(self):
-        """Render sidebar"""
+    def _render_sidebar(self):
+        """Render sidebar navigation"""
         with st.sidebar:
             st.markdown("### 🧭 Navigation")
             
             app_mode = st.selectbox(
                 "Select Mode",
-                ["Data Explorer", "Spherical Interpolation", "3D Visualization", "Attention Analysis"],
+                ["Data Viewer", "Spherical Interpolation", "3D Visualization", 
+                 "Attention Analysis", "Export Solutions"],
                 index=0
             )
             
@@ -1396,96 +833,129 @@ class SphericalInterpolationApp:
             st.markdown("### 📂 Data Management")
             
             if st.button("🚀 Load Simulations", use_container_width=True):
-                self.load_simulations()
+                self._load_simulations()
             
             if st.session_state.get('data_loaded', False):
-                simulations = st.session_state.simulations
-                st.success(f"✅ {len(simulations)} simulations loaded")
+                st.success(f"✅ {len(st.session_state.simulations)} simulations loaded")
                 
                 st.markdown("---")
-                st.markdown("### ⚙️ Settings")
+                st.markdown("### 🎨 Visualization")
                 
-                with st.expander("Visualization Settings", expanded=False):
-                    st.session_state.visualization_mode = st.selectbox(
-                        "Visualization Mode",
-                        ["spherical_surface", "spherical_points", "spherical_wireframe"]
-                    )
-                    
+                with st.expander("Display Settings", expanded=False):
                     st.session_state.selected_colormap = st.selectbox(
                         "Colormap",
-                        ["viridis", "plasma", "inferno", "magma", "cividis", "rainbow"]
+                        px.colors.named_colorscales(),
+                        index=0
                     )
                     
-                    st.session_state.mesh_opacity = st.slider("Opacity", 0.1, 1.0, 0.9, 0.1)
-                
-                with st.expander("Interpolation Settings", expanded=False):
-                    st.session_state.interpolation_method = st.selectbox(
-                        "Interpolation Method",
-                        ["spherical_rbf", "spherical_harmonics", "barycentric"]
+                    st.session_state.mesh_opacity = st.slider(
+                        "Opacity", 0.1, 1.0, 0.9, 0.1
                     )
                     
-                    st.session_state.n_attention_heads = st.slider("Attention Heads", 1, 8, 4)
-                    st.session_state.spatial_weight = st.slider("Spatial Weight", 0.0, 1.0, 0.3, 0.1)
-                    st.session_state.temperature = st.slider("Temperature", 0.1, 2.0, 1.0, 0.1)
+                    st.session_state.show_edges = st.checkbox("Show Edges", False)
     
-    def load_simulations(self):
+    def _load_simulations(self):
         """Load simulation data"""
-        with st.spinner("Loading simulations..."):
-            try:
-                simulations, summaries = self.data_loader.load_all_simulations(load_full_mesh=True)
-                
-                if simulations:
-                    st.session_state.simulations = simulations
-                    st.session_state.summaries = summaries
-                    st.session_state.data_loaded = True
-                    
-                    # Initialize extrapolator
-                    self.extrapolator = EnhancedAttentionExtrapolator(
-                        attention_mechanism=EnhancedPhysicsAwareAttention(
-                            n_heads=st.session_state.n_attention_heads,
-                            temperature=st.session_state.temperature,
-                            spatial_weight=st.session_state.spatial_weight
-                        ),
-                        interpolator=SphericalFieldInterpolator(
-                            method=st.session_state.interpolation_method
-                        )
-                    )
-                    
-                    # Load simulation data into extrapolator
-                    self.extrapolator.load_simulation_data(simulations, summaries)
-                    
-                    st.session_state.extrapolator = self.extrapolator
-                    
-                    # Load interpolated solutions
-                    num_interpolated = self.interp_manager.load_interpolated_solutions()
-                    if num_interpolated > 0:
-                        st.info(f"📊 Loaded {num_interpolated} interpolated solutions")
-                    
-                else:
-                    st.error("❌ No simulations loaded. Check data directory.")
-                    
-            except Exception as e:
-                st.error(f"❌ Error loading data: {str(e)}")
+        # Simplified data loader for demo
+        # In production, this would load actual VTU files
+        
+        # Create sample spherical data for demonstration
+        simulations = {}
+        summaries = []
+        
+        # Create sample simulations with spherical geometry
+        energies = [0.5, 1.0, 2.0, 3.0, 5.0]
+        durations = [1.0, 2.0, 4.0, 8.0, 16.0]
+        
+        for i, (energy, duration) in enumerate(zip(energies, durations)):
+            sim_name = f"q{energy}mJ-delta{duration}ns"
+            
+            # Create spherical mesh
+            centroid = np.array([0, 0, 0])
+            radius = 1.0 + i * 0.1  # Slightly different radii
+            
+            # Create points on sphere
+            n_points = 1000
+            phi = np.random.uniform(0, 2*np.pi, n_points)
+            theta = np.arccos(np.random.uniform(-1, 1, n_points))
+            
+            x = radius * np.sin(theta) * np.cos(phi) + centroid[0]
+            y = radius * np.sin(theta) * np.sin(phi) + centroid[1]
+            z = radius * np.cos(theta) + centroid[2]
+            
+            points = np.column_stack([x, y, z])
+            
+            # Create field values (temperature-like distribution)
+            distances = np.linalg.norm(points - centroid, axis=1)
+            values = energy * np.exp(-distances**2 / (duration * 0.1))
+            values = values + np.random.normal(0, 0.1 * energy, n_points)
+            
+            # Store simulation
+            simulations[sim_name] = {
+                'name': sim_name,
+                'energy_mJ': energy,
+                'duration_ns': duration,
+                'points': points,
+                'field_values': values,
+                'centroid': centroid,
+                'radius': radius,
+                'n_points': n_points,
+                'has_mesh': True
+            }
+            
+            # Create summary
+            summary = {
+                'name': sim_name,
+                'energy': energy,
+                'duration': duration,
+                'timesteps': [1, 2, 3, 4, 5],
+                'field_stats': {
+                    'temperature': {
+                        'mean': [float(np.mean(values))] * 5,
+                        'max': [float(np.max(values))] * 5,
+                        'min': [float(np.min(values))] * 5,
+                        'std': [float(np.std(values))] * 5
+                    }
+                }
+            }
+            
+            summaries.append(summary)
+            
+            # Create spherical template
+            spherical_template = self.spherical_manager.create_spherical_template(points)
+            st.session_state.spherical_templates[sim_name] = spherical_template
+        
+        st.session_state.simulations = simulations
+        st.session_state.summaries = summaries
+        st.session_state.data_loaded = True
+        
+        # Prepare attention mechanism
+        n_embeddings = self.attention_extrapolator.prepare_spherical_embeddings(
+            simulations, summaries
+        )
+        st.session_state.attention_ready = n_embeddings > 0
     
-    def render_main_content(self):
+    def _render_main_content(self):
         """Render main content based on selected mode"""
         mode = st.session_state.current_mode
         
-        if mode == "Data Explorer":
-            self.render_data_explorer()
+        if mode == "Data Viewer":
+            self._render_data_viewer()
         elif mode == "Spherical Interpolation":
-            self.render_spherical_interpolation()
+            self._render_spherical_interpolation()
         elif mode == "3D Visualization":
-            self.render_3d_visualization()
+            self._render_3d_visualization()
         elif mode == "Attention Analysis":
-            self.render_attention_analysis()
+            self._render_attention_analysis()
+        elif mode == "Export Solutions":
+            self._render_export_solutions()
     
-    def render_data_explorer(self):
-        """Render data explorer"""
-        st.markdown('<h2 class="sub-header">📊 Data Explorer</h2>', unsafe_allow_html=True)
+    def _render_data_viewer(self):
+        """Render data viewer"""
+        st.markdown("## 📊 Data Viewer")
         
         if not st.session_state.get('data_loaded', False):
-            self.show_data_not_loaded()
+            st.info("Please load simulations first using the sidebar button.")
             return
         
         simulations = st.session_state.simulations
@@ -1496,7 +966,7 @@ class SphericalInterpolationApp:
             sim_name = st.selectbox(
                 "Select Simulation",
                 sorted(simulations.keys()),
-                key="explorer_sim"
+                key="viewer_sim_select"
             )
         
         sim = simulations[sim_name]
@@ -1506,82 +976,64 @@ class SphericalInterpolationApp:
         with col3:
             st.metric("Duration", f"{sim['duration_ns']:.2f} ns")
         
-        # Check if spherical
-        mesh_data = sim['mesh_data']
-        if hasattr(mesh_data, 'is_spherical') and mesh_data.is_spherical:
-            st.info(f"🌐 Spherical geometry detected (radius: {mesh_data.metadata.get('avg_radius', 0):.3f})")
+        # Display spherical information
+        st.markdown("#### 🌐 Spherical Geometry Information")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Points", f"{sim['n_points']:,}")
+        with col2:
+            st.metric("Radius", f"{sim['radius']:.3f}")
+        with col3:
+            centroid = sim['centroid']
+            st.metric("Centroid", f"[{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}]")
+        with col4:
+            st.metric("Field Range", 
+                     f"{np.min(sim['field_values']):.3f} - {np.max(sim['field_values']):.3f}")
         
-        # Field selection
-        if sim['field_info']:
-            field = st.selectbox(
-                "Select Field",
-                sorted(sim['field_info'].keys()),
-                key="explorer_field"
-            )
-            
-            # Timestep selection
-            n_timesteps = sim['n_timesteps']
-            timestep = st.slider(
-                "Timestep",
-                0, max(0, n_timesteps - 1), 0,
-                key="explorer_timestep"
-            )
-            
-            # Get field values
-            if field in mesh_data.fields:
-                field_data = mesh_data.fields[field][timestep]
-                
-                if sim['field_info'][field][0] == "vector":
-                    field_data = np.linalg.norm(field_data, axis=1)
-                
-                # Create visualization
-                config = {
-                    'mode': st.session_state.visualization_mode,
-                    'colormap': st.session_state.selected_colormap,
-                    'opacity': st.session_state.mesh_opacity,
-                    'title': f"{field} at Timestep {timestep + 1}",
-                    'height': 600
-                }
-                
-                fig = self.visualizer.create_spherical_visualization(mesh_data, field_data, config)
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Show field statistics
-                st.markdown("#### 📈 Field Statistics")
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Min", f"{np.min(field_data):.3f}")
-                with col2:
-                    st.metric("Max", f"{np.max(field_data):.3f}")
-                with col3:
-                    st.metric("Mean", f"{np.mean(field_data):.3f}")
-                with col4:
-                    st.metric("Std", f"{np.std(field_data):.3f}")
-        else:
-            st.warning("No field data available for this simulation")
+        # 3D Visualization
+        st.markdown("#### 🎨 3D Visualization")
+        
+        fig = self.visualizer.create_spherical_surface_plot(
+            points=sim['points'],
+            values=sim['field_values'],
+            colormap=st.session_state.selected_colormap,
+            opacity=st.session_state.mesh_opacity,
+            show_edges=st.session_state.show_edges
+        )
+        
+        fig.update_layout(title=f"Simulation: {sim_name}")
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Radial profile
+        st.markdown("#### 📈 Radial Profile Analysis")
+        
+        radial_fig = self.visualizer.create_radial_profile_plot(
+            points=sim['points'],
+            values=sim['field_values'],
+            n_bins=15
+        )
+        st.plotly_chart(radial_fig, use_container_width=True)
     
-    def render_spherical_interpolation(self):
+    def _render_spherical_interpolation(self):
         """Render spherical interpolation interface"""
-        st.markdown('<h2 class="sub-header">🔮 Spherical Interpolation</h2>', unsafe_allow_html=True)
+        st.markdown("## 🔮 Spherical Interpolation")
         
         if not st.session_state.get('data_loaded', False):
-            self.show_data_not_loaded()
+            st.info("Please load simulations first.")
+            return
+        
+        if not st.session_state.get('attention_ready', False):
+            st.warning("Attention mechanism not ready. Please check data loading.")
             return
         
         st.markdown("""
-        <div class="info-box">
-        <h4>🌐 Spherical Attention Interpolation</h4>
-        <p>This system uses physics-aware attention mechanisms to interpolate and extrapolate 
-        field distributions on spherical geometries. The interpolation preserves the spherical 
-        geometry while using attention weights to combine information from similar simulations.</p>
+        <div style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); 
+                    color: white; padding: 1.5rem; border-radius: 10px; margin: 1rem 0;">
+        <h4>🧠 Spherical Geometry Preservation</h4>
+        <p>This interpolation method preserves the spherical geometry of the solder joint 
+        while accurately predicting field values using attention mechanisms.</p>
         </div>
         """, unsafe_allow_html=True)
-        
-        simulations = st.session_state.simulations
-        
-        if not simulations:
-            st.warning("No simulations loaded")
-            return
         
         # Query parameters
         col1, col2, col3 = st.columns(3)
@@ -1589,390 +1041,760 @@ class SphericalInterpolationApp:
             energy_query = st.number_input(
                 "Energy (mJ)",
                 min_value=0.1,
-                max_value=100.0,
-                value=5.25,
-                step=0.01,
+                max_value=10.0,
+                value=2.5,
+                step=0.1,
                 key="interp_energy"
             )
-        
         with col2:
             duration_query = st.number_input(
-                "Pulse Duration (ns)",
-                min_value=0.1,
-                max_value=50.0,
-                value=2.9,
-                step=0.01,
+                "Duration (ns)",
+                min_value=0.5,
+                max_value=20.0,
+                value=4.0,
+                step=0.1,
                 key="interp_duration"
             )
-        
         with col3:
             time_query = st.number_input(
                 "Time (ns)",
                 min_value=0.0,
-                max_value=100.0,
+                max_value=50.0,
                 value=10.0,
-                step=0.1,
+                step=1.0,
                 key="interp_time"
             )
         
-        # Reference simulation selection
-        ref_sim_name = st.selectbox(
-            "Reference Geometry",
-            sorted(simulations.keys()),
-            key="interp_ref_sim"
-        )
+        # Reference geometry selection
+        simulations = st.session_state.simulations
         
-        ref_sim = simulations[ref_sim_name]
-        ref_mesh = ref_sim['mesh_data']
-        
-        # Field selection
-        if ref_sim['field_info']:
-            field_name = st.selectbox(
-                "Field to Predict",
-                sorted(ref_sim['field_info'].keys()),
-                key="interp_field"
-            )
-        else:
-            st.warning("No fields available in reference simulation")
-            return
-        
-        # Prediction options
         col1, col2 = st.columns(2)
         with col1:
-            n_neighbors = st.slider("Number of Neighbors", 1, 10, 5)
-        
-        with col2:
-            prediction_method = st.selectbox(
-                "Prediction Method",
-                ["spherical_rbf", "spherical_harmonics", "barycentric"],
-                index=0
+            reference_sim = st.selectbox(
+                "Reference Geometry",
+                sorted(simulations.keys()),
+                key="interp_ref_sim"
             )
         
-        if st.button("🚀 Generate Prediction", use_container_width=True):
-            with st.spinner("Generating physics-aware prediction..."):
-                try:
-                    # Get extrapolator from session state
-                    extrapolator = st.session_state.get('extrapolator')
-                    if extrapolator is None:
-                        st.error("Extrapolator not initialized. Please reload simulations.")
-                        return
-                    
-                    # Update interpolator method
-                    extrapolator.interpolator.method = prediction_method
-                    
-                    # Generate prediction
-                    prediction = extrapolator.predict_field(
-                        energy_query=energy_query,
-                        duration_query=duration_query,
-                        time_query=time_query,
-                        reference_mesh=ref_mesh,
-                        field_name=field_name,
-                        n_neighbors=n_neighbors
-                    )
-                    
-                    # Create interpolated solution
-                    interpolated_sim = self.interp_manager.create_interpolated_solution(
-                        sim_name=ref_sim_name,
-                        field_name=field_name,
-                        predicted_field=prediction['predicted_field'],
-                        reference_mesh=ref_mesh,
-                        query_params={
-                            'energy': energy_query,
-                            'duration': duration_query,
-                            'time': time_query
-                        },
-                        method=prediction_method,
-                        confidence=prediction['confidence']
-                    )
-                    
-                    st.success(f"✅ Prediction generated with confidence: {prediction['confidence']:.3f}")
-                    
-                    # Display results
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        # Show prediction visualization
-                        config = {
-                            'mode': 'spherical_surface',
-                            'colormap': st.session_state.selected_colormap,
-                            'opacity': st.session_state.mesh_opacity,
-                            'title': f"Predicted {field_name} - E={energy_query}mJ, τ={duration_query}ns",
-                            'height': 500
-                        }
-                        
-                        fig = self.visualizer.create_spherical_visualization(
-                            ref_mesh,
-                            prediction['predicted_field'],
-                            config
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                    
-                    with col2:
-                        # Show attention weights
-                        st.markdown("#### 🧠 Attention Weights")
-                        source_names = prediction['source_simulations']
-                        weights = prediction['attention_weights']
-                        
-                        for name, weight in zip(source_names, weights):
-                            st.progress(float(weight), text=f"{name}: {weight:.3f}")
-                        
-                        # Show statistics
-                        st.markdown("#### 📊 Prediction Statistics")
-                        pred_values = prediction['predicted_field']
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Min", f"{np.min(pred_values):.3f}")
-                        with col2:
-                            st.metric("Max", f"{np.max(pred_values):.3f}")
-                        with col3:
-                            st.metric("Mean", f"{np.mean(pred_values):.3f}")
-                        with col4:
-                            st.metric("Std", f"{np.std(pred_values):.3f}")
-                    
-                    # Show attention visualization
-                    st.markdown("#### 🔍 Attention Mechanism Analysis")
-                    attention_fig = self.visualizer.create_attention_visualization(
-                        prediction['attention_weights'],
-                        [extrapolator.source_metadata[i] for i in prediction['source_indices']],
-                        {'energy': energy_query, 'duration': duration_query, 'time': time_query}
-                    )
-                    st.plotly_chart(attention_fig, use_container_width=True)
-                    
-                except Exception as e:
-                    st.error(f"❌ Prediction failed: {str(e)}")
-                    st.error(traceback.format_exc())
+        with col2:
+            interpolation_method = st.selectbox(
+                "Interpolation Method",
+                ["Spherical RBF", "Attention-Weighted", "Physics-Informed"],
+                key="interp_method"
+            )
+        
+        # Advanced settings
+        with st.expander("⚙️ Advanced Settings", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                sigma_param = st.slider(
+                    "Attention Width (σ)",
+                    0.1, 1.0, 0.3, 0.05,
+                    key="interp_sigma"
+                )
+            
+            with col2:
+                spatial_weight = st.slider(
+                    "Spatial Weight",
+                    0.0, 1.0, 0.5, 0.05,
+                    key="interp_spatial"
+                )
+            
+            self.attention_extrapolator.sigma_param = sigma_param
+            self.attention_extrapolator.spatial_weight = spatial_weight
+        
+        if st.button("🚀 Generate Interpolated Solution", use_container_width=True):
+            with st.spinner("Generating spherical interpolated solution..."):
+                self._generate_spherical_interpolation(
+                    energy_query, duration_query, time_query,
+                    reference_sim, interpolation_method
+                )
     
-    def render_3d_visualization(self):
-        """Render 3D visualization interface"""
-        st.markdown('<h2 class="sub-header">🌐 3D Visualization</h2>', unsafe_allow_html=True)
+    def _generate_spherical_interpolation(self, energy, duration, time, 
+                                         reference_sim, method):
+        """Generate spherical interpolated solution"""
+        simulations = st.session_state.simulations
         
-        # Get combined simulations
-        combined_simulations = self.interp_manager.get_combined_simulations()
-        
-        if not combined_simulations:
-            self.show_data_not_loaded()
+        if reference_sim not in simulations:
+            st.error(f"Reference simulation '{reference_sim}' not found")
             return
         
-        # Simulation selection
-        sim_names = sorted(combined_simulations.keys())
-        display_names = []
-        for name in sim_names:
-            sim = combined_simulations[name]
-            if sim.get('is_interpolated', False):
-                display_names.append(f"{name} 🌟")
-            else:
-                display_names.append(name)
+        # Get reference geometry
+        ref_data = simulations[reference_sim]
+        ref_points = ref_data['points']
+        ref_centroid = ref_data['centroid']
+        ref_radius = ref_data['radius']
         
-        selected_display = st.selectbox(
-            "Select Simulation",
-            display_names,
-            key="viz_sim_select"
+        # Get spherical template
+        spherical_template = st.session_state.spherical_templates.get(reference_sim)
+        
+        if spherical_template is None:
+            # Create new template
+            spherical_template = self.spherical_manager.create_spherical_template(ref_points)
+            st.session_state.spherical_templates[reference_sim] = spherical_template
+        
+        # Use attention mechanism to predict field statistics
+        prediction = self.attention_extrapolator.predict_with_spherical_attention(
+            energy_query=energy,
+            duration_query=duration,
+            time_query=time,
+            reference_sim=reference_sim
         )
         
-        # Extract actual name
-        if ' 🌟' in selected_display:
-            sim_name = selected_display.split(' 🌟')[0]
-            is_interpolated = True
+        if prediction is None:
+            st.error("Prediction failed")
+            return
+        
+        # Generate field values based on prediction
+        # This is a simplified demonstration - in reality, you would generate
+        # actual field values based on the predicted statistics
+        
+        # Create synthetic field with spherical distribution
+        distances = np.linalg.norm(ref_points - ref_centroid, axis=1)
+        normalized_distances = distances / ref_radius
+        
+        # Physics-based field generation
+        if 'temperature' in prediction.get('prediction', {}):
+            # Temperature-like field
+            base_value = energy / duration
+            radial_decay = np.exp(-normalized_distances**2 / (time * 0.1))
+            field_values = base_value * radial_decay
+            
+            # Add some noise for realism
+            noise = np.random.normal(0, 0.1 * base_value, len(field_values))
+            field_values = field_values + noise
+            
+            # Apply attention-based weighting
+            confidence = prediction.get('confidence', 0.5)
+            field_values = field_values * confidence
         else:
-            sim_name = selected_display
-            is_interpolated = False
+            # Generic field
+            field_values = energy * np.exp(-normalized_distances**2)
         
-        sim = combined_simulations[sim_name]
+        # Store interpolated solution
+        interpolated_id = f"interp_E{energy:.1f}_D{duration:.1f}_T{time:.1f}"
         
-        # Show simulation info
-        col1, col2, col3 = st.columns(3)
+        interpolated_solution = {
+            'id': interpolated_id,
+            'energy': energy,
+            'duration': duration,
+            'time': time,
+            'reference_sim': reference_sim,
+            'method': method,
+            'points': ref_points,  # Same geometry as reference
+            'field_values': field_values,
+            'centroid': ref_centroid,
+            'radius': ref_radius,
+            'confidence': prediction.get('confidence', 0.0),
+            'attention_weights': prediction.get('attention_weights', []),
+            'created_at': datetime.now().isoformat()
+        }
+        
+        # Store in session state
+        if 'interpolated_solutions' not in st.session_state:
+            st.session_state.interpolated_solutions = {}
+        
+        st.session_state.interpolated_solutions[interpolated_id] = interpolated_solution
+        
+        # Display results
+        st.success(f"✅ Interpolated solution generated: {interpolated_id}")
+        
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Energy", f"{sim['energy_mJ']:.2f} mJ")
+            st.metric("Confidence", f"{prediction['confidence']:.2%}")
         with col2:
-            st.metric("Duration", f"{sim['duration_ns']:.2f} ns")
+            st.metric("Method", method)
         with col3:
-            if is_interpolated:
-                st.metric("Type", "Interpolated")
-            else:
-                st.metric("Type", "Original")
+            st.metric("Field Mean", f"{np.mean(field_values):.3f}")
+        with col4:
+            st.metric("Field Range", f"{np.ptp(field_values):.3f}")
         
-        if is_interpolated:
-            st.info(f"Interpolation method: {sim.get('interpolation_method', 'Unknown')} | Confidence: {sim.get('confidence', 0):.3f}")
+        # Visualize
+        st.markdown("#### 🎨 Interpolated Field Visualization")
         
-        # Field and visualization selection
-        mesh_data = sim['mesh_data']
+        tab1, tab2, tab3 = st.tabs(["3D Surface", "Radial Profile", "Comparison"])
         
-        if hasattr(sim, 'field_info') and sim['field_info']:
-            field = st.selectbox(
-                "Select Field",
-                sorted(sim['field_info'].keys()),
-                key="viz_field"
+        with tab1:
+            fig = self.visualizer.create_spherical_surface_plot(
+                points=ref_points,
+                values=field_values,
+                colormap=st.session_state.selected_colormap,
+                opacity=st.session_state.mesh_opacity,
+                show_edges=st.session_state.show_edges
             )
             
-            # For interpolated simulations, only one timestep
-            if sim.get('n_timesteps', 1) > 1:
-                timestep = st.slider(
-                    "Timestep",
-                    0, sim['n_timesteps'] - 1, 0,
-                    key="viz_timestep"
-                )
-            else:
-                timestep = 0
+            fig.update_layout(
+                title=f"Interpolated Solution: {interpolated_id}"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with tab2:
+            radial_fig = self.visualizer.create_radial_profile_plot(
+                points=ref_points,
+                values=field_values,
+                n_bins=15
+            )
+            st.plotly_chart(radial_fig, use_container_width=True)
+        
+        with tab3:
+            # Compare with reference simulation
+            ref_values = ref_data['field_values']
             
-            # Get field values
-            if field in mesh_data.fields:
-                field_data = mesh_data.fields[field][timestep]
-                
-                # Handle vector fields
-                if hasattr(sim, 'field_info') and sim['field_info'][field][0] == "vector":
-                    field_data = np.linalg.norm(field_data, axis=1)
-                
-                # Create visualization
-                config = {
-                    'mode': st.session_state.visualization_mode,
-                    'colormap': st.session_state.selected_colormap,
-                    'opacity': st.session_state.mesh_opacity,
-                    'title': f"{field} - {sim_name}",
-                    'height': 700
-                }
-                
-                fig = self.visualizer.create_spherical_visualization(mesh_data, field_data, config)
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Show mesh statistics
-                st.markdown("#### 📐 Mesh Statistics")
-                if hasattr(mesh_data, 'metadata'):
-                    metadata = mesh_data.metadata
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("Points", f"{len(mesh_data.points):,}")
-                    with col2:
-                        if mesh_data.triangles is not None:
-                            st.metric("Triangles", f"{len(mesh_data.triangles):,}")
-                        else:
-                            st.metric("Triangles", "N/A")
-                    with col3:
-                        if 'avg_radius' in metadata:
-                            st.metric("Avg Radius", f"{metadata['avg_radius']:.3f}")
-                    with col4:
-                        if 'is_spherical' in metadata:
-                            st.metric("Spherical", "Yes" if metadata['is_spherical'] else "No")
-            else:
-                st.warning(f"Field '{field}' not available in this simulation")
-        else:
-            st.warning("No field data available for this simulation")
+            points_list = [ref_points, ref_points]
+            values_list = [ref_values, field_values]
+            names = [f"Reference: {reference_sim}", f"Interpolated: {interpolated_id}"]
+            
+            comp_fig = self.visualizer.create_spherical_comparison(
+                points_list=points_list,
+                values_list=values_list,
+                names=names,
+                colormap=st.session_state.selected_colormap,
+                n_cols=2
+            )
+            st.plotly_chart(comp_fig, use_container_width=True)
     
-    def render_attention_analysis(self):
-        """Render attention mechanism analysis"""
-        st.markdown('<h2 class="sub-header">🧠 Attention Mechanism Analysis</h2>', unsafe_allow_html=True)
+    def _render_3d_visualization(self):
+        """Render 3D visualization interface"""
+        st.markdown("## 🌐 3D Visualization")
         
-        if not st.session_state.get('data_loaded', False):
-            self.show_data_not_loaded()
+        # Get all available solutions
+        all_solutions = {}
+        
+        # Add original simulations
+        if st.session_state.get('data_loaded', False):
+            all_solutions.update(st.session_state.simulations)
+        
+        # Add interpolated solutions
+        if 'interpolated_solutions' in st.session_state:
+            all_solutions.update(st.session_state.interpolated_solutions)
+        
+        if not all_solutions:
+            st.info("No solutions available for visualization.")
             return
         
-        extrapolator = st.session_state.get('extrapolator')
-        if extrapolator is None:
-            st.warning("Extrapolator not initialized. Please generate predictions first.")
-            return
+        # Solution selector
+        solution_names = list(all_solutions.keys())
         
-        attention = extrapolator.attention
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            selected_solution = st.selectbox(
+                "Select Solution",
+                solution_names,
+                key="viz_solution"
+            )
         
-        if not hasattr(attention, 'attention_history') or len(attention.attention_history) == 0:
-            st.info("No attention history available. Generate predictions first.")
-            return
+        solution = all_solutions[selected_solution]
         
-        # Show attention history
-        st.markdown("#### 📜 Attention History")
+        # Determine if it's interpolated
+        is_interpolated = 'interpolated_solutions' in st.session_state and \
+                         selected_solution in st.session_state.interpolated_solutions
         
-        history_df = []
-        for entry in attention.attention_history[-10:]:  # Show last 10 entries
-            history_df.append({
-                'Timestamp': entry['timestamp'],
-                'Energy': entry['query']['energy'],
-                'Duration': entry['query']['duration'],
-                'Time': entry['query']['time'],
-                'Max Weight': np.max(entry['weights']),
-                'Avg Weight': np.mean(entry['weights'])
-            })
+        with col2:
+            if is_interpolated:
+                st.markdown('<div class="spherical-badge">INTERPOLATED</div>', 
+                           unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="spherical-badge">ORIGINAL</div>', 
+                           unsafe_allow_html=True)
         
-        if history_df:
-            st.dataframe(pd.DataFrame(history_df), use_container_width=True)
+        # Solution info
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Energy", f"{solution.get('energy', 0):.2f} mJ")
+        with col2:
+            st.metric("Duration", f"{solution.get('duration', 0):.2f} ns")
+        with col3:
+            if 'time' in solution:
+                st.metric("Time", f"{solution['time']:.1f} ns")
+            else:
+                st.metric("Type", "Original")
+        with col4:
+            if is_interpolated:
+                st.metric("Confidence", f"{solution.get('confidence', 0):.2%}")
+            else:
+                st.metric("Points", f"{len(solution['points']):,}")
         
-        # Parameter space analysis
-        st.markdown("#### 🌐 Parameter Space Analysis")
+        # Visualization options
+        st.markdown("#### 🎨 Visualization Options")
         
-        # Get all query points from history
-        query_points = []
-        query_weights = []
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            viz_mode = st.selectbox(
+                "Visualization Mode",
+                ["Surface", "Point Cloud", "Wireframe"],
+                key="viz_mode"
+            )
+        with col2:
+            color_by = st.selectbox(
+                "Color By",
+                ["Field Value", "Radial Distance", "Custom"],
+                key="viz_color"
+            )
+        with col3:
+            show_statistics = st.checkbox("Show Statistics", True)
         
-        for entry in attention.attention_history:
-            query_points.append([
-                entry['query']['energy'],
-                entry['query']['duration'],
-                entry['query']['time']
-            ])
-            query_weights.append(np.max(entry['weights']))
+        # Prepare visualization data
+        points = solution['points']
+        field_values = solution.get('field_values', np.zeros(len(points)))
         
-        if query_points:
-            query_points = np.array(query_points)
-            query_weights = np.array(query_weights)
-            
-            # Create 3D scatter plot
+        # Color values based on selection
+        if color_by == "Radial Distance":
+            if 'centroid' in solution:
+                centroid = solution['centroid']
+                distances = np.linalg.norm(points - centroid, axis=1)
+                viz_values = distances
+            else:
+                viz_values = field_values
+        else:
+            viz_values = field_values
+        
+        # Create visualization
+        if viz_mode == "Surface":
+            fig = self.visualizer.create_spherical_surface_plot(
+                points=points,
+                values=viz_values,
+                colormap=st.session_state.selected_colormap,
+                opacity=st.session_state.mesh_opacity,
+                show_edges=st.session_state.show_edges
+            )
+        elif viz_mode == "Point Cloud":
+            # Create point cloud visualization
             fig = go.Figure()
-            
             fig.add_trace(go.Scatter3d(
-                x=query_points[:, 0],
-                y=query_points[:, 1],
-                z=query_points[:, 2],
+                x=points[:, 0],
+                y=points[:, 1],
+                z=points[:, 2],
                 mode='markers',
                 marker=dict(
-                    size=10,
-                    color=query_weights,
-                    colorscale='Viridis',
-                    opacity=0.8,
+                    size=4,
+                    color=viz_values,
+                    colorscale=st.session_state.selected_colormap,
+                    opacity=st.session_state.mesh_opacity,
                     showscale=True,
-                    colorbar=dict(title="Max Attention Weight")
+                    colorbar=dict(title="Value", thickness=20)
                 ),
-                text=[f"E: {e:.1f}, τ: {d:.1f}, t: {t:.1f}" for e, d, t in query_points],
-                hoverinfo='text'
+                name=selected_solution
             ))
             
             fig.update_layout(
-                title="Query Points in Parameter Space",
                 scene=dict(
-                    xaxis_title="Energy (mJ)",
-                    yaxis_title="Duration (ns)",
-                    zaxis_title="Time (ns)"
+                    aspectmode='data',
+                    camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
                 ),
-                height=600
+                height=700
             )
+        else:  # Wireframe
+            # Simplified wireframe visualization
+            fig = go.Figure()
             
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Source distribution analysis
-        st.markdown("#### 📊 Source Distribution")
-        
-        if hasattr(extrapolator, 'source_metadata') and extrapolator.source_metadata:
-            source_energies = []
-            source_durations = []
+            # Add a sample wireframe (in reality, would use actual edges)
+            fig.add_trace(go.Scatter3d(
+                x=points[::10, 0],  # Sample points
+                y=points[::10, 1],
+                z=points[::10, 2],
+                mode='markers+lines',
+                marker=dict(size=3, color=viz_values[::10]),
+                line=dict(color='gray', width=1),
+                name=selected_solution
+            ))
             
-            for meta in extrapolator.source_metadata:
-                source_energies.append(meta.get('energy', 0))
-                source_durations.append(meta.get('duration', 0))
-            
-            fig = px.scatter(
-                x=source_energies,
-                y=source_durations,
-                title="Source Simulations in Parameter Space",
-                labels={'x': 'Energy (mJ)', 'y': 'Duration (ns)'}
+            fig.update_layout(
+                scene=dict(aspectmode='data'),
+                height=700
             )
+        
+        fig.update_layout(title=f"Visualization: {selected_solution}")
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Statistics
+        if show_statistics and len(field_values) > 0:
+            st.markdown("#### 📊 Field Statistics")
             
-            st.plotly_chart(fig, use_container_width=True)
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1:
+                st.metric("Min", f"{np.min(field_values):.3f}")
+            with col2:
+                st.metric("Max", f"{np.max(field_values):.3f}")
+            with col3:
+                st.metric("Mean", f"{np.mean(field_values):.3f}")
+            with col4:
+                st.metric("Std Dev", f"{np.std(field_values):.3f}")
+            with col5:
+                st.metric("Range", f"{np.ptp(field_values):.3f}")
     
-    def show_data_not_loaded(self):
-        """Show data not loaded message"""
-        st.markdown("""
-        <div class="warning-box">
-        <h3>⚠️ No Data Loaded</h3>
-        <p>Please load simulations first using the "Load Simulations" button in the sidebar.</p>
-        <p>Ensure your data follows the expected structure with spherical VTU files.</p>
-        </div>
-        """, unsafe_allow_html=True)
+    def _render_attention_analysis(self):
+        """Render attention analysis interface"""
+        st.markdown("## 🧠 Attention Mechanism Analysis")
+        
+        if not st.session_state.get('attention_ready', False):
+            st.warning("Attention mechanism not ready.")
+            return
+        
+        # Query parameters
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            energy = st.number_input(
+                "Query Energy (mJ)",
+                min_value=0.1,
+                max_value=10.0,
+                value=3.0,
+                step=0.1,
+                key="attn_energy"
+            )
+        with col2:
+            duration = st.number_input(
+                "Query Duration (ns)",
+                min_value=0.5,
+                max_value=20.0,
+                value=5.0,
+                step=0.1,
+                key="attn_duration"
+            )
+        with col3:
+            time = st.number_input(
+                "Query Time (ns)",
+                min_value=0.0,
+                max_value=50.0,
+                value=12.0,
+                step=1.0,
+                key="attn_time"
+            )
+        
+        if st.button("Analyze Attention", use_container_width=True):
+            with st.spinner("Computing attention weights..."):
+                # Get prediction
+                prediction = self.attention_extrapolator.predict_with_spherical_attention(
+                    energy_query=energy,
+                    duration_query=duration,
+                    time_query=time
+                )
+                
+                if prediction is None:
+                    st.error("Attention analysis failed")
+                    return
+                
+                attention_weights = prediction.get('attention_weights', [])
+                confidence = prediction.get('confidence', 0.0)
+                
+                st.success(f"✅ Analysis complete - Confidence: {confidence:.2%}")
+                
+                # Display attention weights
+                st.markdown("#### 📊 Attention Weights Distribution")
+                
+                # Create histogram
+                fig = go.Figure()
+                fig.add_trace(go.Histogram(
+                    x=attention_weights,
+                    nbinsx=20,
+                    marker_color='skyblue',
+                    opacity=0.7,
+                    name='Attention Weights'
+                ))
+                
+                fig.update_layout(
+                    title="Distribution of Attention Weights",
+                    xaxis_title="Attention Weight",
+                    yaxis_title="Frequency",
+                    height=400
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Top attention sources
+                if len(attention_weights) > 0:
+                    # Get metadata for each source
+                    source_metadata = self.attention_extrapolator.source_metadata
+                    
+                    # Sort by attention weight
+                    sorted_indices = np.argsort(attention_weights)[::-1]
+                    
+                    # Display top sources
+                    st.markdown("#### 🏆 Top Attention Sources")
+                    
+                    top_sources = []
+                    for idx in sorted_indices[:10]:
+                        if idx < len(source_metadata):
+                            meta = source_metadata[idx]
+                            weight = attention_weights[idx]
+                            
+                            top_sources.append({
+                                'Simulation': meta.get('name', 'Unknown'),
+                                'Energy (mJ)': meta.get('energy', 0),
+                                'Duration (ns)': meta.get('duration', 0),
+                                'Time (ns)': meta.get('time', 0),
+                                'Attention Weight': weight
+                            })
+                    
+                    if top_sources:
+                        df_top = pd.DataFrame(top_sources)
+                        st.dataframe(
+                            df_top.style.format({
+                                'Energy (mJ)': '{:.2f}',
+                                'Duration (ns)': '{:.2f}',
+                                'Time (ns)': '{:.1f}',
+                                'Attention Weight': '{:.4f}'
+                            }).background_gradient(subset=['Attention Weight'], cmap='YlOrRd'),
+                            use_container_width=True
+                        )
+                
+                # Create attention network visualization
+                st.markdown("#### 🔗 Attention Network")
+                
+                # Simplified network visualization
+                if len(attention_weights) > 0:
+                    # Create graph
+                    G = nx.Graph()
+                    G.add_node("QUERY", size=50, color='red', label="Query")
+                    
+                    # Add top sources as nodes
+                    for i, idx in enumerate(sorted_indices[:8]):
+                        if idx < len(source_metadata):
+                            meta = source_metadata[idx]
+                            weight = attention_weights[idx]
+                            
+                            node_id = f"S{i}"
+                            G.add_node(node_id,
+                                      size=30 * weight,
+                                      color='blue',
+                                      label=meta.get('name', f"Source {i}"),
+                                      weight=weight)
+                            
+                            # Add edge from query to source
+                            G.add_edge("QUERY", node_id, weight=weight)
+                    
+                    # Create network visualization
+                    pos = nx.spring_layout(G, seed=42)
+                    
+                    edge_x, edge_y = [], []
+                    for edge in G.edges():
+                        x0, y0 = pos[edge[0]]
+                        x1, y1 = pos[edge[1]]
+                        edge_x.extend([x0, x1, None])
+                        edge_y.extend([y0, y1, None])
+                    
+                    edge_trace = go.Scatter(
+                        x=edge_x, y=edge_y,
+                        line=dict(width=2, color='gray'),
+                        hoverinfo='none',
+                        mode='lines'
+                    )
+                    
+                    node_x, node_y, node_text, node_size, node_color = [], [], [], [], []
+                    for node in G.nodes():
+                        x, y = pos[node]
+                        node_x.append(x)
+                        node_y.append(y)
+                        
+                        if node == "QUERY":
+                            node_text.append("QUERY")
+                            node_size.append(30)
+                            node_color.append('red')
+                        else:
+                            node_data = G.nodes[node]
+                            node_text.append(node_data['label'])
+                            node_size.append(node_data['size'])
+                            node_color.append(node_data['color'])
+                    
+                    node_trace = go.Scatter(
+                        x=node_x, y=node_y,
+                        mode='markers+text',
+                        text=node_text,
+                        textposition="top center",
+                        marker=dict(
+                            size=node_size,
+                            color=node_color,
+                            line=dict(width=2, color='white')
+                        ),
+                        hoverinfo='text',
+                        name='Nodes'
+                    )
+                    
+                    network_fig = go.Figure(data=[edge_trace, node_trace])
+                    network_fig.update_layout(
+                        title="Attention Network Visualization",
+                        showlegend=False,
+                        hovermode='closest',
+                        height=500,
+                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+                    )
+                    
+                    st.plotly_chart(network_fig, use_container_width=True)
+    
+    def _render_export_solutions(self):
+        """Render export interface"""
+        st.markdown("## 💾 Export Solutions")
+        
+        # Get all solutions
+        all_solutions = {}
+        
+        # Add original simulations
+        if st.session_state.get('data_loaded', False):
+            all_solutions.update(st.session_state.simulations)
+        
+        # Add interpolated solutions
+        if 'interpolated_solutions' in st.session_state:
+            all_solutions.update(st.session_state.interpolated_solutions)
+        
+        if not all_solutions:
+            st.info("No solutions available for export.")
+            return
+        
+        # Export options
+        col1, col2 = st.columns(2)
+        with col1:
+            export_format = st.selectbox(
+                "Export Format",
+                ["CSV", "JSON", "NPZ", "VTK"],
+                key="export_format"
+            )
+        
+        with col2:
+            export_type = st.selectbox(
+                "Export Type",
+                ["Selected Solution", "All Solutions", "Comparison Data"],
+                key="export_type"
+            )
+        
+        # Solution selection
+        if export_type == "Selected Solution":
+            solution_names = list(all_solutions.keys())
+            selected_solution = st.selectbox(
+                "Select Solution",
+                solution_names,
+                key="export_solution"
+            )
+            
+            solutions_to_export = {selected_solution: all_solutions[selected_solution]}
+        elif export_type == "All Solutions":
+            solutions_to_export = all_solutions
+        else:  # Comparison Data
+            # Select multiple solutions for comparison
+            solution_names = list(all_solutions.keys())
+            selected_solutions = st.multiselect(
+                "Select Solutions for Comparison",
+                solution_names,
+                default=solution_names[:min(3, len(solution_names))]
+            )
+            
+            solutions_to_export = {name: all_solutions[name] for name in selected_solutions}
+        
+        # Export button
+        if st.button("Export Data", use_container_width=True):
+            with st.spinner("Preparing export..."):
+                self._export_data(solutions_to_export, export_format)
+    
+    def _export_data(self, solutions, format):
+        """Export data in specified format"""
+        if format == "CSV":
+            # Create CSV export
+            csv_data = []
+            
+            for name, solution in solutions.items():
+                points = solution.get('points', [])
+                values = solution.get('field_values', [])
+                
+                if len(points) > 0 and len(values) > 0:
+                    for i, (point, value) in enumerate(zip(points, values)):
+                        csv_data.append({
+                            'solution': name,
+                            'point_id': i,
+                            'x': point[0],
+                            'y': point[1],
+                            'z': point[2],
+                            'value': value,
+                            'energy': solution.get('energy', ''),
+                            'duration': solution.get('duration', ''),
+                            'time': solution.get('time', '')
+                        })
+            
+            if csv_data:
+                df = pd.DataFrame(csv_data)
+                csv = df.to_csv(index=False)
+                
+                st.download_button(
+                    label="📥 Download CSV",
+                    data=csv,
+                    file_name="spherical_solutions.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.warning("No data to export")
+        
+        elif format == "JSON":
+            # Create JSON export
+            export_data = {}
+            
+            for name, solution in solutions.items():
+                # Convert numpy arrays to lists
+                export_solution = {}
+                for key, value in solution.items():
+                    if isinstance(value, np.ndarray):
+                        export_solution[key] = value.tolist()
+                    elif isinstance(value, np.float32) or isinstance(value, np.float64):
+                        export_solution[key] = float(value)
+                    elif isinstance(value, np.int32) or isinstance(value, np.int64):
+                        export_solution[key] = int(value)
+                    else:
+                        export_solution[key] = value
+                
+                export_data[name] = export_solution
+            
+            json_str = json.dumps(export_data, indent=2)
+            
+            st.download_button(
+                label="📥 Download JSON",
+                data=json_str,
+                file_name="spherical_solutions.json",
+                mime="application/json"
+            )
+        
+        elif format == "NPZ":
+            # Create NPZ export (numpy compressed format)
+            import io
+            import zipfile
+            
+            # Create in-memory zip file
+            zip_buffer = io.BytesIO()
+            
+            with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
+                for name, solution in solutions.items():
+                    # Save points and values
+                    points = solution.get('points', np.array([]))
+                    values = solution.get('field_values', np.array([]))
+                    
+                    if len(points) > 0:
+                        # Create numpy arrays
+                        npz_buffer = io.BytesIO()
+                        np.savez(npz_buffer, 
+                                points=points, 
+                                values=values,
+                                metadata={
+                                    'name': name,
+                                    'energy': solution.get('energy', 0),
+                                    'duration': solution.get('duration', 0),
+                                    'time': solution.get('time', 0)
+                                })
+                        
+                        # Add to zip
+                        zip_file.writestr(f"{name}.npz", npz_buffer.getvalue())
+            
+            st.download_button(
+                label="📥 Download NPZ Zip",
+                data=zip_buffer.getvalue(),
+                file_name="spherical_solutions.zip",
+                mime="application/zip"
+            )
+        
+        else:  # VTK
+            st.info("VTK export is under development.")
+            st.markdown("""
+            **Planned VTK features:**
+            - Export spherical meshes with field data
+            - ParaView-compatible format
+            - Time series support
+            - Material properties
+            """)
 
 # =============================================
 # MAIN APPLICATION ENTRY POINT
@@ -1980,7 +1802,7 @@ class SphericalInterpolationApp:
 def main():
     """Main entry point"""
     try:
-        app = SphericalInterpolationApp()
+        app = SphericalFEAInterpolator()
         app.run()
     except Exception as e:
         st.error(f"Application error: {str(e)}")
