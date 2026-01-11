@@ -118,7 +118,7 @@ class UnifiedFEADataLoader:
                         try:
                             mesh = meshio.read(vtu_files[t])
                             for key in sim_data['field_info']:
-                                if key in mesh.point_
+                                if key in mesh.point_data:
                                     fields[key][t] = mesh.point_data[key].astype(np.float32)
                         except Exception as e:
                             st.warning(f"Error loading timestep {t} in {name}: {e}")
