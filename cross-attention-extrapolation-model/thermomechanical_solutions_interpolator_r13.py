@@ -1772,7 +1772,7 @@ def render_interpolation_extrapolation():
             energies = [s['energy'] for s in st.session_state.summaries]
             min_energy, max_energy = min(energies), max(energies)
         else:
-            min_energy, max_energy = 0.1, 100.0
+            min_energy, max_energy = 0.1, 50.0
         
         energy_query = st.number_input(
             "Energy (mJ)",
@@ -1789,7 +1789,7 @@ def render_interpolation_extrapolation():
             durations = [s['duration'] for s in st.session_state.summaries]
             min_duration, max_duration = min(durations), max(durations)
         else:
-            min_duration, max_duration = 0.5, 2000.0
+            min_duration, max_duration = 0.5, 20.0
         
         duration_query = st.number_input(
             "Pulse Duration (ns)",
@@ -1805,7 +1805,7 @@ def render_interpolation_extrapolation():
         max_time = st.number_input(
             "Max Prediction Time (ns)",
             min_value=1,
-            max_value=100,
+            max_value=1000,
             value=20,
             step=1,
             key="interp_maxtime"
