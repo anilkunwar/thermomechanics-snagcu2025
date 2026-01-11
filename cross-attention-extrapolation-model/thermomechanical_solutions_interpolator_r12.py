@@ -73,7 +73,7 @@ class UnifiedFEADataLoader:
             status_text.text(f"Loading {name}... ({len(vtu_files)} files)")
             try:
                 mesh0 = meshio.read(vtu_files[0])
-                if not mesh0.point_
+                if not mesh0.point_data:
                     st.warning(f"No point data in {name}")
                     continue
                 
