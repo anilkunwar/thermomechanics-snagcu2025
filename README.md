@@ -51,6 +51,6 @@
 
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator10-streamlit-red)](https://thermomechanical-solutions-interpolator10.streamlit.app/) (developed from the model r4)
 
-    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator11-streamlit-red)](https://thermomechanical-solutions-interpolator11.streamlit.app/) (robust and working interpolation module)
+    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator11-streamlit-red)](https://thermomechanical-solutions-interpolator11.streamlit.app/) (robust and working interpolation module, no temporal bias and so interpolation only within 20 ns duration)
 
-    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator12-streamlit-red)](https://thermomechanical-solutions-interpolator12.streamlit.app/) 
+    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator12-streamlit-red)](https://thermomechanical-solutions-interpolator12.streamlit.app/) (robust and working interpolation module, no temporal bias and so interpolation only within 20 ns duration)
