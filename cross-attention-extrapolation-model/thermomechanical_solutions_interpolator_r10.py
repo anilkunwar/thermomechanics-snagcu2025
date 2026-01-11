@@ -20,11 +20,6 @@ import networkx as nx
 from scipy.spatial.distance import cdist
 from scipy.spatial import Delaunay, ConvexHull, KDTree
 from skimage import measure
-import pyvista as pv
-import tempfile
-from stpyvista import stpyvista
-import subprocess
-import threading
 
 warnings.filterwarnings('ignore')
 
@@ -36,27 +31,6 @@ FEA_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "fea_solutions")
 INTERPOLATED_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "interpolated_solutions")
 os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 os.makedirs(INTERPOLATED_SOLUTIONS_DIR, exist_ok=True)
-
-# =============================================
-# START XVFB FOR HEADLESS RENDERING
-# =============================================
-def start_xvfb():
-    """Start Xvfb for headless rendering if not already running"""
-    try:
-        # Check if Xvfb is already running
-        result = subprocess.run(['pgrep', 'Xvfb'], capture_output=True)
-        if result.returncode != 0:
-            # Start Xvfb on display :99
-            subprocess.Popen(['Xvfb', ':99', '-screen', '0', '1920x1080x24'])
-            os.environ['DISPLAY'] = ':99'
-            st.info("Started Xvfb for headless rendering")
-    except Exception as e:
-        st.warning(f"Could not start Xvfb: {e}")
-
-# Start Xvfb if needed
-if "IS_XVFB_RUNNING" not in st.session_state:
-    start_xvfb()
-    st.session_state.IS_XVFB_RUNNING = True
 
 # =============================================
 # INTERPOLATED SOLUTIONS MANAGER
@@ -237,431 +211,6 @@ class InterpolatedSolutionsManager:
         return combined
 
 # =============================================
-# ENHANCED 3D VISUALIZER WITH INTERPOLATED SUPPORT
-# =============================================
-class Enhanced3DVisualizer:
-    """Enhanced 3D visualization with multiple rendering modes"""
-    
-    def __init__(self):
-        self.interpolator = Advanced3DInterpolator()
-        self.visualization_modes = {
-            'Point Cloud': 'points',
-            'Wireframe Mesh': 'wireframe',
-            'Surface Mesh': 'surface',
-            'Isosurfaces': 'isosurface',
-            'Volume Rendering': 'volume',
-            'Sliced Volume': 'slice'
-        }
-    
-    def create_3d_visualization(self, points, values, triangles=None, 
-                               mode='surface', colormap='Viridis',
-                               grid_resolution=40, n_isosurfaces=4,
-                               opacity=0.8, show_edges=False):
-        """Create comprehensive 3D visualization based on selected mode"""
-        
-        # Normalize values for consistent coloring
-        if len(values) > 0:
-            valid_values = values[~np.isnan(values)]
-            if len(valid_values) > 0:
-                vmin, vmax = np.min(valid_values), np.max(valid_values)
-                if vmax - vmin > 1e-10:
-                    normalized_values = (values - vmin) / (vmax - vmin)
-                else:
-                    normalized_values = np.zeros_like(values)
-            else:
-                normalized_values = np.zeros_like(values)
-        else:
-            normalized_values = np.zeros_like(values)
-        
-        fig = go.Figure()
-        
-        if mode == 'points':
-            # Point cloud visualization
-            fig.add_trace(go.Scatter3d(
-                x=points[:, 0],
-                y=points[:, 1],
-                z=points[:, 2],
-                mode='markers',
-                marker=dict(
-                    size=4,
-                    color=values,
-                    colorscale=colormap,
-                    opacity=opacity,
-                    colorbar=dict(title="Value", thickness=20),
-                    showscale=True
-                ),
-                name='Point Cloud',
-                hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
-                            '<b>X:</b> %{x:.3f}<br>' +
-                            '<b>Y:</b> %{y:.3f}<br>' +
-                            '<b>Z:</b> %{z:.3f}<extra></extra>'
-            ))
-        
-        elif mode == 'wireframe' and triangles is not None:
-            # Wireframe mesh
-            if len(triangles) > 0:
-                # Extract triangle vertices
-                i, j, k = triangles[:, 0], triangles[:, 1], triangles[:, 2]
-                
-                # Create mesh
-                fig.add_trace(go.Mesh3d(
-                    x=points[:, 0],
-                    y=points[:, 1],
-                    z=points[:, 2],
-                    i=i, j=j, k=k,
-                    intensity=values,
-                    colorscale=colormap,
-                    intensitymode='vertex',
-                    opacity=opacity * 0.5,
-                    showscale=True,
-                    colorbar=dict(title="Value", thickness=20),
-                    hoverinfo='none'
-                ))
-                
-                # Add wireframe edges
-                edges_x, edges_y, edges_z = [], [], []
-                for tri in triangles:
-                    for i in range(3):
-                        edges_x.extend([points[tri[i], 0], points[tri[(i+1)%3], 0], None])
-                        edges_y.extend([points[tri[i], 1], points[tri[(i+1)%3], 1], None])
-                        edges_z.extend([points[tri[i], 2], points[tri[(i+1)%3], 2], None])
-                
-                fig.add_trace(go.Scatter3d(
-                    x=edges_x,
-                    y=edges_y,
-                    z=edges_z,
-                    mode='lines',
-                    line=dict(color='black', width=1),
-                    hoverinfo='none',
-                    showlegend=False
-                ))
-        
-        elif mode == 'surface' and triangles is not None:
-            # Smooth surface visualization
-            if len(triangles) > 0:
-                # Create smoothed surface
-                smoothed_points, smoothed_values, smoothed_triangles = \
-                    self.interpolator.create_smooth_surface(points, values, triangles)
-                
-                if smoothed_triangles is not None:
-                    i, j, k = smoothed_triangles[:, 0], smoothed_triangles[:, 1], smoothed_triangles[:, 2]
-                    
-                    fig.add_trace(go.Mesh3d(
-                        x=smoothed_points[:, 0],
-                        y=smoothed_points[:, 1],
-                        z=smoothed_points[:, 2],
-                        i=i, j=j, k=k,
-                        intensity=smoothed_values,
-                        colorscale=colormap,
-                        intensitymode='vertex',
-                        opacity=opacity,
-                        showscale=True,
-                        colorbar=dict(title="Value", thickness=20),
-                        flatshading=False,
-                        lighting=dict(
-                            ambient=0.8,
-                            diffuse=0.8,
-                            specular=0.5,
-                            roughness=0.5
-                        ),
-                        lightposition=dict(x=100, y=200, z=300),
-                        hoverinfo='none'
-                    ))
-        
-        elif mode == 'isosurface':
-            # Isosurface visualization with interpolation
-            X_grid, Y_grid, Z_grid, grid_points, _ = \
-                self.interpolator.create_regular_grid(points, values, grid_resolution)
-            
-            if grid_points is not None:
-                grid_values = self.interpolator.interpolate_to_grid(
-                    points, values, grid_points, method='rbf'
-                )
-                
-                if grid_values is not None:
-                    # Reshape for isosurface
-                    values_3d = grid_values.reshape(X_grid.shape)
-                    
-                    # Get percentiles for isosurface levels
-                    percentiles = np.linspace(20, 80, n_isosurfaces)
-                    levels = np.percentile(grid_values[~np.isnan(grid_values)], percentiles)
-                    
-                    # Create isosurfaces
-                    for i, level in enumerate(levels):
-                        # Create isosurface
-                        fig.add_trace(go.Isosurface(
-                            x=X_grid.flatten(),
-                            y=Y_grid.flatten(),
-                            z=Z_grid.flatten(),
-                            value=grid_values,
-                            isomin=level - 0.01,
-                            isomax=level + 0.01,
-                            colorscale=colormap,
-                            surface_count=1,
-                            opacity=opacity * (0.8 - i * 0.15),
-                            showscale=i==0,
-                            colorbar=dict(title="Value", thickness=20),
-                            caps=dict(x_show=False, y_show=False, z_show=False),
-                            name=f'Isosurface {i+1}: {level:.2f}'
-                        ))
-        
-        elif mode == 'volume':
-            # Volume rendering
-            X_grid, Y_grid, Z_grid, grid_points, _ = \
-                self.interpolator.create_regular_grid(points, values, grid_resolution)
-            
-            if grid_points is not None:
-                grid_values = self.interpolator.interpolate_to_grid(
-                    points, values, grid_points, method='linear'
-                )
-                
-                if grid_values is not None:
-                    fig.add_trace(go.Volume(
-                        x=X_grid.flatten(),
-                        y=Y_grid.flatten(),
-                        z=Z_grid.flatten(),
-                        value=grid_values,
-                        isomin=np.nanmin(grid_values),
-                        isomax=np.nanmax(grid_values),
-                        opacity=opacity * 0.3,  # Lower opacity for volume
-                        opacityscale='uniform',
-                        surface_count=20,
-                        colorscale=colormap,
-                        showscale=True,
-                        colorbar=dict(title="Value", thickness=20),
-                        caps=dict(x_show=False, y_show=False, z_show=False),
-                        name='Volume'
-                    ))
-        
-        elif mode == 'slice':
-            # Sliced volume visualization
-            X_grid, Y_grid, Z_grid, grid_points, _ = \
-                self.interpolator.create_regular_grid(points, values, grid_resolution)
-            
-            if grid_points is not None:
-                grid_values = self.interpolator.interpolate_to_grid(
-                    points, values, grid_points, method='linear'
-                )
-                
-                if grid_values is not None:
-                    values_3d = grid_values.reshape(X_grid.shape)
-                    
-                    # Create slices at different positions
-                    slice_positions = [0.25, 0.5, 0.75]
-                    
-                    for i, pos in enumerate(slice_positions):
-                        slice_idx = int(pos * (grid_resolution - 1))
-                        
-                        # X-slice
-                        fig.add_trace(go.Surface(
-                            x=np.ones_like(Y_grid[slice_idx, :, :]) * X_grid[slice_idx, 0, 0],
-                            y=Y_grid[slice_idx, :, :],
-                            z=Z_grid[slice_idx, :, :],
-                            surfacecolor=values_3d[slice_idx, :, :],
-                            colorscale=colormap,
-                            showscale=i==0,
-                            colorbar=dict(title="Value", thickness=20),
-                            opacity=opacity * 0.7,
-                            name=f'X-Slice at {X_grid[slice_idx, 0, 0]:.2f}'
-                        ))
-        
-        # Add original points for reference in all modes
-        if mode not in ['points', 'wireframe']:
-            fig.add_trace(go.Scatter3d(
-                x=points[::10, 0],  # Sample every 10th point for clarity
-                y=points[::10, 1],
-                z=points[::10, 2],
-                mode='markers',
-                marker=dict(
-                    size=2,
-                    color='rgba(0, 0, 0, 0.3)',
-                    symbol='circle'
-                ),
-                name='Sample Points',
-                hoverinfo='none',
-                showlegend=False
-            ))
-        
-        # Update layout
-        fig.update_layout(
-            scene=dict(
-                aspectmode='data',
-                camera=dict(
-                    eye=dict(x=1.5, y=1.5, z=1.5),
-                    up=dict(x=0, y=0, z=1)
-                ),
-                xaxis=dict(
-                    title="X",
-                    gridcolor="lightgray",
-                    showbackground=True,
-                    backgroundcolor="white"
-                ),
-                yaxis=dict(
-                    title="Y",
-                    gridcolor="lightgray",
-                    showbackground=True,
-                    backgroundcolor="white"
-                ),
-                zaxis=dict(
-                    title="Z",
-                    gridcolor="lightgray",
-                    showbackground=True,
-                    backgroundcolor="white"
-                )
-            ),
-            height=700,
-            margin=dict(l=0, r=0, t=40, b=0),
-            showlegend=True,
-            legend=dict(
-                yanchor="top",
-                y=0.99,
-                xanchor="left",
-                x=0.01
-            )
-        )
-        
-        return fig
-    
-    def create_pyvista_visualization(self, points, values, triangles=None, mode='surface', 
-                                   colormap='viridis', grid_resolution=40, n_isosurfaces=4, 
-                                   opacity=0.8, show_edges=False):
-        """Create PyVista plotter for true 3D rendering"""
-        
-        try:
-            # Create plotter with higher quality settings
-            plotter = pv.Plotter(window_size=[800, 600], off_screen=True)
-            
-            if mode == 'points':
-                # Point cloud
-                cloud = pv.PolyData(points)
-                cloud['values'] = values
-                plotter.add_points(cloud, scalars='values', cmap=colormap, point_size=4, 
-                                 render_points_as_spheres=True, opacity=opacity)
-                
-            elif mode in ['wireframe', 'surface'] and triangles is not None:
-                # Create mesh and smooth it
-                if len(triangles) > 0:
-                    # Ensure triangles are in correct format for PyVista
-                    try:
-                        faces = np.hstack([[3, *tri] for tri in triangles])
-                        mesh = pv.PolyData(points, faces)
-                    except:
-                        # Alternative format
-                        mesh = pv.PolyData(points)
-                        if len(triangles) > 0:
-                            mesh.faces = triangles
-                    
-                    mesh['values'] = values
-                    
-                    if mode == 'wireframe':
-                        plotter.add_mesh(mesh, style='wireframe', line_width=2, color='black', 
-                                       scalars='values', cmap=colormap)
-                    else:  # surface
-                        # Smooth the surface
-                        try:
-                            smoothed = mesh.smooth(n_iter=100, relaxation_factor=0.1)
-                            plotter.add_mesh(smoothed, scalars='values', cmap=colormap, 
-                                           opacity=opacity, show_edges=show_edges, 
-                                           edge_color='black')
-                        except:
-                            plotter.add_mesh(mesh, scalars='values', cmap=colormap, 
-                                           opacity=opacity, show_edges=show_edges)
-            
-            elif mode == 'isosurface':
-                # Interpolate to grid first
-                X_grid, Y_grid, Z_grid, grid_points, _ = self.interpolator.create_regular_grid(
-                    points, values, grid_resolution)
-                if grid_points is not None:
-                    grid_values = self.interpolator.interpolate_to_grid(points, values, grid_points, 
-                                                                      method='rbf')
-                    if grid_values is not None:
-                        # Create structured grid
-                        grid = pv.UniformGrid()
-                        grid.dimensions = X_grid.shape[::-1]
-                        grid.origin = (X_grid.min(), Y_grid.min(), Z_grid.min())
-                        grid.spacing = (
-                            (X_grid.max() - X_grid.min()) / (X_grid.shape[0] - 1),
-                            (Y_grid.max() - Y_grid.min()) / (Y_grid.shape[1] - 1),
-                            (Z_grid.max() - Z_grid.min()) / (X_grid.shape[2] - 1)
-                        )
-                        grid['field'] = grid_values.reshape(X_grid.shape[::-1])
-                        
-                        # Multiple isosurfaces
-                        valid_values = grid_values[~np.isnan(grid_values)]
-                        if len(valid_values) > 0:
-                            for i in range(n_isosurfaces):
-                                level = np.percentile(valid_values, 
-                                                    20 + 60*i/(max(1, n_isosurfaces-1)))
-                                contours = grid.contour([level])
-                                plotter.add_mesh(contours, cmap=colormap, 
-                                               opacity=0.8 - i*0.15, show_edges=True)
-            
-            elif mode == 'volume':
-                # Volume rendering
-                X_grid, Y_grid, Z_grid, grid_points, _ = self.interpolator.create_regular_grid(
-                    points, values, grid_resolution)
-                if grid_points is not None:
-                    grid_values = self.interpolator.interpolate_to_grid(points, values, grid_points, 
-                                                                      method='linear')
-                    if grid_values is not None:
-                        grid = pv.UniformGrid()
-                        grid.dimensions = X_grid.shape[::-1]
-                        grid.origin = (X_grid.min(), Y_grid.min(), Z_grid.min())
-                        grid.spacing = (
-                            (X_grid.max() - X_grid.min()) / (X_grid.shape[0] - 1),
-                            (Y_grid.max() - Y_grid.min()) / (X_grid.shape[1] - 1),
-                            (Z_grid.max() - Z_grid.min()) / (X_grid.shape[2] - 1)
-                        )
-                        grid['field'] = grid_values.reshape(X_grid.shape[::-1])
-                        
-                        # True volume rendering with transfer function
-                        valid_values = grid_values[~np.isnan(grid_values)]
-                        if len(valid_values) > 0:
-                            plotter.add_volume(grid, scalars='field', cmap=colormap, 
-                                             opacity='linear', opacity_unit=0.5, 
-                                             shade=True, clim=[valid_values.min(), valid_values.max()])
-            
-            elif mode == 'slice':
-                # Multiple slicing planes
-                X_grid, Y_grid, Z_grid, grid_points, _ = self.interpolator.create_regular_grid(
-                    points, values, grid_resolution)
-                if grid_points is not None:
-                    grid_values = self.interpolator.interpolate_to_grid(points, values, grid_points)
-                    if grid_values is not None:
-                        grid = pv.UniformGrid()
-                        grid.dimensions = X_grid.shape[::-1]
-                        grid.origin = (X_grid.min(), Y_grid.min(), Z_grid.min())
-                        grid.spacing = (
-                            (X_grid.max() - X_grid.min()) / (X_grid.shape[0] - 1),
-                            (Y_grid.max() - Y_grid.min()) / (X_grid.shape[1] - 1),
-                            (Z_grid.max() - Z_grid.min()) / (X_grid.shape[2] - 1)
-                        )
-                        grid['field'] = grid_values.reshape(X_grid.shape[::-1])
-                        
-                        # XY, XZ, YZ slices
-                        plotter.add_mesh(grid.slice(normal='x'), scalars='field', cmap=colormap, 
-                                       opacity=0.7, name='X-slice')
-                        plotter.add_mesh(grid.slice(normal='y'), scalars='field', cmap=colormap, 
-                                       opacity=0.7, name='Y-slice')
-                        plotter.add_mesh(grid.slice(normal='z'), scalars='field', cmap=colormap, 
-                                       opacity=0.7, name='Z-slice')
-            
-            # Add scalar bar and improve lighting
-            plotter.add_scalar_bar(title='Field Value', title_font_size=16, n_labels=4)
-            plotter.add_axes()
-            
-            # Professional camera setup
-            plotter.view_isometric()
-            plotter.background_color = 'white'
-            
-            return plotter
-            
-        except Exception as e:
-            st.error(f"PyVista visualization error: {str(e)}")
-            # Fallback to Plotly visualization
-            return None
-
-# =============================================
 # ADVANCED 3D INTERPOLATION AND VISUALIZATION
 # =============================================
 class Advanced3DInterpolator:
@@ -785,31 +334,397 @@ class Advanced3DInterpolator:
         
         return isosurfaces
     
-    def create_smooth_surface(self, points, values, triangles=None, method='delaunay'):
-        """Create smooth surface from point cloud"""
+    def create_smooth_surface(self, points, values, triangles=None):
+        """Create smooth surface from point cloud using interpolation"""
         if triangles is None or len(points) < 4:
-            return None, None, None
+            return points, values, triangles
         
         try:
-            # Create mesh
-            mesh = pv.PolyData(points, triangles.reshape(-1, 4)[:, 1:4])
-            mesh['values'] = values
+            # Create regular grid for interpolation
+            X_grid, Y_grid, Z_grid, grid_points, _ = self.create_regular_grid(
+                points, values, grid_resolution=100, padding=0.1
+            )
             
-            # Smooth the mesh
-            smoothed = mesh.smooth(n_iter=100, relaxation_factor=0.1)
+            # Interpolate values to grid
+            grid_values = self.interpolate_to_grid(points, values, grid_points, method='rbf')
             
-            # Extract smoothed vertices and values
-            smoothed_points = smoothed.points
-            smoothed_values = smoothed['values']
-            
-            # Get triangles
-            faces = smoothed.faces.reshape(-1, 4)[:, 1:4]
-            
-            return smoothed_points, smoothed_values, faces
-            
+            if grid_values is not None:
+                # Extract smoothed surface from interpolated grid
+                # For simplicity, we'll use the interpolated grid points and values
+                # In a more advanced implementation, we could extract a surface mesh
+                return grid_points, grid_values, None
+            else:
+                return points, values, triangles
+                
         except Exception as e:
             st.warning(f"Surface smoothing failed: {e}")
             return points, values, triangles
+
+# =============================================
+# ENHANCED 3D VISUALIZER WITH INTERPOLATED SUPPORT
+# =============================================
+class Enhanced3DVisualizer:
+    """Enhanced 3D visualization with multiple rendering modes using Plotly"""
+    
+    def __init__(self):
+        self.interpolator = Advanced3DInterpolator()
+        self.visualization_modes = {
+            'Point Cloud': 'points',
+            'Wireframe Mesh': 'wireframe',
+            'Surface Mesh': 'surface',
+            'Isosurfaces': 'isosurface',
+            'Volume Rendering': 'volume',
+            'Sliced Volume': 'slice',
+            'Heatmap Slices': 'heatmap_slices'
+        }
+    
+    def create_3d_visualization(self, points, values, triangles=None, 
+                               mode='surface', colormap='Viridis',
+                               grid_resolution=40, n_isosurfaces=4,
+                               opacity=0.8, show_edges=False):
+        """Create comprehensive 3D visualization based on selected mode"""
+        
+        # Normalize values for consistent coloring
+        if len(values) > 0:
+            valid_values = values[~np.isnan(values)]
+            if len(valid_values) > 0:
+                vmin, vmax = np.min(valid_values), np.max(valid_values)
+                if vmax - vmin > 1e-10:
+                    normalized_values = (values - vmin) / (vmax - vmin)
+                else:
+                    normalized_values = np.zeros_like(values)
+            else:
+                normalized_values = np.zeros_like(values)
+        else:
+            normalized_values = np.zeros_like(values)
+        
+        fig = go.Figure()
+        
+        if mode == 'points':
+            # Point cloud visualization
+            fig.add_trace(go.Scatter3d(
+                x=points[:, 0],
+                y=points[:, 1],
+                z=points[:, 2],
+                mode='markers',
+                marker=dict(
+                    size=4,
+                    color=values,
+                    colorscale=colormap,
+                    opacity=opacity,
+                    colorbar=dict(title="Value", thickness=20),
+                    showscale=True
+                ),
+                name='Point Cloud',
+                hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
+                            '<b>X:</b> %{x:.3f}<br>' +
+                            '<b>Y:</b> %{y:.3f}<br>' +
+                            '<b>Z:</b> %{z:.3f}<extra></extra>'
+            ))
+        
+        elif mode == 'wireframe' and triangles is not None:
+            # Wireframe mesh
+            if len(triangles) > 0:
+                # Extract triangle vertices
+                i, j, k = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+                
+                # Create mesh
+                fig.add_trace(go.Mesh3d(
+                    x=points[:, 0],
+                    y=points[:, 1],
+                    z=points[:, 2],
+                    i=i, j=j, k=k,
+                    intensity=values,
+                    colorscale=colormap,
+                    intensitymode='vertex',
+                    opacity=opacity * 0.5,
+                    showscale=True,
+                    colorbar=dict(title="Value", thickness=20),
+                    hoverinfo='none'
+                ))
+                
+                # Add wireframe edges
+                edges_x, edges_y, edges_z = [], [], []
+                for tri in triangles:
+                    for i in range(3):
+                        edges_x.extend([points[tri[i], 0], points[tri[(i+1)%3], 0], None])
+                        edges_y.extend([points[tri[i], 1], points[tri[(i+1)%3], 1], None])
+                        edges_z.extend([points[tri[i], 2], points[tri[(i+1)%3], 2], None])
+                
+                fig.add_trace(go.Scatter3d(
+                    x=edges_x,
+                    y=edges_y,
+                    z=edges_z,
+                    mode='lines',
+                    line=dict(color='black', width=1),
+                    hoverinfo='none',
+                    showlegend=False
+                ))
+        
+        elif mode == 'surface' and triangles is not None:
+            # Smooth surface visualization
+            if len(triangles) > 0:
+                # Create smoothed surface
+                smoothed_points, smoothed_values, smoothed_triangles = \
+                    self.interpolator.create_smooth_surface(points, values, triangles)
+                
+                if smoothed_triangles is not None:
+                    i, j, k = smoothed_triangles[:, 0], smoothed_triangles[:, 1], smoothed_triangles[:, 2]
+                    
+                    fig.add_trace(go.Mesh3d(
+                        x=smoothed_points[:, 0],
+                        y=smoothed_points[:, 1],
+                        z=smoothed_points[:, 2],
+                        i=i, j=j, k=k,
+                        intensity=smoothed_values,
+                        colorscale=colormap,
+                        intensitymode='vertex',
+                        opacity=opacity,
+                        showscale=True,
+                        colorbar=dict(title="Value", thickness=20),
+                        flatshading=False,
+                        lighting=dict(
+                            ambient=0.8,
+                            diffuse=0.8,
+                            specular=0.5,
+                            roughness=0.5
+                        ),
+                        lightposition=dict(x=100, y=200, z=300),
+                        hoverinfo='none'
+                    ))
+                else:
+                    # Fallback to non-smoothed mesh
+                    i, j, k = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+                    
+                    fig.add_trace(go.Mesh3d(
+                        x=points[:, 0],
+                        y=points[:, 1],
+                        z=points[:, 2],
+                        i=i, j=j, k=k,
+                        intensity=values,
+                        colorscale=colormap,
+                        intensitymode='vertex',
+                        opacity=opacity,
+                        showscale=True,
+                        colorbar=dict(title="Value", thickness=20),
+                        flatshading=False,
+                        lighting=dict(
+                            ambient=0.8,
+                            diffuse=0.8,
+                            specular=0.5,
+                            roughness=0.5
+                        ),
+                        lightposition=dict(x=100, y=200, z=300),
+                        hoverinfo='none'
+                    ))
+        
+        elif mode == 'isosurface':
+            # Isosurface visualization with interpolation
+            X_grid, Y_grid, Z_grid, grid_points, _ = \
+                self.interpolator.create_regular_grid(points, values, grid_resolution)
+            
+            if grid_points is not None:
+                grid_values = self.interpolator.interpolate_to_grid(
+                    points, values, grid_points, method='rbf'
+                )
+                
+                if grid_values is not None:
+                    # Reshape for isosurface
+                    values_3d = grid_values.reshape(X_grid.shape)
+                    
+                    # Get percentiles for isosurface levels
+                    percentiles = np.linspace(20, 80, n_isosurfaces)
+                    levels = np.percentile(grid_values[~np.isnan(grid_values)], percentiles)
+                    
+                    # Create isosurfaces
+                    for i, level in enumerate(levels):
+                        # Create isosurface
+                        fig.add_trace(go.Isosurface(
+                            x=X_grid.flatten(),
+                            y=Y_grid.flatten(),
+                            z=Z_grid.flatten(),
+                            value=grid_values,
+                            isomin=level - 0.01,
+                            isomax=level + 0.01,
+                            colorscale=colormap,
+                            surface_count=1,
+                            opacity=opacity * (0.8 - i * 0.15),
+                            showscale=i==0,
+                            colorbar=dict(title="Value", thickness=20),
+                            caps=dict(x_show=False, y_show=False, z_show=False),
+                            name=f'Isosurface {i+1}: {level:.2f}'
+                        ))
+        
+        elif mode == 'volume':
+            # Volume rendering using opacity gradients
+            X_grid, Y_grid, Z_grid, grid_points, _ = \
+                self.interpolator.create_regular_grid(points, values, grid_resolution)
+            
+            if grid_points is not None:
+                grid_values = self.interpolator.interpolate_to_grid(
+                    points, values, grid_points, method='linear'
+                )
+                
+                if grid_values is not None:
+                    fig.add_trace(go.Volume(
+                        x=X_grid.flatten(),
+                        y=Y_grid.flatten(),
+                        z=Z_grid.flatten(),
+                        value=grid_values,
+                        isomin=np.nanmin(grid_values),
+                        isomax=np.nanmax(grid_values),
+                        opacity=opacity * 0.3,  # Lower opacity for volume
+                        opacityscale='uniform',
+                        surface_count=20,
+                        colorscale=colormap,
+                        showscale=True,
+                        colorbar=dict(title="Value", thickness=20),
+                        caps=dict(x_show=False, y_show=False, z_show=False),
+                        name='Volume'
+                    ))
+        
+        elif mode == 'slice':
+            # Sliced volume visualization
+            X_grid, Y_grid, Z_grid, grid_points, _ = \
+                self.interpolator.create_regular_grid(points, values, grid_resolution)
+            
+            if grid_points is not None:
+                grid_values = self.interpolator.interpolate_to_grid(
+                    points, values, grid_points, method='linear'
+                )
+                
+                if grid_values is not None:
+                    values_3d = grid_values.reshape(X_grid.shape)
+                    
+                    # Create slices at different positions
+                    slice_positions = [0.25, 0.5, 0.75]
+                    
+                    for i, pos in enumerate(slice_positions):
+                        slice_idx = int(pos * (grid_resolution - 1))
+                        
+                        # X-slice
+                        fig.add_trace(go.Surface(
+                            x=np.ones_like(Y_grid[slice_idx, :, :]) * X_grid[slice_idx, 0, 0],
+                            y=Y_grid[slice_idx, :, :],
+                            z=Z_grid[slice_idx, :, :],
+                            surfacecolor=values_3d[slice_idx, :, :],
+                            colorscale=colormap,
+                            showscale=i==0,
+                            colorbar=dict(title="Value", thickness=20),
+                            opacity=opacity * 0.7,
+                            name=f'X-Slice at {X_grid[slice_idx, 0, 0]:.2f}'
+                        ))
+        
+        elif mode == 'heatmap_slices':
+            # Enhanced heatmap slices in 3D
+            X_grid, Y_grid, Z_grid, grid_points, _ = \
+                self.interpolator.create_regular_grid(points, values, grid_resolution)
+            
+            if grid_points is not None:
+                grid_values = self.interpolator.interpolate_to_grid(
+                    points, values, grid_points, method='linear'
+                )
+                
+                if grid_values is not None:
+                    values_3d = grid_values.reshape(X_grid.shape)
+                    
+                    # Create slices in all three planes
+                    slice_positions = [0.25, 0.5, 0.75]
+                    
+                    for pos in slice_positions:
+                        # X-slice
+                        slice_idx = int(pos * (grid_resolution - 1))
+                        fig.add_trace(go.Surface(
+                            x=np.ones_like(Y_grid[slice_idx, :, :]) * X_grid[slice_idx, 0, 0],
+                            y=Y_grid[slice_idx, :, :],
+                            z=Z_grid[slice_idx, :, :],
+                            surfacecolor=values_3d[slice_idx, :, :],
+                            colorscale=colormap,
+                            showscale=False,
+                            opacity=opacity * 0.6,
+                            name=f'X={X_grid[slice_idx, 0, 0]:.2f}'
+                        ))
+                        
+                        # Y-slice
+                        fig.add_trace(go.Surface(
+                            x=X_grid[:, slice_idx, :],
+                            y=np.ones_like(X_grid[:, slice_idx, :]) * Y_grid[0, slice_idx, 0],
+                            z=Z_grid[:, slice_idx, :],
+                            surfacecolor=values_3d[:, slice_idx, :],
+                            colorscale=colormap,
+                            showscale=False,
+                            opacity=opacity * 0.6,
+                            name=f'Y={Y_grid[0, slice_idx, 0]:.2f}'
+                        ))
+                        
+                        # Z-slice
+                        fig.add_trace(go.Surface(
+                            x=X_grid[:, :, slice_idx],
+                            y=Y_grid[:, :, slice_idx],
+                            z=np.ones_like(X_grid[:, :, slice_idx]) * Z_grid[0, 0, slice_idx],
+                            surfacecolor=values_3d[:, :, slice_idx],
+                            colorscale=colormap,
+                            showscale=False,
+                            opacity=opacity * 0.6,
+                            name=f'Z={Z_grid[0, 0, slice_idx]:.2f}'
+                        ))
+        
+        # Add original points for reference in all modes
+        if mode not in ['points', 'wireframe'] and len(points) > 100:
+            fig.add_trace(go.Scatter3d(
+                x=points[::10, 0],  # Sample every 10th point for clarity
+                y=points[::10, 1],
+                z=points[::10, 2],
+                mode='markers',
+                marker=dict(
+                    size=2,
+                    color='rgba(0, 0, 0, 0.3)',
+                    symbol='circle'
+                ),
+                name='Sample Points',
+                hoverinfo='none',
+                showlegend=False
+            ))
+        
+        # Update layout
+        fig.update_layout(
+            scene=dict(
+                aspectmode='data',
+                camera=dict(
+                    eye=dict(x=1.5, y=1.5, z=1.5),
+                    up=dict(x=0, y=0, z=1)
+                ),
+                xaxis=dict(
+                    title="X",
+                    gridcolor="lightgray",
+                    showbackground=True,
+                    backgroundcolor="white"
+                ),
+                yaxis=dict(
+                    title="Y",
+                    gridcolor="lightgray",
+                    showbackground=True,
+                    backgroundcolor="white"
+                ),
+                zaxis=dict(
+                    title="Z",
+                    gridcolor="lightgray",
+                    showbackground=True,
+                    backgroundcolor="white"
+                )
+            ),
+            height=700,
+            margin=dict(l=0, r=0, t=40, b=0),
+            showlegend=True,
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01
+            )
+        )
+        
+        return fig
 
 # =============================================
 # UNIFIED DATA LOADER WITH INTERPOLATED SUPPORT
@@ -2375,7 +2290,7 @@ fea_solutions/
         st.plotly_chart(fig_time, use_container_width=True)
 
 def render_3d_visualization():
-    """Render enhanced 3D visualization with interpolated support"""
+    """Render enhanced 3D visualization with interpolated support using Plotly"""
     st.markdown('<h2 class="sub-header">🌐 Advanced 3D Visualization</h2>', unsafe_allow_html=True)
     
     # Get combined simulations
@@ -2452,13 +2367,6 @@ def render_3d_visualization():
                     index=EnhancedVisualizer.EXTENDED_COLORMAPS.index(st.session_state.selected_colormap),
                     key="3d_colormap_interp"
                 )
-            with col3:
-                render_engine = st.selectbox(
-                    "Render Engine",
-                    ["Plotly", "PyVista"],
-                    key="3d_render_engine_interp",
-                    help="PyVista provides better 3D rendering but may be slower"
-                )
             
             # Advanced settings
             with st.expander("⚙️ Advanced Visualization Settings", expanded=False):
@@ -2491,55 +2399,27 @@ def render_3d_visualization():
                         key="3d_isosurfaces_interp"
                     )
             
-            # Create visualization based on selected engine
-            if render_engine == "PyVista":
-                try:
-                    # Try PyVista first
-                    plotter = st.session_state.visualizer_3d.create_pyvista_visualization(
-                        points=pts,
-                        values=values,
-                        triangles=None,
-                        mode=st.session_state.visualizer_3d.visualization_modes[visualization_mode],
-                        colormap=colormap.lower(),
-                        grid_resolution=grid_resolution,
-                        n_isosurfaces=n_isosurfaces,
-                        opacity=opacity
-                    )
-                    
-                    if plotter is not None:
-                        stpyvista(plotter, key=f"pyvista_interp_{sim_name}", height=600)
-                        st.success("✅ PyVista 3D visualization rendered successfully!")
-                    else:
-                        st.warning("PyVista visualization failed, falling back to Plotly")
-                        render_engine = "Plotly"
-                
-                except Exception as e:
-                    st.error(f"PyVista visualization error: {str(e)}")
-                    st.warning("Falling back to Plotly visualization")
-                    render_engine = "Plotly"
+            # Create Plotly visualization for interpolated data
+            fig = st.session_state.visualizer_3d.create_3d_visualization(
+                points=pts,
+                values=values,
+                triangles=None,
+                mode=st.session_state.visualizer_3d.visualization_modes[visualization_mode],
+                colormap=colormap,
+                grid_resolution=grid_resolution,
+                n_isosurfaces=n_isosurfaces,
+                opacity=opacity
+            )
             
-            if render_engine == "Plotly":
-                # Create Plotly visualization for interpolated data
-                fig = st.session_state.visualizer_3d.create_3d_visualization(
-                    points=pts,
-                    values=values,
-                    triangles=None,
-                    mode=st.session_state.visualizer_3d.visualization_modes[visualization_mode],
-                    colormap=colormap,
-                    grid_resolution=grid_resolution,
-                    n_isosurfaces=n_isosurfaces,
-                    opacity=opacity
+            # Update title
+            fig.update_layout(
+                title=dict(
+                    text=f"Interpolated Solution - {visualization_mode}<br><sub>{sim_name}</sub>",
+                    font=dict(size=20)
                 )
-                
-                # Update title
-                fig.update_layout(
-                    title=dict(
-                        text=f"Interpolated Solution - {visualization_mode}<br><sub>{sim_name}</sub>",
-                        font=dict(size=20)
-                    )
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
             
             # Field statistics and analysis
             st.markdown('<h3 class="sub-header">📊 Interpolated Field Analysis</h3>', unsafe_allow_html=True)
@@ -2624,13 +2504,6 @@ def render_3d_visualization():
                 list(st.session_state.visualizer_3d.interpolator.interpolation_methods.keys()),
                 key="3d_interp_method"
             )
-        with col5:
-            render_engine = st.selectbox(
-                "Render Engine",
-                ["Plotly", "PyVista"],
-                key="3d_render_engine",
-                help="PyVista provides better 3D rendering but may be slower"
-            )
     
     # Get data for visualization
     if 'points' in sim and 'fields' in sim and field in sim['fields']:
@@ -2648,55 +2521,27 @@ def render_3d_visualization():
         
         triangles = sim.get('triangles')
         
-        # Create visualization based on selected engine
-        if render_engine == "PyVista":
-            try:
-                # Try PyVista first
-                plotter = st.session_state.visualizer_3d.create_pyvista_visualization(
-                    points=pts,
-                    values=values,
-                    triangles=triangles,
-                    mode=st.session_state.visualizer_3d.visualization_modes[visualization_mode],
-                    colormap=st.session_state.selected_colormap.lower(),
-                    grid_resolution=grid_resolution,
-                    n_isosurfaces=n_isosurfaces,
-                    opacity=opacity
-                )
-                
-                if plotter is not None:
-                    stpyvista(plotter, key=f"pyvista_{sim_name}_{field}_{timestep}", height=600)
-                    st.success("✅ PyVista 3D visualization rendered successfully!")
-                else:
-                    st.warning("PyVista visualization failed, falling back to Plotly")
-                    render_engine = "Plotly"
-                
-            except Exception as e:
-                st.error(f"PyVista visualization error: {str(e)}")
-                st.warning("Falling back to Plotly visualization")
-                render_engine = "Plotly"
+        # Create Plotly visualization
+        fig = st.session_state.visualizer_3d.create_3d_visualization(
+            points=pts,
+            values=values,
+            triangles=triangles,
+            mode=st.session_state.visualizer_3d.visualization_modes[visualization_mode],
+            colormap=st.session_state.selected_colormap,
+            grid_resolution=grid_resolution,
+            n_isosurfaces=n_isosurfaces,
+            opacity=opacity
+        )
         
-        if render_engine == "Plotly":
-            # Create Plotly visualization
-            fig = st.session_state.visualizer_3d.create_3d_visualization(
-                points=pts,
-                values=values,
-                triangles=triangles,
-                mode=st.session_state.visualizer_3d.visualization_modes[visualization_mode],
-                colormap=st.session_state.selected_colormap,
-                grid_resolution=grid_resolution,
-                n_isosurfaces=n_isosurfaces,
-                opacity=opacity
+        # Update title
+        fig.update_layout(
+            title=dict(
+                text=f"{label} - {visualization_mode}<br><sub>{sim_name} | Timestep: {timestep + 1}</sub>",
+                font=dict(size=20)
             )
-            
-            # Update title
-            fig.update_layout(
-                title=dict(
-                    text=f"{label} - {visualization_mode}<br><sub>{sim_name} | Timestep: {timestep + 1}</sub>",
-                    font=dict(size=20)
-                )
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
 
 def render_interpolation_extrapolation():
     """Render the enhanced interpolation/extrapolation interface"""
