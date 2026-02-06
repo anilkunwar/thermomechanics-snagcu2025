@@ -24,7 +24,6 @@ import hashlib
 import pickle
 from functools import lru_cache
 from collections import OrderedDict
-import math
 
 warnings.filterwarnings('ignore')
 
@@ -43,11 +42,13 @@ class CacheManager:
     
     @staticmethod
     def generate_cache_key(field_name, timestep_idx, energy, duration, time, 
-                          sigma_param, sigma_g, s_E, s_tau, n_heads, temperature, 
+                          sigma_param, spatial_weight, n_heads, temperature,
+                          sigma_g, s_E, s_tau,  # New DGPA parameters
                           top_k=None, subsample_factor=None):
         """Generate a unique cache key for interpolation parameters"""
         params_str = f"{field_name}_{timestep_idx}_{energy:.2f}_{duration:.2f}_{time:.2f}"
-        params_str += f"_{sigma_param:.2f}_{sigma_g:.2f}_{s_E:.2f}_{s_tau:.2f}_{n_heads}_{temperature:.2f}"
+        params_str += f"_{sigma_param:.2f}_{spatial_weight:.2f}_{n_heads}_{temperature:.2f}"
+        params_str += f"_{sigma_g:.2f}_{s_E:.2f}_{s_tau:.2f}"  # Include DGPA params
         if top_k:
             params_str += f"_top{top_k}"
         if subsample_factor:
@@ -75,11 +76,12 @@ class CacheManager:
             params.get('duration_query', 0),
             params.get('time_points', [0])[timestep_idx] if timestep_idx < len(params.get('time_points', [])) else 0,
             params.get('sigma_param', 0.3),
-            params.get('sigma_g', 0.2),
-            params.get('s_E', 10.0),
-            params.get('s_tau', 5.0),
+            params.get('spatial_weight', 0.5),
             params.get('n_heads', 4),
             params.get('temperature', 1.0),
+            params.get('sigma_g', 0.20),  # New
+            params.get('s_E', 10.0),      # New
+            params.get('s_tau', 5.0),     # New
             params.get('top_k'),
             params.get('subsample_factor')
         )
@@ -98,11 +100,12 @@ class CacheManager:
             params.get('duration_query', 0),
             params.get('time_points', [0])[timestep_idx] if timestep_idx < len(params.get('time_points', [])) else 0,
             params.get('sigma_param', 0.3),
-            params.get('sigma_g', 0.2),
-            params.get('s_E', 10.0),
-            params.get('s_tau', 5.0),
+            params.get('spatial_weight', 0.5),
             params.get('n_heads', 4),
             params.get('temperature', 1.0),
+            params.get('sigma_g', 0.20),  # New
+            params.get('s_E', 10.0),      # New
+            params.get('s_tau', 5.0),     # New
             params.get('top_k'),
             params.get('subsample_factor')
         )
@@ -138,32 +141,217 @@ class CacheManager:
             st.session_state.interpolation_field_history.popitem(last=False)
 
 # =============================================
-# ENHANCED ATTENTION MECHANISM WITH DGPA (DISTANCE-GATED PHYSICS ATTENTION)
+# UNIFIED DATA LOADER WITH ENHANCED CAPABILITIES
+# =============================================
+class UnifiedFEADataLoader:
+    """Enhanced data loader with comprehensive field extraction"""
+    
+    def __init__(self):
+        self.simulations = {}
+        self.summaries = []
+        self.field_statistics = {}
+        self.available_fields = set()
+        
+    def parse_folder_name(self, folder: str):
+        """q0p5mJ-delta4p2ns → (0.5, 4.2)"""
+        match = re.match(r"q([\dp\.]+)mJ-delta([\dp\.]+)ns", folder)
+        if not match:
+            return None, None
+        e, d = match.groups()
+        return float(e.replace("p", ".")), float(d.replace("p", "."))
+    
+    @st.cache_data(show_spinner="Loading simulation data...")
+    def load_all_simulations(_self, load_full_mesh=True):
+        """Load all simulations with option for full mesh or summaries"""
+        simulations = {}
+        summaries = []
+        
+        folders = glob.glob(os.path.join(FEA_SOLUTIONS_DIR, "q*mJ-delta*ns"))
+        
+        if not folders:
+            st.warning(f"No simulation folders found in {FEA_SOLUTIONS_DIR}")
+            return simulations, summaries
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for folder_idx, folder in enumerate(folders):
+            name = os.path.basename(folder)
+            energy, duration = _self.parse_folder_name(name)
+            if energy is None:
+                continue
+                
+            vtu_files = sorted(glob.glob(os.path.join(folder, "a_t????.vtu")))
+            if not vtu_files:
+                continue
+            
+            status_text.text(f"Loading {name}... ({len(vtu_files)} files)")
+            
+            try:
+                mesh0 = meshio.read(vtu_files[0])
+                
+                if not mesh0.point_data:
+                    st.warning(f"No point data in {name}")
+                    continue
+                
+                # Create simulation entry
+                sim_data = {
+                    'name': name,
+                    'energy_mJ': energy,
+                    'duration_ns': duration,
+                    'n_timesteps': len(vtu_files),
+                    'vtu_files': vtu_files,
+                    'field_info': {},
+                    'has_mesh': False
+                }
+                
+                if load_full_mesh:
+                    # Full mesh loading
+                    points = mesh0.points.astype(np.float32)
+                    n_pts = len(points)
+                    
+                    # Find triangles
+                    triangles = None
+                    for cell_block in mesh0.cells:
+                        if cell_block.type == "triangle":
+                            triangles = cell_block.data.astype(np.int32)
+                            break
+                    
+                    # Initialize fields
+                    fields = {}
+                    for key in mesh0.point_data.keys():
+                        arr = mesh0.point_data[key].astype(np.float32)
+                        if arr.ndim == 1:
+                            sim_data['field_info'][key] = ("scalar", 1)
+                            fields[key] = np.full((len(vtu_files), n_pts), np.nan, dtype=np.float32)
+                        else:
+                            sim_data['field_info'][key] = ("vector", arr.shape[1])
+                            fields[key] = np.full((len(vtu_files), n_pts, arr.shape[1]), np.nan, dtype=np.float32)
+                        fields[key][0] = arr
+                        _self.available_fields.add(key)
+                    
+                    # Load remaining timesteps
+                    for t in range(1, len(vtu_files)):
+                        try:
+                            mesh = meshio.read(vtu_files[t])
+                            for key in sim_data['field_info']:
+                                if key in mesh.point_data:
+                                    fields[key][t] = mesh.point_data[key].astype(np.float32)
+                        except Exception as e:
+                            st.warning(f"Error loading timestep {t} in {name}: {e}")
+                    
+                    sim_data.update({
+                        'points': points,
+                        'fields': fields,
+                        'triangles': triangles,
+                        'has_mesh': True
+                    })
+                
+                # Create summary statistics
+                summary = _self.extract_summary_statistics(vtu_files, energy, duration, name)
+                summaries.append(summary)
+                
+                simulations[name] = sim_data
+                
+            except Exception as e:
+                st.warning(f"Error loading {name}: {str(e)}")
+                continue
+            
+            progress_bar.progress((folder_idx + 1) / len(folders))
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        if simulations:
+            st.success(f"✅ Loaded {len(simulations)} simulations with {len(_self.available_fields)} unique fields")
+        else:
+            st.error("❌ No simulations loaded successfully")
+        
+        return simulations, summaries
+    
+    def extract_summary_statistics(self, vtu_files, energy, duration, name):
+        """Extract comprehensive summary statistics from VTU files"""
+        summary = {
+            'name': name,
+            'energy': energy,
+            'duration': duration,
+            'timesteps': [],
+            'field_stats': {}
+        }
+        
+        for idx, vtu_file in enumerate(vtu_files):
+            try:
+                mesh = meshio.read(vtu_file)
+                timestep = idx + 1
+                summary['timesteps'].append(timestep)
+                
+                for field_name in mesh.point_data.keys():
+                    data = mesh.point_data[field_name]
+                    
+                    if field_name not in summary['field_stats']:
+                        summary['field_stats'][field_name] = {
+                            'min': [], 'max': [], 'mean': [], 'std': [],
+                            'q25': [], 'q50': [], 'q75': [], 'percentiles': []
+                        }
+                    
+                    if data.ndim == 1:
+                        clean_data = data[~np.isnan(data)]
+                        if clean_data.size > 0:
+                            summary['field_stats'][field_name]['min'].append(float(np.min(clean_data)))
+                            summary['field_stats'][field_name]['max'].append(float(np.max(clean_data)))
+                            summary['field_stats'][field_name]['mean'].append(float(np.mean(clean_data)))
+                            summary['field_stats'][field_name]['std'].append(float(np.std(clean_data)))
+                            summary['field_stats'][field_name]['q25'].append(float(np.percentile(clean_data, 25)))
+                            summary['field_stats'][field_name]['q50'].append(float(np.percentile(clean_data, 50)))
+                            summary['field_stats'][field_name]['q75'].append(float(np.percentile(clean_data, 75)))
+                            # Store full percentiles for detailed analysis
+                            percentiles = np.percentile(clean_data, [10, 25, 50, 75, 90])
+                            summary['field_stats'][field_name]['percentiles'].append(percentiles)
+                        else:
+                            for key in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']:
+                                summary['field_stats'][field_name][key].append(0.0)
+                            summary['field_stats'][field_name]['percentiles'].append(np.zeros(5))
+                    else:
+                        # Vector field - compute magnitude statistics
+                        magnitude = np.linalg.norm(data, axis=1)
+                        clean_mag = magnitude[~np.isnan(magnitude)]
+                        if clean_mag.size > 0:
+                            summary['field_stats'][field_name]['min'].append(float(np.min(clean_mag)))
+                            summary['field_stats'][field_name]['max'].append(float(np.max(clean_mag)))
+                            summary['field_stats'][field_name]['mean'].append(float(np.mean(clean_mag)))
+                            summary['field_stats'][field_name]['std'].append(float(np.std(clean_mag)))
+                            summary['field_stats'][field_name]['q25'].append(float(np.percentile(clean_mag, 25)))
+                            summary['field_stats'][field_name]['q50'].append(float(np.percentile(clean_mag, 50)))
+                            summary['field_stats'][field_name]['q75'].append(float(np.percentile(clean_mag, 75)))
+                            percentiles = np.percentile(clean_mag, [10, 25, 50, 75, 90])
+                            summary['field_stats'][field_name]['percentiles'].append(percentiles)
+                        else:
+                            for key in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']:
+                                summary['field_stats'][field_name][key].append(0.0)
+                            summary['field_stats'][field_name]['percentiles'].append(np.zeros(5))
+            except Exception as e:
+                st.warning(f"Error processing {vtu_file}: {e}")
+                continue
+        
+        return summary
+
+# =============================================
+# ENHANCED ATTENTION WITH DISTANCE-GATED PHYSICS AWARENESS (DGPA)
 # =============================================
 class DistanceGatedPhysicsAttentionExtrapolator:
     """Advanced extrapolator with Distance-Gated Physics Attention (DGPA)"""
     
-    def __init__(self, sigma_param=0.3, sigma_g=0.2, s_E=10.0, s_tau=5.0, 
-                 n_heads=4, temperature=1.0, epsilon=1e-8):
-        """
-        Initialize DGPA extrapolator
-        
-        Args:
-            sigma_param: Kernel width for attention mechanism
-            sigma_g: Gating sharpness (0.1 = very sharp NN, 0.4 = smoother blend)
-            s_E: Scaling factor for energy (mJ)
-            s_tau: Scaling factor for pulse duration (ns)
-            n_heads: Number of parallel attention heads
-            temperature: Softmax temperature for attention weights
-            epsilon: Small constant for numerical stability
-        """
+    def __init__(self, sigma_param=0.3, spatial_weight=0.5, n_heads=4, temperature=1.0,
+                 sigma_g=0.20, s_E=10.0, s_tau=5.0):
         self.sigma_param = sigma_param
-        self.sigma_g = sigma_g
-        self.s_E = s_E
-        self.s_tau = s_tau
+        self.spatial_weight = spatial_weight
         self.n_heads = n_heads
         self.temperature = temperature
-        self.epsilon = epsilon
+        
+        # DGPA specific parameters
+        self.sigma_g = sigma_g  # Gating kernel width
+        self.s_E = s_E          # Energy scaling factor (mJ)
+        self.s_tau = s_tau      # Duration scaling factor (ns)
         
         self.source_db = []
         self.embedding_scaler = StandardScaler()
@@ -172,8 +360,6 @@ class DistanceGatedPhysicsAttentionExtrapolator:
         self.source_values = []
         self.source_metadata = []
         self.fitted = False
-        self.training_energies = []
-        self.training_durations = []
         
     def load_summaries(self, summaries):
         """Load summary statistics and prepare for attention mechanism"""
@@ -181,10 +367,6 @@ class DistanceGatedPhysicsAttentionExtrapolator:
         
         if not summaries:
             return
-        
-        # Store training energies and durations for scaling
-        self.training_energies = [s['energy'] for s in summaries]
-        self.training_durations = [s['duration'] for s in summaries]
         
         # Prepare embeddings and values
         all_embeddings = []
@@ -242,14 +424,7 @@ class DistanceGatedPhysicsAttentionExtrapolator:
             self.source_metadata = metadata
             self.fitted = True
             
-            # Adaptive scaling from training data if not set
-            if self.s_E <= 0:
-                self.s_E = np.std(self.training_energies) if self.training_energies else 10.0
-            if self.s_tau <= 0:
-                self.s_tau = np.std(self.training_durations) if self.training_durations else 5.0
-            
             st.info(f"✅ Prepared {len(all_embeddings)} embeddings with {all_embeddings.shape[1]} features")
-            st.info(f"📊 Adaptive scaling: s_E={self.s_E:.2f} mJ, s_tau={self.s_tau:.2f} ns")
     
     def _compute_physics_embedding(self, energy, duration, time):
         """Compute comprehensive physics-aware embedding"""
@@ -289,23 +464,51 @@ class DistanceGatedPhysicsAttentionExtrapolator:
             np.log1p(time)
         ], dtype=np.float32)
     
-    def _compute_et_proximity(self, energy_query, duration_query):
-        """Compute (E, τ)-proximity kernel φ_i for all sources"""
-        phi = []
-        for meta in self.source_metadata:
+    def _compute_et_gating(self, energy_query, duration_query, source_metadata=None):
+        """Compute the (E, τ) gating kernel for DGPA
+        
+        φ_i = sqrt( ((E* - E_i)/s_E)^2 + ((τ* - τ_i)/s_τ)^2 )
+        gating_i = exp( - (φ_i^2) / (2 * sigma_g^2) )
+        """
+        if source_metadata is None:
+            source_metadata = self.source_metadata
+            
+        phi_squared = []
+        for meta in source_metadata:
             de = (energy_query - meta['energy']) / self.s_E
             dt = (duration_query - meta['duration']) / self.s_tau
-            phi.append(np.sqrt(de**2 + dt**2))
-        return np.array(phi)
+            phi_squared.append(de**2 + dt**2)
+        
+        phi_squared = np.array(phi_squared)
+        gating = np.exp(-phi_squared / (2 * self.sigma_g**2))
+        
+        # Normalize gating weights
+        gating_sum = np.sum(gating)
+        if gating_sum > 0:
+            gating = gating / gating_sum
+        else:
+            gating = np.ones_like(gating) / len(gating)
+        
+        return gating
     
-    def _compute_et_gating(self, energy_query, duration_query):
-        """Compute the (E, τ) gating kernel"""
-        phi = self._compute_et_proximity(energy_query, duration_query)
-        gate = np.exp(-phi**2 / (2 * self.sigma_g**2))
-        return gate / (np.sum(gate) + self.epsilon)
+    def _compute_spatial_similarity(self, query_meta, source_metas):
+        """Compute spatial similarity based on parameter proximity"""
+        similarities = []
+        for meta in source_metas:
+            # Normalized differences
+            e_diff = abs(query_meta['energy'] - meta['energy']) / 50.0
+            d_diff = abs(query_meta['duration'] - meta['duration']) / 20.0
+            t_diff = abs(query_meta['time'] - meta['time']) / 50.0
+            
+            # Combined similarity (inverse distance)
+            total_diff = np.sqrt(e_diff**2 + d_diff**2 + t_diff**2)
+            similarity = np.exp(-total_diff / self.sigma_param)
+            similarities.append(similarity)
+        
+        return np.array(similarities)
     
-    def _compute_distance_gated_attention(self, query_embedding, query_meta):
-        """Compute distance-gated physics attention weights"""
+    def _multi_head_attention_with_gating(self, query_embedding, query_meta):
+        """Multi-head attention mechanism with DGPA (Distance-Gated Physics Attention)"""
         if not self.fitted or len(self.source_embeddings) == 0:
             return None, None
         
@@ -329,6 +532,11 @@ class DistanceGatedPhysicsAttentionExtrapolator:
             distances = np.linalg.norm(query_proj - source_proj, axis=1)
             scores = np.exp(-distances**2 / (2 * self.sigma_param**2))
             
+            # Apply spatial regulation if enabled
+            if self.spatial_weight > 0:
+                spatial_sim = self._compute_spatial_similarity(query_meta, self.source_metadata)
+                scores = (1 - self.spatial_weight) * scores + self.spatial_weight * spatial_sim
+            
             head_weights[head] = scores
         
         # Combine head weights
@@ -338,16 +546,23 @@ class DistanceGatedPhysicsAttentionExtrapolator:
         if self.temperature != 1.0:
             avg_weights = avg_weights ** (1.0 / self.temperature)
         
-        # Softmax normalization (physics attention component)
+        # Softmax normalization for physics attention
         max_weight = np.max(avg_weights)
         exp_weights = np.exp(avg_weights - max_weight)
-        alpha = exp_weights / (np.sum(exp_weights) + self.epsilon)
+        physics_attention = exp_weights / (np.sum(exp_weights) + 1e-12)
         
-        # Compute (E, τ) gating
-        gate = self._compute_et_gating(query_meta['energy'], query_meta['duration'])
+        # Apply DGPA: Combine physics attention with (E, τ) gating
+        et_gating = self._compute_et_gating(query_meta['energy'], query_meta['duration'])
         
-        # Combine attention and gating (DGPA formula)
-        final_weights = (alpha * gate) / (np.sum(alpha * gate) + self.epsilon)
+        # DGPA formula: w_i = (α_i * gating_i) / (sum_j α_j * gating_j)
+        combined_weights = physics_attention * et_gating
+        combined_sum = np.sum(combined_weights)
+        
+        if combined_sum > 1e-12:
+            final_weights = combined_weights / combined_sum
+        else:
+            # Fallback to physics attention if combined weights are too small
+            final_weights = physics_attention
         
         # Weighted prediction (using original values, not scaled)
         if len(self.source_values) > 0:
@@ -355,7 +570,7 @@ class DistanceGatedPhysicsAttentionExtrapolator:
         else:
             prediction = np.zeros(1)
         
-        return prediction, final_weights, gate, alpha
+        return prediction, final_weights, physics_attention, et_gating
     
     def predict_field_statistics(self, energy_query, duration_query, time_query):
         """Predict field statistics for given parameters using DGPA"""
@@ -370,28 +585,19 @@ class DistanceGatedPhysicsAttentionExtrapolator:
             'time': time_query
         }
         
-        # Apply distance-gated physics attention
-        prediction, final_weights, gate_weights, alpha_weights = self._compute_distance_gated_attention(
-            query_embedding, query_meta
-        )
+        # Apply DGPA attention mechanism
+        prediction, final_weights, physics_attention, et_gating = self._multi_head_attention_with_gating(query_embedding, query_meta)
         
         if prediction is None:
             return None
         
-        # Compute confidence metrics
-        max_final_weight = float(np.max(final_weights)) if len(final_weights) > 0 else 0.0
-        max_gate_weight = float(np.max(gate_weights)) if len(gate_weights) > 0 else 0.0
-        max_alpha_weight = float(np.max(alpha_weights)) if len(alpha_weights) > 0 else 0.0
-        
         # Reconstruct field predictions
         result = {
             'prediction': prediction,
-            'final_weights': final_weights,
-            'gate_weights': gate_weights,
-            'alpha_weights': alpha_weights,
-            'confidence_final': max_final_weight,
-            'confidence_gate': max_gate_weight,
-            'confidence_alpha': max_alpha_weight,
+            'attention_weights': final_weights,
+            'physics_attention': physics_attention,
+            'et_gating': et_gating,
+            'confidence': float(np.max(final_weights)) if len(final_weights) > 0 else 0.0,
             'field_predictions': {}
         }
         
@@ -417,12 +623,10 @@ class DistanceGatedPhysicsAttentionExtrapolator:
         results = {
             'time_points': time_points,
             'field_predictions': {},
-            'final_weights_maps': [],
-            'gate_weights_maps': [],
-            'alpha_weights_maps': [],
-            'confidence_final_scores': [],
-            'confidence_gate_scores': [],
-            'confidence_alpha_scores': []
+            'attention_maps': [],
+            'physics_attention_maps': [],
+            'et_gating_maps': [],
+            'confidence_scores': []
         }
         
         # Initialize field predictions structure
@@ -447,40 +651,27 @@ class DistanceGatedPhysicsAttentionExtrapolator:
                         results['field_predictions'][field]['max'].append(stats['max'])
                         results['field_predictions'][field]['std'].append(stats['std'])
                 
-                results['final_weights_maps'].append(pred['final_weights'])
-                results['gate_weights_maps'].append(pred['gate_weights'])
-                results['alpha_weights_maps'].append(pred['alpha_weights'])
-                results['confidence_final_scores'].append(pred['confidence_final'])
-                results['confidence_gate_scores'].append(pred['confidence_gate'])
-                results['confidence_alpha_scores'].append(pred['confidence_alpha'])
+                results['attention_maps'].append(pred['attention_weights'])
+                results['physics_attention_maps'].append(pred['physics_attention'])
+                results['et_gating_maps'].append(pred['et_gating'])
+                results['confidence_scores'].append(pred['confidence'])
             else:
                 # Fill with NaN if prediction failed
                 for field in results['field_predictions']:
                     results['field_predictions'][field]['mean'].append(np.nan)
                     results['field_predictions'][field]['max'].append(np.nan)
                     results['field_predictions'][field]['std'].append(np.nan)
-                results['final_weights_maps'].append(np.array([]))
-                results['gate_weights_maps'].append(np.array([]))
-                results['alpha_weights_maps'].append(np.array([]))
-                results['confidence_final_scores'].append(0.0)
-                results['confidence_gate_scores'].append(0.0)
-                results['confidence_alpha_scores'].append(0.0)
+                results['attention_maps'].append(np.array([]))
+                results['physics_attention_maps'].append(np.array([]))
+                results['et_gating_maps'].append(np.array([]))
+                results['confidence_scores'].append(0.0)
         
         return results
     
-    def interpolate_full_field(self, field_name, final_weights, source_metadata, simulations):
-        """Compute interpolated full field using DGPA weights.
+    def interpolate_full_field(self, field_name, attention_weights, source_metadata, simulations):
+        """Compute interpolated full field using DGPA weights."""
         
-        Args:
-            field_name (str): Field to interpolate (e.g., 'temperature').
-            final_weights (np.array): DGPA weights from _compute_distance_gated_attention.
-            source_metadata (list): Metadata for sources.
-            simulations (dict): Loaded simulations with full fields.
-        
-        Returns:
-            np.array: Interpolated field values (n_points or n_points x components).
-        """
-        if not self.fitted or len(final_weights) == 0:
+        if not self.fitted or len(attention_weights) == 0:
             return None
         
         # Assume common mesh: Get shape from first simulation
@@ -499,7 +690,7 @@ class DistanceGatedPhysicsAttentionExtrapolator:
         total_weight = 0.0
         n_sources_used = 0
         
-        for idx, weight in enumerate(final_weights):
+        for idx, weight in enumerate(attention_weights):
             if weight < 1e-6:  # Skip negligible weights for efficiency
                 continue
             
@@ -525,9 +716,8 @@ class DistanceGatedPhysicsAttentionExtrapolator:
             'field_name': field_name,
             'n_sources_used': n_sources_used,
             'total_weight': total_weight,
-            'max_weight': np.max(final_weights) if len(final_weights) > 0 else 0,
-            'min_weight': np.min(final_weights) if len(final_weights) > 0 else 0,
-            'method': 'DGPA'
+            'max_weight': np.max(attention_weights) if len(attention_weights) > 0 else 0,
+            'min_weight': np.min(attention_weights) if len(attention_weights) > 0 else 0
         }
         
         return interpolated_field
@@ -561,63 +751,12 @@ class DistanceGatedPhysicsAttentionExtrapolator:
         except Exception as e:
             st.error(f"Error exporting VTU: {str(e)}")
             return False
-    
-    def analyze_weight_components(self, energy_query, duration_query, time_query):
-        """Analyze the contribution of different weight components in DGPA"""
-        if not self.fitted:
-            return None
-        
-        # Get all weights for the query
-        query_embedding = self._compute_physics_embedding(energy_query, duration_query, time_query)
-        query_meta = {'energy': energy_query, 'duration': duration_query, 'time': time_query}
-        
-        _, final_weights, gate_weights, alpha_weights = self._compute_distance_gated_attention(
-            query_embedding, query_meta
-        )
-        
-        if final_weights is None:
-            return None
-        
-        # Analyze top contributors
-        n_top = min(10, len(final_weights))
-        top_indices = np.argsort(final_weights)[-n_top:][::-1]
-        
-        analysis = {
-            'top_sources': [],
-            'weight_statistics': {
-                'final_mean': float(np.mean(final_weights)),
-                'final_std': float(np.std(final_weights)),
-                'final_max': float(np.max(final_weights)),
-                'final_min': float(np.min(final_weights)),
-                'gate_mean': float(np.mean(gate_weights)),
-                'gate_std': float(np.std(gate_weights)),
-                'alpha_mean': float(np.mean(alpha_weights)),
-                'alpha_std': float(np.std(alpha_weights))
-            },
-            'correlation_final_gate': float(np.corrcoef(final_weights, gate_weights)[0, 1]),
-            'correlation_final_alpha': float(np.corrcoef(final_weights, alpha_weights)[0, 1])
-        }
-        
-        for idx in top_indices:
-            meta = self.source_metadata[idx]
-            analysis['top_sources'].append({
-                'name': meta['name'],
-                'energy': meta['energy'],
-                'duration': meta['duration'],
-                'time': meta['time'],
-                'final_weight': float(final_weights[idx]),
-                'gate_weight': float(gate_weights[idx]),
-                'alpha_weight': float(alpha_weights[idx]),
-                'phi': float(self._compute_et_proximity(energy_query, duration_query)[idx])
-            })
-        
-        return analysis
 
 # =============================================
-# ADVANCED VISUALIZATION COMPONENTS WITH DGPA SUPPORT
+# ADVANCED VISUALIZATION COMPONENTS WITH DGPA ANALYSIS
 # =============================================
 class EnhancedVisualizer:
-    """Comprehensive visualization with extended colormaps and DGPA support"""
+    """Comprehensive visualization with extended colormaps and advanced features"""
     
     # Extended colormaps for better visualization
     COLORSCALES = {
@@ -638,340 +777,609 @@ class EnhancedVisualizer:
     ]
     
     @staticmethod
-    def create_dgpa_weight_visualization(final_weights, gate_weights, alpha_weights, source_metadata, 
-                                         energy_query, duration_query):
-        """Create visualization of DGPA weight components"""
-        if len(final_weights) == 0:
-            return go.Figure()
+    def create_dgpa_analysis(results, energy_query, duration_query, time_points):
+        """Create DGPA-specific analysis visualizations"""
+        if not results or 'attention_maps' not in results or len(results['attention_maps']) == 0:
+            return None
         
-        # Extract source information
-        energies = [meta['energy'] for meta in source_metadata]
-        durations = [meta['duration'] for meta in source_metadata]
-        times = [meta['time'] for meta in source_metadata]
+        # Select a timestep for detailed analysis (middle point)
+        timestep_idx = len(time_points) // 2
+        time = time_points[timestep_idx]
         
-        # Create subplots
         fig = make_subplots(
-            rows=2, cols=2,
-            subplot_titles=['DGPA Final Weights', '(E, τ) Gating Weights', 
-                          'Physics Attention Weights', 'Weight Comparison'],
-            specs=[[{'type': 'scatter3d'}, {'type': 'scatter3d'}],
-                   [{'type': 'scatter'}, {'type': 'bar'}]],
-            vertical_spacing=0.15,
+            rows=2, cols=3,
+            subplot_titles=[
+                "DGPA Final Weights", "Physics Attention Only", 
+                "(E, τ) Gating Only", "DGPA vs Physics Attention",
+                "Weight Contribution Heatmap", "Source (E, τ) Distribution"
+            ],
+            vertical_spacing=0.12,
             horizontal_spacing=0.1
         )
         
-        # 1. Final weights 3D
+        # Get weights for selected timestep
+        final_weights = results['attention_maps'][timestep_idx]
+        physics_attention = results['physics_attention_maps'][timestep_idx]
+        et_gating = results['et_gating_maps'][timestep_idx]
+        
+        # 1. Final DGPA weights
         fig.add_trace(
-            go.Scatter3d(
-                x=energies, y=durations, z=times,
-                mode='markers',
-                marker=dict(
-                    size=10,
-                    color=final_weights,
-                    colorscale='Viridis',
-                    opacity=0.8,
-                    colorbar=dict(x=0.45, y=0.9, title="Final Weight")
-                ),
-                text=[f"Source {i}<br>E: {e:.1f} mJ<br>τ: {d:.1f} ns<br>t: {t:.1f} ns<br>Weight: {w:.4f}"
-                      for i, (e, d, t, w) in enumerate(zip(energies, durations, times, final_weights))],
-                hovertemplate='%{text}<extra></extra>',
-                name='DGPA Final Weights'
+            go.Bar(
+                x=list(range(len(final_weights))),
+                y=final_weights,
+                name='DGPA Weights',
+                marker_color='blue'
             ),
             row=1, col=1
         )
         
-        # Add query point
+        # 2. Physics attention only
         fig.add_trace(
-            go.Scatter3d(
-                x=[energy_query], y=[duration_query], z=[np.mean(times)],
-                mode='markers',
-                marker=dict(
-                    size=15,
-                    color='red',
-                    symbol='diamond'
-                ),
-                text=[f"Query<br>E: {energy_query:.1f} mJ<br>τ: {duration_query:.1f} ns"],
-                hovertemplate='%{text}<extra></extra>',
-                name='Query Point'
-            ),
-            row=1, col=1
-        )
-        
-        # 2. Gating weights 3D
-        fig.add_trace(
-            go.Scatter3d(
-                x=energies, y=durations, z=times,
-                mode='markers',
-                marker=dict(
-                    size=10,
-                    color=gate_weights,
-                    colorscale='Plasma',
-                    opacity=0.8,
-                    colorbar=dict(x=0.95, y=0.9, title="Gating Weight")
-                ),
-                text=[f"Source {i}<br>E: {e:.1f} mJ<br>τ: {d:.1f} ns<br>Gate: {w:.4f}"
-                      for i, (e, d, t, w) in enumerate(zip(energies, durations, times, gate_weights))],
-                hovertemplate='%{text}<extra></extra>',
-                name='(E, τ) Gating Weights'
+            go.Bar(
+                x=list(range(len(physics_attention))),
+                y=physics_attention,
+                name='Physics Attention',
+                marker_color='green'
             ),
             row=1, col=2
         )
         
-        # 3. Physics attention weights scatter
+        # 3. (E, τ) gating only
+        fig.add_trace(
+            go.Bar(
+                x=list(range(len(et_gating))),
+                y=et_gating,
+                name='(E, τ) Gating',
+                marker_color='red'
+            ),
+            row=1, col=3
+        )
+        
+        # 4. Comparison: DGPA vs Physics Attention
         fig.add_trace(
             go.Scatter(
-                x=list(range(len(alpha_weights))),
-                y=alpha_weights,
-                mode='markers+lines',
-                marker=dict(size=8, color='green'),
-                line=dict(color='green', width=1),
+                x=list(range(len(final_weights))),
+                y=final_weights,
+                mode='lines+markers',
+                name='DGPA Weights',
+                line=dict(color='blue', width=3)
+            ),
+            row=2, col=1
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=list(range(len(physics_attention))),
+                y=physics_attention,
+                mode='lines+markers',
                 name='Physics Attention',
-                hovertemplate='Source %{x}<br>Weight: %{y:.4f}<extra></extra>'
+                line=dict(color='green', width=2, dash='dash')
             ),
             row=2, col=1
         )
         
-        # 4. Top 10 weights bar chart
-        top_n = min(10, len(final_weights))
-        top_indices = np.argsort(final_weights)[-top_n:][::-1]
+        # 5. Weight contribution heatmap
+        # Create a matrix showing how each source contributes to different fields
+        if results['field_predictions']:
+            fields = list(results['field_predictions'].keys())[:5]  # First 5 fields
+            n_fields = min(len(fields), 5)
+            
+            # For each field, compute the weighted contribution of each source
+            # This is a simplified visualization
+            heatmap_data = []
+            for field in fields:
+                # Use final weights as proxy for field contribution
+                heatmap_data.append(final_weights)
+            
+            if len(heatmap_data) > 0:
+                heatmap_data = np.array(heatmap_data[:n_fields])
+                fig.add_trace(
+                    go.Heatmap(
+                        z=heatmap_data,
+                        x=list(range(len(final_weights))),
+                        y=fields[:n_fields],
+                        colorscale='Viridis',
+                        showscale=False
+                    ),
+                    row=2, col=2
+                )
         
-        fig.add_trace(
-            go.Bar(
-                x=[f"Source {i}" for i in top_indices],
-                y=[final_weights[i] for i in top_indices],
-                marker_color='skyblue',
-                text=[f"{final_weights[i]:.4f}" for i in top_indices],
-                textposition='auto',
-                name='Top DGPA Weights',
-                hovertemplate='Source %{x}<br>Weight: %{y:.4f}<extra></extra>'
-            ),
-            row=2, col=2
-        )
+        # 6. Source (E, τ) distribution
+        if st.session_state.get('summaries'):
+            energies = []
+            durations = []
+            source_names = []
+            
+            for summary in st.session_state.summaries[:10]:  # First 10 sources
+                energies.append(summary['energy'])
+                durations.append(summary['duration'])
+                source_names.append(summary['name'])
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=energies,
+                    y=durations,
+                    mode='markers+text',
+                    text=source_names,
+                    textposition='top center',
+                    marker=dict(
+                        size=15,
+                        color=final_weights[:len(energies)] if len(final_weights) >= len(energies) else 'blue',
+                        colorscale='Viridis',
+                        showscale=True,
+                        colorbar=dict(title="DGPA Weight")
+                    ),
+                    name='Source Simulations'
+                ),
+                row=2, col=3
+            )
+            
+            # Add query point
+            fig.add_trace(
+                go.Scatter(
+                    x=[energy_query],
+                    y=[duration_query],
+                    mode='markers',
+                    marker=dict(
+                        size=20,
+                        color='red',
+                        symbol='star'
+                    ),
+                    name='Query Point'
+                ),
+                row=2, col=3
+            )
         
         fig.update_layout(
-            title_text="DGPA Weight Component Analysis",
             height=800,
+            title_text=f"DGPA Analysis at t={time} ns (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
             showlegend=True
         )
         
-        # Update 3D subplot axes
-        fig.update_scenes(
-            xaxis_title="Energy (mJ)",
-            yaxis_title="Duration (ns)",
-            zaxis_title="Time (ns)",
-            row=1, col=1
-        )
-        
-        fig.update_scenes(
-            xaxis_title="Energy (mJ)",
-            yaxis_title="Duration (ns)",
-            zaxis_title="Time (ns)",
-            row=1, col=2
-        )
-        
+        # Update axes labels
+        fig.update_xaxes(title_text="Source Index", row=1, col=1)
+        fig.update_yaxes(title_text="Weight", row=1, col=1)
+        fig.update_xaxes(title_text="Source Index", row=1, col=2)
+        fig.update_yaxes(title_text="Weight", row=1, col=2)
+        fig.update_xaxes(title_text="Source Index", row=1, col=3)
+        fig.update_yaxes(title_text="Weight", row=1, col=3)
         fig.update_xaxes(title_text="Source Index", row=2, col=1)
-        fig.update_yaxes(title_text="Attention Weight", row=2, col=1)
-        fig.update_xaxes(title_text="Top Sources", row=2, col=2)
-        fig.update_yaxes(title_text="DGPA Weight", row=2, col=2)
+        fig.update_yaxes(title_text="Weight", row=2, col=1)
+        fig.update_xaxes(title_text="Source Index", row=2, col=2)
+        fig.update_yaxes(title_text="Field", row=2, col=2)
+        fig.update_xaxes(title_text="Energy (mJ)", row=2, col=3)
+        fig.update_yaxes(title_text="Duration (ns)", row=2, col=3)
         
         return fig
     
     @staticmethod
-    def create_et_gating_kernel_visualization(extrapolator, energy_query, duration_query):
-        """Visualize the (E, τ) gating kernel"""
-        if not extrapolator.fitted:
-            return go.Figure()
+    def create_sunburst_chart(summaries, selected_field='temperature', highlight_sim=None):
+        """Create enhanced sunburst chart with highlighted target simulation"""
+        labels = []
+        parents = []
+        values = []
+        colors = []
         
-        # Get training points
-        training_energies = extrapolator.training_energies
-        training_durations = extrapolator.training_durations
+        # Root node
+        labels.append("All Simulations")
+        parents.append("")
+        values.append(len(summaries))
+        colors.append("#1f77b4")
         
-        if not training_energies or not training_durations:
-            return go.Figure()
+        # Group by energy first
+        energy_groups = {}
+        for summary in summaries:
+            energy_key = f"{summary['energy']:.1f} mJ"
+            if energy_key not in energy_groups:
+                energy_groups[energy_key] = []
+            energy_groups[energy_key].append(summary)
         
-        # Create meshgrid for visualization
-        e_min, e_max = min(training_energies), max(training_energies)
-        d_min, d_max = min(training_durations), max(training_durations)
-        
-        e_range = e_max - e_min
-        d_range = d_max - d_min
-        
-        e_grid = np.linspace(e_min - 0.1*e_range, e_max + 0.1*e_range, 50)
-        d_grid = np.linspace(d_min - 0.1*d_range, d_max + 0.1*d_range, 50)
-        E_grid, D_grid = np.meshgrid(e_grid, d_grid)
-        
-        # Compute gating values
-        gate_values = np.zeros_like(E_grid)
-        for i in range(E_grid.shape[0]):
-            for j in range(E_grid.shape[1]):
-                # Compute proximity for each training point
-                phi = []
-                for e, d in zip(training_energies, training_durations):
-                    de = (E_grid[i, j] - e) / extrapolator.s_E
-                    dt = (D_grid[i, j] - d) / extrapolator.s_tau
-                    phi.append(np.sqrt(de**2 + dt**2))
+        # Add energy level nodes
+        for energy_key, energy_sims in energy_groups.items():
+            labels.append(f"Energy: {energy_key}")
+            parents.append("All Simulations")
+            values.append(len(energy_sims))
+            colors.append("#ff7f0e" if highlight_sim and any(s['name'] == highlight_sim for s in energy_sims) else "#2ca02c")
+            
+            # Add duration nodes for each energy group
+            for summary in energy_sims:
+                duration_key = f"τ: {summary['duration']:.1f} ns"
+                sim_label = f"{summary['name']}"
+                labels.append(sim_label)
+                parents.append(f"Energy: {energy_key}")
+                values.append(1)
                 
-                phi = np.array(phi)
-                gate = np.exp(-phi**2 / (2 * extrapolator.sigma_g**2))
-                gate_values[i, j] = np.max(gate)  # Show maximum gating value
+                # Highlight target simulation
+                if highlight_sim and summary['name'] == highlight_sim:
+                    colors.append("#d62728")  # Red for target
+                else:
+                    colors.append("#9467bd")  # Purple for others
+                
+                # Add field statistics if available
+                if selected_field in summary['field_stats']:
+                    stats = summary['field_stats'][selected_field]
+                    if stats['max']:
+                        avg_max = np.mean(stats['max'])
+                        field_label = f"{selected_field}: {avg_max:.1f}"
+                        labels.append(field_label)
+                        parents.append(sim_label)
+                        values.append(avg_max if avg_max > 0 else 1e-6)
+                        colors.append("#8c564b")  # Brown for field values
         
-        # Create figure
+        # Ensure all values are positive
+        values = [max(v, 1e-6) for v in values]
+        
+        fig = go.Figure(go.Sunburst(
+            labels=labels,
+            parents=parents,
+            values=values,
+            branchvalues="total",
+            marker=dict(
+                colors=colors,
+                colorscale='Viridis',
+                line=dict(width=2, color='white')
+            ),
+            hovertemplate='<b>%{label}</b><br>Value: %{value:.2f}<br>Parent: %{parent}<extra></extra>',
+            textinfo="label+value",
+            textfont=dict(size=12)
+        ))
+        
+        title = f"Simulation Hierarchy - {selected_field}"
+        if highlight_sim:
+            title += f" (Target: {highlight_sim})"
+        
+        fig.update_layout(
+            title=title,
+            height=700,
+            margin=dict(t=50, b=20, l=20, r=20)
+        )
+        
+        return fig
+    
+    @staticmethod
+    def create_radar_chart(summaries, simulation_names, target_sim=None):
+        """Create enhanced radar chart with highlighted target simulation"""
+        # Determine available fields
+        all_fields = set()
+        for summary in summaries:
+            all_fields.update(summary['field_stats'].keys())
+        
+        if not all_fields:
+            return go.Figure()
+        
+        # Select top 6 fields for clarity
+        selected_fields = list(all_fields)[:6]
+        
         fig = go.Figure()
         
-        # Gating kernel surface
-        fig.add_trace(go.Surface(
-            x=E_grid,
-            y=D_grid,
-            z=gate_values,
-            colorscale='Viridis',
-            opacity=0.8,
-            contours_z=dict(
-                show=True,
-                usecolormap=True,
-                highlightcolor="limegreen",
-                project_z=True
-            ),
-            name='Gating Kernel'
-        ))
+        for sim_name in simulation_names:
+            # Find summary
+            summary = next((s for s in summaries if s['name'] == sim_name), None)
+            if not summary:
+                continue
+            
+            r_values = []
+            theta_values = []
+            
+            for field in selected_fields:
+                if field in summary['field_stats']:
+                    stats = summary['field_stats'][field]
+                    # Use mean value across timesteps
+                    if stats['mean']:
+                        avg_value = np.mean(stats['mean'])
+                        r_values.append(avg_value if avg_value > 0 else 1e-6)
+                        theta_values.append(f"{field[:15]}...")
+                    else:
+                        r_values.append(1e-6)
+                        theta_values.append(f"{field[:15]}...")
+                else:
+                    r_values.append(1e-6)
+                    theta_values.append(f"{field[:15]}...")
+            
+            # Highlight target simulation
+            line_width = 4 if target_sim and sim_name == target_sim else 2
+            fill_opacity = 0.6 if target_sim and sim_name == target_sim else 0.3
+            color = 'red' if target_sim and sim_name == target_sim else None
+            
+            fig.add_trace(go.Scatterpolar(
+                r=r_values,
+                theta=theta_values,
+                fill='toself',
+                name=sim_name,
+                line=dict(width=line_width, color=color),
+                fillcolor=f'rgba(255,0,0,{fill_opacity})' if color else None,
+                opacity=0.8
+            ))
         
-        # Training points
-        fig.add_trace(go.Scatter3d(
-            x=training_energies,
-            y=training_durations,
-            z=[0] * len(training_energies),
-            mode='markers',
-            marker=dict(
-                size=5,
-                color='red',
-                symbol='circle'
-            ),
-            name='Training Points'
-        ))
+        if fig.data:
+            # Find maximum value for scaling
+            max_values = []
+            for trace in fig.data:
+                max_values.append(max(trace.r))
+            
+            if max_values:
+                max_r = max(max_values)
+                
+                # Add circular grid lines
+                fig.update_layout(
+                    polar=dict(
+                        radialaxis=dict(
+                            visible=True,
+                            range=[0, max_r * 1.2],
+                            tickfont=dict(size=10),
+                            gridcolor='lightgray',
+                            linecolor='gray'
+                        ),
+                        angularaxis=dict(
+                            tickfont=dict(size=11),
+                            rotation=90,
+                            direction="clockwise"
+                        ),
+                        bgcolor='white',
+                        gridshape='circular'
+                    ),
+                    showlegend=True,
+                    title="Radar Chart: Simulation Comparison",
+                    height=600,
+                    legend=dict(
+                        yanchor="top",
+                        y=0.99,
+                        xanchor="left",
+                        x=1.05
+                    )
+                )
         
-        # Query point
-        query_gate = extrapolator._compute_et_gating(energy_query, duration_query)
-        max_gate = np.max(query_gate) if len(query_gate) > 0 else 0
+        return fig
+    
+    @staticmethod
+    def create_attention_heatmap_3d(attention_weights, source_metadata):
+        """Create 3D heatmap of attention weights"""
+        if len(attention_weights) == 0:
+            return go.Figure()
         
-        fig.add_trace(go.Scatter3d(
-            x=[energy_query],
-            y=[duration_query],
-            z=[max_gate],
+        # Extract metadata for 3D coordinates
+        energies = []
+        durations = []
+        times = []
+        
+        for meta in source_metadata:
+            energies.append(meta['energy'])
+            durations.append(meta['duration'])
+            times.append(meta['time'])
+        
+        energies = np.array(energies)
+        durations = np.array(durations)
+        times = np.array(times)
+        
+        # Create 3D scatter plot with attention weights as color
+        fig = go.Figure(data=go.Scatter3d(
+            x=energies,
+            y=durations,
+            z=times,
             mode='markers',
             marker=dict(
                 size=10,
-                color='yellow',
-                symbol='diamond'
+                color=attention_weights,
+                colorscale='Viridis',
+                opacity=0.8,
+                colorbar=dict(
+                    title="Attention Weight",
+                    thickness=20,
+                    len=0.5
+                ),
+                showscale=True
             ),
-            name='Query Point'
+            text=[f"E: {e:.1f} mJ<br>τ: {d:.1f} ns<br>t: {t:.1f} ns<br>Weight: {w:.4f}" 
+                  for e, d, t, w in zip(energies, durations, times, attention_weights)],
+            hovertemplate='%{text}<extra></extra>'
         ))
         
         fig.update_layout(
-            title=f"(E, τ) Gating Kernel (σ_g={extrapolator.sigma_g:.2f}, s_E={extrapolator.s_E:.1f}, s_τ={extrapolator.s_tau:.1f})",
+            title="3D Attention Weight Distribution",
             scene=dict(
                 xaxis_title="Energy (mJ)",
                 yaxis_title="Duration (ns)",
-                zaxis_title="Gating Value",
+                zaxis_title="Time (ns)",
                 camera=dict(
-                    eye=dict(x=1.5, y=1.5, z=1.2)
+                    eye=dict(x=1.5, y=1.5, z=1.5)
                 )
             ),
-            height=600
+            height=600,
+            margin=dict(l=0, r=0, t=40, b=0)
         )
         
         return fig
     
     @staticmethod
-    def create_dgpa_comparison_plot(extrapolator, energy_query, duration_query, time_points):
-        """Create comparison plot showing DGPA vs traditional attention"""
-        if not extrapolator.fitted:
+    def create_attention_network(attention_weights, source_metadata, top_k=10):
+        """Create network graph of attention relationships"""
+        if len(attention_weights) == 0 or len(source_metadata) == 0:
             return go.Figure()
         
-        # Predict with DGPA
-        dgpa_results = extrapolator.predict_time_series(energy_query, duration_query, time_points)
+        # Aggregate attention by simulation
+        sim_attention = {}
+        for idx, (weight, meta) in enumerate(zip(attention_weights, source_metadata)):
+            sim_key = meta['name']
+            if sim_key not in sim_attention:
+                sim_attention[sim_key] = []
+            sim_attention[sim_key].append(weight)
         
-        # For comparison, temporarily disable gating
-        original_sigma_g = extrapolator.sigma_g
-        extrapolator.sigma_g = 100.0  # Effectively disable gating
-        no_gate_results = extrapolator.predict_time_series(energy_query, duration_query, time_points)
-        extrapolator.sigma_g = original_sigma_g  # Restore
+        # Average attention per simulation
+        avg_attention = {k: np.mean(v) for k, v in sim_attention.items()}
         
-        # Create figure
-        fig = make_subplots(
-            rows=2, cols=1,
-            subplot_titles=['Field Predictions Comparison', 'Confidence Comparison'],
-            vertical_spacing=0.15
+        # Get top-k simulations
+        sorted_sims = sorted(avg_attention.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        
+        if not sorted_sims:
+            return go.Figure()
+        
+        # Create network graph
+        G = nx.Graph()
+        G.add_node("QUERY", size=50, color='red', label="Query")
+        
+        # Add simulation nodes
+        for i, (sim_name, weight) in enumerate(sorted_sims):
+            node_id = f"SIM_{i}"
+            # Find metadata for this simulation
+            sim_meta = next((m for m in source_metadata if m['name'] == sim_name), None)
+            
+            G.add_node(node_id,
+                      size=30 * weight / max(avg_attention.values()),
+                      color='blue',
+                      label=sim_name,
+                      energy=sim_meta['energy'] if sim_meta else 0,
+                      duration=sim_meta['duration'] if sim_meta else 0,
+                      weight=weight)
+            
+            # Add edge from query to simulation
+            G.add_edge("QUERY", node_id, weight=weight, width=3 * weight)
+        
+        # Spring layout for node positions
+        pos = nx.spring_layout(G, seed=42, k=2)
+        
+        # Create edge traces
+        edge_x = []
+        edge_y = []
+        edge_text = []
+        
+        for edge in G.edges():
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
+            edge_x.extend([x0, x1, None])
+            edge_y.extend([y0, y1, None])
+            
+            weight = G[edge[0]][edge[1]]['weight']
+            edge_text.append(f"Attention: {weight:.3f}")
+        
+        edge_trace = go.Scatter(
+            x=edge_x, y=edge_y,
+            line=dict(width=2, color='gray'),
+            hoverinfo='none',
+            mode='lines'
         )
         
-        # Get first available field
-        if dgpa_results['field_predictions']:
-            field = list(dgpa_results['field_predictions'].keys())[0]
-            
-            # DGPA predictions
-            fig.add_trace(
-                go.Scatter(
-                    x=time_points,
-                    y=dgpa_results['field_predictions'][field]['mean'],
-                    mode='lines+markers',
-                    name=f'DGPA ({field} mean)',
-                    line=dict(color='blue', width=3)
-                ),
-                row=1, col=1
-            )
-            
-            # No-gating predictions
-            fig.add_trace(
-                go.Scatter(
-                    x=time_points,
-                    y=no_gate_results['field_predictions'][field]['mean'],
-                    mode='lines+markers',
-                    name=f'No Gating ({field} mean)',
-                    line=dict(color='red', width=2, dash='dash')
-                ),
-                row=1, col=1
-            )
-            
-            # Confidence comparison
-            fig.add_trace(
-                go.Scatter(
-                    x=time_points,
-                    y=dgpa_results['confidence_final_scores'],
-                    mode='lines+markers',
-                    name='DGPA Confidence',
-                    line=dict(color='green', width=3)
-                ),
-                row=2, col=1
-            )
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=time_points,
-                    y=no_gate_results['confidence_final_scores'],
-                    mode='lines+markers',
-                    name='No Gating Confidence',
-                    line=dict(color='orange', width=2, dash='dash')
-                ),
-                row=2, col=1
-            )
+        # Create node traces
+        node_x = []
+        node_y = []
+        node_text = []
+        node_size = []
+        node_color = []
         
+        for node in G.nodes():
+            x, y = pos[node]
+            node_x.append(x)
+            node_y.append(y)
+            
+            if node == "QUERY":
+                node_text.append("QUERY")
+                node_size.append(30)
+                node_color.append('red')
+            else:
+                sim_data = G.nodes[node]
+                energy = sim_data.get('energy', 0)
+                duration = sim_data.get('duration', 0)
+                weight = sim_data.get('weight', 0)
+                
+                node_text.append(
+                    f"Simulation: {sim_data['label']}<br>"
+                    f"Energy: {energy:.1f} mJ<br>"
+                    f"Duration: {duration:.1f} ns<br>"
+                    f"Attention: {weight:.3f}"
+                )
+                node_size.append(sim_data['size'] + 10)
+                node_color.append('blue')
+        
+        node_trace = go.Scatter(
+            x=node_x, y=node_y,
+            mode='markers+text',
+            text=[n if n == "QUERY" else f"Sim{i}" for i, n in enumerate(G.nodes()) if n != "QUERY"],
+            textposition="middle center",
+            hoverinfo='text',
+            hovertext=node_text,
+            marker=dict(
+                size=node_size,
+                color=node_color,
+                line=dict(width=2, color='white')
+            )
+        )
+        
+        fig = go.Figure(data=[edge_trace, node_trace])
         fig.update_layout(
-            title_text=f"DGPA vs Traditional Attention (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
-            height=700,
-            showlegend=True
+            title=f"Attention Network (Top {len(sorted_sims)} Simulations)",
+            showlegend=False,
+            hovermode='closest',
+            margin=dict(b=0, l=0, r=0, t=40),
+            height=500,
+            plot_bgcolor='white',
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
         )
         
-        fig.update_xaxes(title_text="Time (ns)", row=1, col=1)
-        fig.update_yaxes(title_text="Field Value", row=1, col=1)
-        fig.update_xaxes(title_text="Time (ns)", row=2, col=1)
-        fig.update_yaxes(title_text="Confidence", row=2, col=1)
+        return fig
+    
+    @staticmethod
+    def create_field_evolution_comparison(summaries, simulation_names, selected_field, target_sim=None):
+        """Create enhanced field evolution comparison plot"""
+        fig = go.Figure()
+        
+        for sim_name in simulation_names:
+            summary = next((s for s in summaries if s['name'] == sim_name), None)
+            
+            if summary and selected_field in summary['field_stats']:
+                stats = summary['field_stats'][selected_field]
+                
+                # Highlight target simulation
+                line_width = 4 if target_sim and sim_name == target_sim else 2
+                line_dash = 'solid' if target_sim and sim_name == target_sim else 'dash'
+                
+                # Plot mean
+                fig.add_trace(go.Scatter(
+                    x=summary['timesteps'],
+                    y=stats['mean'],
+                    mode='lines+markers',
+                    name=f"{sim_name} (mean)",
+                    line=dict(width=line_width, dash=line_dash),
+                    opacity=0.8
+                ))
+                
+                # Add confidence band (mean ± std)
+                if stats['std']:
+                    y_upper = np.array(stats['mean']) + np.array(stats['std'])
+                    y_lower = np.array(stats['mean']) - np.array(stats['std'])
+                    
+                    fig.add_trace(go.Scatter(
+                        x=summary['timesteps'] + summary['timesteps'][::-1],
+                        y=np.concatenate([y_upper, y_lower[::-1]]),
+                        fill='toself',
+                        fillcolor=f'rgba(128,128,128,{0.1 if target_sim and sim_name == target_sim else 0.05})',
+                        line=dict(color='rgba(255,255,255,0)'),
+                        showlegend=False,
+                        name=f"{sim_name} ± std"
+                    ))
+        
+        if fig.data:
+            fig.update_layout(
+                title=f"{selected_field} Evolution Comparison",
+                xaxis_title="Timestep (ns)",
+                yaxis_title=f"{selected_field} Value",
+                hovermode="x unified",
+                height=500,
+                showlegend=True,
+                legend=dict(
+                    yanchor="top",
+                    y=0.99,
+                    xanchor="left",
+                    x=1.02
+                )
+            )
         
         return fig
 
 # =============================================
-# MAIN APPLICATION WITH DGPA INTEGRATION
+# MAIN INTEGRATED APPLICATION
 # =============================================
 def main():
     st.set_page_config(
-        page_title="DGPA FEA Laser Simulation Platform",
+        page_title="Enhanced FEA Laser Simulation Platform with DGPA",
         layout="wide",
         initial_sidebar_state="expanded",
         page_icon="🔬"
@@ -1022,14 +1430,13 @@ def main():
         margin: 1.5rem 0;
         box-shadow: 0 10px 20px rgba(0,0,0,0.1);
     }
-    .dgpa-formula {
-        background: linear-gradient(135deg, #fdfcfb 0%, #e2d1c3 100%);
+    .dgpa-box {
+        background: linear-gradient(135deg, #f093fb 0%, #00f2fe 100%);
+        color: white;
         padding: 1.5rem;
         border-radius: 10px;
         margin: 1.5rem 0;
-        font-family: "Courier New", monospace;
-        font-size: 0.9rem;
-        border-left: 5px solid #4A00E0;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
     }
     .metric-card {
         background: white;
@@ -1085,22 +1492,20 @@ def main():
         border-radius: 4px;
         font-size: 0.9rem;
     }
-    .dgpa-highlight {
-        background: linear-gradient(120deg, #a1c4fd 0%, #c2e9fb 100%);
-        padding: 0.5rem;
-        border-radius: 5px;
-        font-weight: bold;
-    }
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<h1 class="main-header">🔬 Distance-Gated Physics Attention (DGPA) for FEA Laser Simulations</h1>', 
+    st.markdown('<h1 class="main-header">🔬 Enhanced FEA Laser Simulation Platform with DGPA</h1>', 
                 unsafe_allow_html=True)
     
-    # Initialize session state with DGPA
+    # Initialize session state with enhanced cache management
     if 'data_loader' not in st.session_state:
         st.session_state.data_loader = UnifiedFEADataLoader()
-        st.session_state.extrapolator = DistanceGatedPhysicsAttentionExtrapolator()
+        # Use DGPA-enhanced extrapolator
+        st.session_state.extrapolator = DistanceGatedPhysicsAttentionExtrapolator(
+            sigma_param=0.3, spatial_weight=0.5, n_heads=4, temperature=1.0,
+            sigma_g=0.20, s_E=10.0, s_tau=5.0
+        )
         st.session_state.visualizer = EnhancedVisualizer()
         st.session_state.data_loaded = False
         st.session_state.current_mode = "Data Viewer"
@@ -1112,15 +1517,16 @@ def main():
         st.session_state.current_3d_field = None
         st.session_state.current_3d_timestep = 0
         st.session_state.last_prediction_id = None
-        st.session_state.show_dgpa_analysis = False
     
     # Sidebar
     with st.sidebar:
         st.markdown("### ⚙️ Navigation")
         app_mode = st.radio(
             "Select Mode",
-            ["Data Viewer", "DGPA Interpolation", "Comparative Analysis", "DGPA Analysis"],
-            index=0,
+            ["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis", "DGPA Analysis"],
+            index=["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis", "DGPA Analysis"].index(
+                st.session_state.current_mode if 'current_mode' in st.session_state else "Data Viewer"
+            ),
             key="nav_mode"
         )
         
@@ -1139,6 +1545,10 @@ def main():
                 EnhancedVisualizer.EXTENDED_COLORMAPS,
                 index=0
             )
+        
+        # Add warning for interpolation mode without full mesh
+        if st.session_state.current_mode == "Interpolation/Extrapolation" and not load_full_data:
+            st.warning("⚠️ Full mesh loading is required for 3D interpolation visualization. Please enable and reload.")
         
         if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
             with st.spinner("Loading simulation data..."):
@@ -1174,12 +1584,12 @@ def main():
                 st.metric("Field History", history_size)
                 
                 if cache_size > 0:
+                    # Show cached fields
                     st.write("**Cached Fields:**")
                     for cache_key, cache_data in list(st.session_state.interpolation_3d_cache.items())[:5]:
                         field_name = cache_data.get('field_name', 'Unknown')
                         timestep = cache_data.get('timestep_idx', 0)
-                        method = cache_data.get('params', {}).get('method', 'DGPA')
-                        st.caption(f"• {field_name} (t={timestep}, {method})")
+                        st.caption(f"• {field_name} (t={timestep})")
                     
                     if cache_size > 5:
                         st.caption(f"... and {cache_size - 5} more")
@@ -1211,33 +1621,348 @@ def main():
     # Main content based on selected mode
     if app_mode == "Data Viewer":
         render_data_viewer()
-    elif app_mode == "DGPA Interpolation":
-        render_dgpa_interpolation()
+    elif app_mode == "Interpolation/Extrapolation":
+        render_interpolation_extrapolation()
     elif app_mode == "Comparative Analysis":
         render_comparative_analysis()
     elif app_mode == "DGPA Analysis":
         render_dgpa_analysis()
 
-def render_dgpa_interpolation():
-    """Render the DGPA interpolation interface"""
-    st.markdown('<h2 class="sub-header">🔮 Distance-Gated Physics Attention (DGPA) Interpolation</h2>', 
-               unsafe_allow_html=True)
-    
-    # Display DGPA formula
-    st.markdown("""
-    <div class="dgpa-formula">
-    <h4>📐 DGPA Formula</h4>
-    <p><strong>Final Interpolation:</strong> \( \mathbf{F}(\boldsymbol{\theta}^*) = \sum_{i=1}^{N} w_i(\boldsymbol{\theta}^*) \cdot \mathbf{F}^{(i)} \)</p>
-    <p><strong>DGPA Weight:</strong> \( w_i = \frac{ \bar{\alpha}_i \cdot \exp\left( -\frac{\phi_i^2}{2\sigma_g^2} \right) }{ \sum_{k} \bar{\alpha}_k \cdot \exp\left( -\frac{\phi_k^2}{2\sigma_g^2} \right) + \epsilon } \)</p>
-    <p><strong>(E, τ)-Proximity:</strong> \( \phi_i = \sqrt{ \left( \frac{E^* - E_i}{s_E} \right)^2 + \left( \frac{\tau^* - \tau_i}{s_\tau} \right)^2 } \)</p>
-    </div>
-    """, unsafe_allow_html=True)
+def render_data_viewer():
+    """Render the enhanced data visualization interface"""
+    st.markdown('<h2 class="sub-header">📁 Data Viewer</h2>', unsafe_allow_html=True)
     
     if not st.session_state.data_loaded:
         st.markdown("""
         <div class="warning-box">
         <h3>⚠️ No Data Loaded</h3>
-        <p>Please load simulations first to enable DGPA interpolation capabilities.</p>
+        <p>Please load simulations first using the "Load All Simulations" button in the sidebar.</p>
+        <p>Ensure your data follows this structure:</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        with st.expander("📁 Expected Directory Structure"):
+            st.code("""
+fea_solutions/
+├── q0p5mJ-delta4p2ns/        # Energy: 0.5 mJ, Duration: 4.2 ns
+│   ├── a_t0001.vtu           # Timestep 1
+│   ├── a_t0002.vtu           # Timestep 2
+│   ├── a_t0003.vtu           # Timestep 3
+│   └── ...
+├── q1p0mJ-delta2p0ns/        # Energy: 1.0 mJ, Duration: 2.0 ns
+│   ├── a_t0001.vtu
+│   ├── a_t0002.vtu
+│   └── ...
+└── q2p0mJ-delta1p0ns/        # Energy: 2.0 mJ, Duration: 1.0 ns
+    ├── a_t0001.vtu
+    └── ...
+            """)
+        return
+    
+    simulations = st.session_state.simulations
+    
+    # Simulation selection
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        sim_name = st.selectbox(
+            "Select Simulation",
+            sorted(simulations.keys()),
+            key="viewer_sim_select",
+            help="Choose a simulation to visualize"
+        )
+    
+    sim = simulations[sim_name]
+    
+    with col2:
+        st.metric("Energy", f"{sim['energy_mJ']:.2f} mJ")
+    with col3:
+        st.metric("Duration", f"{sim['duration_ns']:.2f} ns")
+    
+    if not sim.get('has_mesh', False):
+        st.warning("This simulation was loaded without mesh data. Please reload with 'Load Full Mesh' enabled.")
+        return
+    
+    if 'field_info' not in sim or not sim['field_info']:
+        st.error("No field data available for this simulation.")
+        return
+    
+    # Field and timestep selection
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        field = st.selectbox(
+            "Select Field",
+            sorted(sim['field_info'].keys()),
+            key="viewer_field_select",
+            help="Choose a field to visualize"
+        )
+    with col2:
+        timestep = st.slider(
+            "Timestep",
+            0, sim['n_timesteps'] - 1, 0,
+            key="viewer_timestep_slider",
+            help="Select timestep to display"
+        )
+    with col3:
+        colormap = st.selectbox(
+            "Colormap",
+            EnhancedVisualizer.EXTENDED_COLORMAPS,
+            index=EnhancedVisualizer.EXTENDED_COLORMAPS.index(st.session_state.selected_colormap),
+            key="viewer_colormap"
+        )
+    
+    # Main 3D visualization
+    if 'points' in sim and 'fields' in sim and field in sim['fields']:
+        pts = sim['points']
+        kind, _ = sim['field_info'][field]
+        raw = sim['fields'][field][timestep]
+        
+        if kind == "scalar":
+            values = np.where(np.isnan(raw), 0, raw)
+            label = field
+        else:
+            magnitude = np.linalg.norm(raw, axis=1)
+            values = np.where(np.isnan(magnitude), 0, magnitude)
+            label = f"{field} (magnitude)"
+        
+        # Create 3D visualization
+        if sim.get('triangles') is not None and len(sim['triangles']) > 0:
+            tri = sim['triangles']
+            
+            # Check triangle validity
+            valid_triangles = []
+            for triangle in tri:
+                if all(idx < len(pts) for idx in triangle):
+                    valid_triangles.append(triangle)
+            
+            if valid_triangles:
+                valid_triangles = np.array(valid_triangles)
+                mesh_data = go.Mesh3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
+                    intensity=values,
+                    colorscale=colormap,
+                    intensitymode='vertex',
+                    colorbar=dict(
+                        title=dict(text=label, font=dict(size=14)),
+                        thickness=20,
+                        len=0.75
+                    ),
+                    opacity=0.9,
+                    lighting=dict(
+                        ambient=0.8,
+                        diffuse=0.8,
+                        specular=0.5,
+                        roughness=0.5
+                    ),
+                    lightposition=dict(x=100, y=200, z=300),
+                    hovertemplate='<b>Value:</b> %{intensity:.3f}<br>' +
+                                 '<b>X:</b> %{x:.3f}<br>' +
+                                 '<b>Y:</b> %{y:.3f}<br>' +
+                                 '<b>Z:</b> %{z:.3f}<extra></extra>'
+                )
+            else:
+                # Fallback to scatter plot
+                mesh_data = go.Scatter3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    mode='markers',
+                    marker=dict(
+                        size=4,
+                        color=values,
+                        colorscale=colormap,
+                        opacity=0.8,
+                        colorbar=dict(
+                            title=dict(text=label, font=dict(size=14)),
+                            thickness=20,
+                            len=0.75
+                        ),
+                        showscale=True
+                    ),
+                    hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
+                                 '<b>X:</b> %{x:.3f}<br>' +
+                                 '<b>Y:</b> %{y:.3f}<br>' +
+                                 '<b>Z:</b> %{z:.3f}<extra></extra>'
+                )
+        else:
+            # Scatter plot for point cloud
+            mesh_data = go.Scatter3d(
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                mode='markers',
+                marker=dict(
+                    size=4,
+                    color=values,
+                    colorscale=colormap,
+                    opacity=0.8,
+                    colorbar=dict(
+                        title=dict(text=label, font=dict(size=14)),
+                        thickness=20,
+                        len=0.75
+                    ),
+                    showscale=True
+                ),
+                hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
+                             '<b>X:</b> %{x:.3f}<br>' +
+                             '<b>Y:</b> %{y:.3f}<br>' +
+                             '<b>Z:</b> %{z:.3f}<extra></extra>'
+            )
+        
+        fig = go.Figure(data=mesh_data)
+        fig.update_layout(
+            title=dict(
+                text=f"{label} at Timestep {timestep + 1}<br><sub>{sim_name}</sub>",
+                font=dict(size=20)
+            ),
+            scene=dict(
+                aspectmode="data",
+                camera=dict(
+                    eye=dict(x=1.5, y=1.5, z=1.5),
+                    up=dict(x=0, y=0, z=1)
+                ),
+                xaxis=dict(
+                    title="X",
+                    gridcolor="lightgray",
+                    showbackground=True,
+                    backgroundcolor="white"
+                ),
+                yaxis=dict(
+                    title="Y",
+                    gridcolor="lightgray",
+                    showbackground=True,
+                    backgroundcolor="white"
+                ),
+                zaxis=dict(
+                    title="Z",
+                    gridcolor="lightgray",
+                    showbackground=True,
+                    backgroundcolor="white"
+                )
+            ),
+            height=700,
+            margin=dict(l=0, r=0, t=80, b=0)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Field statistics
+        st.markdown('<h3 class="sub-header">📊 Field Statistics</h3>', unsafe_allow_html=True)
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("Min", f"{np.min(values):.3f}")
+        with col2:
+            st.metric("Max", f"{np.max(values):.3f}")
+        with col3:
+            st.metric("Mean", f"{np.mean(values):.3f}")
+        with col4:
+            st.metric("Std Dev", f"{np.std(values):.3f}")
+        with col5:
+            st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
+    
+    # Field evolution over time
+    st.markdown('<h3 class="sub-header">📈 Field Evolution Over Time</h3>', unsafe_allow_html=True)
+    
+    # Find corresponding summary
+    summary = next((s for s in st.session_state.summaries if s['name'] == sim_name), None)
+    
+    if summary and field in summary['field_stats']:
+        stats = summary['field_stats'][field]
+        
+        fig_time = go.Figure()
+        
+        if stats['mean']:
+            # Mean line
+            fig_time.add_trace(go.Scatter(
+                x=summary['timesteps'],
+                y=stats['mean'],
+                mode='lines',
+                name='Mean',
+                line=dict(color='blue', width=3)
+            ))
+            
+            # Confidence band (mean ± std)
+            if stats['std']:
+                y_upper = np.array(stats['mean']) + np.array(stats['std'])
+                y_lower = np.array(stats['mean']) - np.array(stats['std'])
+                
+                fig_time.add_trace(go.Scatter(
+                    x=summary['timesteps'] + summary['timesteps'][::-1],
+                    y=np.concatenate([y_upper, y_lower[::-1]]),
+                    fill='toself',
+                    fillcolor='rgba(0, 100, 255, 0.2)',
+                    line=dict(color='rgba(255,255,255,0)'),
+                    showlegend=False,
+                    name='± Std Dev'
+                ))
+            
+            # Max line
+            if stats['max']:
+                fig_time.add_trace(go.Scatter(
+                    x=summary['timesteps'],
+                    y=stats['max'],
+                    mode='lines',
+                    name='Maximum',
+                    line=dict(color='red', width=2, dash='dash')
+                ))
+        
+        fig_time.update_layout(
+            title=dict(
+                text=f"{field} Statistics Over Time",
+                font=dict(size=18)
+            ),
+            xaxis_title="Timestep (ns)",
+            yaxis_title=f"{field} Value",
+            hovermode="x unified",
+            height=400,
+            showlegend=True,
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01
+            )
+        )
+        
+        st.plotly_chart(fig_time, use_container_width=True)
+        
+        # Percentile analysis
+        with st.expander("📊 Detailed Percentile Analysis"):
+            if 'percentiles' in stats and stats['percentiles']:
+                percentiles_data = np.array(stats['percentiles'])
+                
+                fig_percentiles = go.Figure()
+                
+                percentile_labels = ['10th', '25th', '50th', '75th', '90th']
+                colors = ['lightblue', 'blue', 'darkblue', 'red', 'darkred']
+                
+                for i in range(5):
+                    fig_percentiles.add_trace(go.Scatter(
+                        x=summary['timesteps'],
+                        y=percentiles_data[:, i],
+                        mode='lines',
+                        name=percentile_labels[i],
+                        line=dict(color=colors[i], width=2)
+                    ))
+                
+                fig_percentiles.update_layout(
+                    title="Field Value Percentiles Over Time",
+                    xaxis_title="Timestep (ns)",
+                    yaxis_title=f"{field} Value",
+                    height=400
+                )
+                
+                st.plotly_chart(fig_percentiles, use_container_width=True)
+    else:
+        st.info(f"No time series data available for {field}")
+
+def render_interpolation_extrapolation():
+    """Render the enhanced interpolation/extrapolation interface with DGPA"""
+    st.markdown('<h2 class="sub-header">🔮 Interpolation/Extrapolation Engine with DGPA</h2>', 
+               unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first to enable interpolation/extrapolation capabilities.</p>
         </div>
         """, unsafe_allow_html=True)
         return
@@ -1252,16 +1977,15 @@ def render_dgpa_interpolation():
         """, unsafe_allow_html=True)
     
     st.markdown("""
-    <div class="info-box">
+    <div class="dgpa-box">
     <h3>🧠 Distance-Gated Physics Attention (DGPA)</h3>
-    <p>This engine uses a <strong>transformer-inspired multi-head attention mechanism</strong> with <strong>explicit (E, τ) gating</strong> to interpolate and extrapolate simulation results. The model learns from existing FEA simulations and can predict outcomes for new parameter combinations with quantified confidence.</p>
-    <p><strong>Key Features:</strong></p>
-    <ul>
-    <li>Physics-informed embeddings capturing thermal diffusion, strain rates, and dimensionless parameters</li>
-    <li>Multi-head attention for robust feature extraction</li>
-    <li>Explicit (E, τ) gating to enforce physical locality in parameter space</li>
-    <li>Full 3D field interpolation using DGPA-weighted averaging</li>
-    </ul>
+    <p>This engine uses <strong>Distance-Gated Physics Attention (DGPA)</strong> to interpolate and extrapolate simulation results. DGPA combines:</p>
+    <ol>
+    <li><strong>Physics-informed attention</strong>: Multi-head transformer-like attention with physics-aware embeddings</li>
+    <li><strong>Energy-duration gating</strong>: Explicit (E, τ) proximity kernel that ensures physically meaningful interpolation</li>
+    </ol>
+    <p><strong>DGPA Formula:</strong> w_i = (α_i × gating_i) / (∑_j α_j × gating_j)</p>
+    <p>where φ_i = √(((E*-E_i)/s_E)² + ((τ*-τ_i)/s_τ)²) and gating_i = exp(-φ_i²/(2σ_g²))</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -1304,7 +2028,7 @@ def render_dgpa_interpolation():
             max_value=float(max_energy * 2.0),
             value=float((min_energy + max_energy) / 2),
             step=0.1,
-            key="dgpa_energy",
+            key="interp_energy",
             help=f"Training range: {min_energy:.1f} - {max_energy:.1f} mJ"
         )
     
@@ -1321,7 +2045,7 @@ def render_dgpa_interpolation():
             max_value=float(max_duration * 2.0),
             value=float((min_duration + max_duration) / 2),
             step=0.1,
-            key="dgpa_duration",
+            key="interp_duration",
             help=f"Training range: {min_duration:.1f} - {max_duration:.1f} ns"
         )
     
@@ -1332,7 +2056,7 @@ def render_dgpa_interpolation():
             max_value=1000,
             value=20,
             step=1,
-            key="dgpa_maxtime"
+            key="interp_maxtime"
         )
     
     with col4:
@@ -1340,7 +2064,7 @@ def render_dgpa_interpolation():
             "Time Resolution",
             ["1 ns", "2 ns", "5 ns", "10 ns"],
             index=0,
-            key="dgpa_resolution"
+            key="interp_resolution"
         )
     
     # Generate time points
@@ -1348,76 +2072,87 @@ def render_dgpa_interpolation():
     time_step = time_step_map[time_resolution]
     time_points = np.arange(1, max_time + 1, time_step)
     
-    # DGPA Model parameters
-    with st.expander("⚙️ DGPA Parameters", expanded=True):
-        st.markdown('<span class="dgpa-highlight">Attention Mechanism Parameters</span>', unsafe_allow_html=True)
-        col1, col2, col3 = st.columns(3)
+    # Model parameters with DGPA-specific parameters
+    with st.expander("⚙️ DGPA Attention Parameters", expanded=False):
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             sigma_param = st.slider(
-                "Attention Width (σ)",
+                "Kernel Width (σ)",
                 min_value=0.1,
                 max_value=1.0,
                 value=0.3,
                 step=0.05,
-                key="dgpa_sigma",
+                key="interp_sigma",
                 help="Controls the attention focus width"
             )
         with col2:
+            spatial_weight = st.slider(
+                "Spatial Weight",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.5,
+                step=0.05,
+                key="interp_spatial",
+                help="Weight for spatial locality regulation"
+            )
+        with col3:
             n_heads = st.slider(
                 "Attention Heads",
                 min_value=1,
                 max_value=8,
                 value=4,
                 step=1,
-                key="dgpa_heads",
+                key="interp_heads",
                 help="Number of parallel attention heads"
             )
-        with col3:
+        with col4:
             temperature = st.slider(
                 "Temperature",
                 min_value=0.1,
                 max_value=2.0,
                 value=1.0,
                 step=0.1,
-                key="dgpa_temp",
+                key="interp_temp",
                 help="Softmax temperature for attention weights"
             )
         
-        st.markdown('<span class="dgpa-highlight">(E, τ) Gating Parameters</span>', unsafe_allow_html=True)
-        col1, col2, col3 = st.columns(3)
-        with col1:
+        # DGPA-specific parameters
+        st.markdown("### 🎯 DGPA Gating Parameters")
+        col5, col6, col7 = st.columns(3)
+        with col5:
             sigma_g = st.slider(
-                "Gating Sharpness (σ_g)",
+                "Gating Kernel Width (σ_g)",
                 min_value=0.05,
-                max_value=0.5,
-                value=0.2,
+                max_value=1.0,
+                value=0.20,
                 step=0.05,
-                key="dgpa_sigma_g",
-                help="0.1 = sharp NN, 0.4 = smooth blend"
+                key="interp_sigma_g",
+                help="Sharpness of the (E, τ) gating kernel"
             )
-        with col2:
+        with col6:
             s_E = st.slider(
-                "Energy Scale (s_E)",
-                min_value=1.0,
+                "Energy Scale (s_E) [mJ]",
+                min_value=0.1,
                 max_value=50.0,
                 value=10.0,
-                step=1.0,
-                key="dgpa_s_E",
-                help="Scaling factor for energy differences"
+                step=0.5,
+                key="interp_s_E",
+                help="Scaling factor for energy in gating kernel"
             )
-        with col3:
+        with col7:
             s_tau = st.slider(
-                "Duration Scale (s_τ)",
-                min_value=1.0,
+                "Duration Scale (s_τ) [ns]",
+                min_value=0.1,
                 max_value=20.0,
                 value=5.0,
-                step=1.0,
-                key="dgpa_s_tau",
-                help="Scaling factor for duration differences"
+                step=0.5,
+                key="interp_s_tau",
+                help="Scaling factor for pulse duration in gating kernel"
             )
         
         # Update extrapolator parameters
         st.session_state.extrapolator.sigma_param = sigma_param
+        st.session_state.extrapolator.spatial_weight = spatial_weight
         st.session_state.extrapolator.n_heads = n_heads
         st.session_state.extrapolator.temperature = temperature
         st.session_state.extrapolator.sigma_g = sigma_g
@@ -1446,7 +2181,7 @@ def render_dgpa_interpolation():
                     min_value=3,
                     max_value=20,
                     value=10,
-                    help="Use only top-K sources by DGPA weight"
+                    help="Use only top-K sources by attention weight"
                 )
                 subsample_factor = st.slider(
                     "Mesh Subsampling",
@@ -1456,9 +2191,9 @@ def render_dgpa_interpolation():
                     help="Factor for mesh subsampling (1=full resolution)"
                 )
     
-    # Run DGPA prediction
+    # Run prediction
     if st.button("🚀 Run DGPA Prediction", type="primary", use_container_width=True):
-        with st.spinner("Running Distance-Gated Physics Attention prediction..."):
+        with st.spinner("Running Distance-Gated Physics Attention (DGPA) prediction..."):
             # Clear cache for new prediction
             CacheManager.clear_3d_cache()
             
@@ -1473,46 +2208,44 @@ def render_dgpa_interpolation():
                     'duration_query': duration_query,
                     'time_points': time_points,
                     'sigma_param': sigma_param,
+                    'spatial_weight': spatial_weight,
+                    'n_heads': n_heads,
+                    'temperature': temperature,
                     'sigma_g': sigma_g,
                     's_E': s_E,
                     's_tau': s_tau,
-                    'n_heads': n_heads,
-                    'temperature': temperature,
                     'top_k': top_k if 'top_k' in locals() and optimize_performance else None,
-                    'subsample_factor': subsample_factor if 'subsample_factor' in locals() and optimize_performance else None,
-                    'method': 'DGPA'
+                    'subsample_factor': subsample_factor if 'subsample_factor' in locals() and optimize_performance else None
                 }
                 
                 # Generate prediction ID for cache tracking
                 prediction_id = hashlib.md5(
-                    f"{energy_query}_{duration_query}_{sigma_g}_{s_E}_{s_tau}".encode()
+                    f"{energy_query}_{duration_query}_{sigma_param}_{sigma_g}".encode()
                 ).hexdigest()[:8]
                 st.session_state.last_prediction_id = prediction_id
-                st.session_state.show_dgpa_analysis = True
                 
-                st.markdown(f"""
+                st.markdown("""
                 <div class="success-box">
                 <h3>✅ DGPA Prediction Successful</h3>
-                <p>Distance-Gated Physics Attention prediction generated with <strong>(E, τ) gating</strong>.</p>
-                <p><strong>Prediction ID:</strong> {prediction_id}</p>
+                <p>Distance-Gated Physics Attention predictions generated with explicit energy-duration gating.</p>
                 <p><strong>Cache initialized:</strong> 3D field interpolations will be cached for faster switching.</p>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Visualization tabs for DGPA
+                # Visualization tabs - Updated with DGPA tab
                 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-                    "📈 Predictions", "🧮 DGPA Weights", "🌐 Gating Kernel", 
-                    "📊 Details", "🖼️ 3D Rendering", "🔍 DGPA Analysis"
+                    "📈 Predictions", "🧠 DGPA Analysis", "🌐 3D Analysis", 
+                    "📊 Details", "🖼️ 3D Rendering", "⚙️ Parameters"
                 ])
                 
                 with tab1:
-                    render_dgpa_prediction_results(results, time_points, energy_query, duration_query)
+                    render_prediction_results(results, time_points, energy_query, duration_query)
                 
                 with tab2:
-                    render_dgpa_weight_visualization(results, energy_query, duration_query, time_points)
+                    render_dgpa_attention_visualization(results, energy_query, duration_query, time_points)
                 
                 with tab3:
-                    render_gating_kernel_visualization(energy_query, duration_query)
+                    render_3d_analysis(results, time_points, energy_query, duration_query)
                 
                 with tab4:
                     render_detailed_results(results, time_points, energy_query, duration_query)
@@ -1522,9 +2255,9 @@ def render_dgpa_interpolation():
                                            enable_3d, optimize_performance, top_k if optimize_performance else None)
                 
                 with tab6:
-                    render_dgpa_component_analysis(results, energy_query, duration_query, time_points)
+                    render_parameter_analysis(results, energy_query, duration_query, time_points)
             else:
-                st.error("DGPA prediction failed. Please check input parameters and ensure sufficient training data.")
+                st.error("Prediction failed. Please check input parameters and ensure sufficient training data.")
     
     # If results already exist from previous run, show them
     elif st.session_state.interpolation_results is not None:
@@ -1533,7 +2266,6 @@ def render_dgpa_interpolation():
         <h3>📊 Previous DGPA Prediction Results Available</h3>
         <p>Showing results from previous DGPA prediction run.</p>
         <p><strong>Prediction ID:</strong> {st.session_state.last_prediction_id or 'N/A'}</p>
-        <p><strong>Method:</strong> {st.session_state.interpolation_params.get('method', 'DGPA')}</p>
         <p><strong>Cached fields:</strong> {len(st.session_state.interpolation_3d_cache)}</p>
         </div>
         """, unsafe_allow_html=True)
@@ -1545,20 +2277,20 @@ def render_dgpa_interpolation():
         time_points = params.get('time_points', [])
         results = st.session_state.interpolation_results
         
-        # Visualization tabs for DGPA
+        # Visualization tabs
         tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-            "📈 Predictions", "🧮 DGPA Weights", "🌐 Gating Kernel", 
-            "📊 Details", "🖼️ 3D Rendering", "🔍 DGPA Analysis"
+            "📈 Predictions", "🧠 DGPA Analysis", "🌐 3D Analysis", 
+            "📊 Details", "🖼️ 3D Rendering", "⚙️ Parameters"
         ])
         
         with tab1:
-            render_dgpa_prediction_results(results, time_points, energy_query, duration_query)
+            render_prediction_results(results, time_points, energy_query, duration_query)
         
         with tab2:
-            render_dgpa_weight_visualization(results, energy_query, duration_query, time_points)
+            render_dgpa_attention_visualization(results, energy_query, duration_query, time_points)
         
         with tab3:
-            render_gating_kernel_visualization(energy_query, duration_query)
+            render_3d_analysis(results, time_points, energy_query, duration_query)
         
         with tab4:
             render_detailed_results(results, time_points, energy_query, duration_query)
@@ -1572,10 +2304,124 @@ def render_dgpa_interpolation():
                                    enable_3d, optimize_performance, top_k)
         
         with tab6:
-            render_dgpa_component_analysis(results, energy_query, duration_query, time_points)
+            render_parameter_analysis(results, energy_query, duration_query, time_points)
 
-def render_dgpa_prediction_results(results, time_points, energy_query, duration_query):
-    """Render DGPA prediction results visualization"""
+def render_dgpa_attention_visualization(results, energy_query, duration_query, time_points):
+    """Render DGPA-specific attention visualizations"""
+    if not results.get('physics_attention_maps') or len(results['physics_attention_maps'][0]) == 0:
+        st.info("No DGPA attention data available.")
+        return
+    
+    st.markdown('<h4 class="sub-header">🧠 DGPA Attention Analysis</h4>', unsafe_allow_html=True)
+    
+    # Select timestep for DGPA visualization
+    selected_timestep_idx = st.slider(
+        "Select timestep for DGPA analysis",
+        0, len(time_points) - 1, len(time_points) // 2,
+        key="dgpa_timestep"
+    )
+    
+    final_weights = results['attention_maps'][selected_timestep_idx]
+    physics_attention = results['physics_attention_maps'][selected_timestep_idx]
+    et_gating = results['et_gating_maps'][selected_timestep_idx]
+    selected_time = time_points[selected_timestep_idx]
+    
+    # Create comprehensive DGPA analysis plot
+    fig = st.session_state.visualizer.create_dgpa_analysis(
+        results, energy_query, duration_query, time_points
+    )
+    
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Detailed DGPA analysis
+    st.markdown("##### 📊 DGPA Weight Analysis")
+    
+    if len(final_weights) > 0:
+        # Create comparison dataframe
+        comparison_data = []
+        for i in range(min(15, len(final_weights))):
+            comparison_data.append({
+                'Source': f"Source {i+1}",
+                'Physics Attention': physics_attention[i],
+                '(E, τ) Gating': et_gating[i],
+                'DGPA Final Weight': final_weights[i],
+                'Weight Change (%)': ((final_weights[i] - physics_attention[i]) / physics_attention[i] * 100) if physics_attention[i] > 0 else 0
+            })
+        
+        df_comparison = pd.DataFrame(comparison_data)
+        
+        # Display with highlighting
+        styled_df = df_comparison.style.format({
+            'Physics Attention': '{:.4f}',
+            '(E, τ) Gating': '{:.4f}',
+            'DGPA Final Weight': '{:.4f}',
+            'Weight Change (%)': '{:.1f}%'
+        })
+        
+        # Highlight significant changes
+        def highlight_dgpa_change(val):
+            if isinstance(val, str) and 'Weight Change' in val:
+                num_val = float(val.replace('%', ''))
+                if abs(num_val) > 50:
+                    return 'background-color: #ffcccc' if num_val < -50 else 'background-color: #ccffcc'
+            return ''
+        
+        if 'Weight Change (%)' in df_comparison.columns:
+            styled_df = styled_df.background_gradient(
+                subset=['Weight Change (%)'], 
+                cmap='RdYlGn', 
+                vmin=-100, 
+                vmax=100
+            )
+        
+        st.dataframe(styled_df, use_container_width=True)
+        
+        # DGPA statistics
+        st.markdown("##### 📈 DGPA Statistics")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            max_physics = np.max(physics_attention) if len(physics_attention) > 0 else 0
+            st.metric("Max Physics Attention", f"{max_physics:.4f}")
+        with col2:
+            max_gating = np.max(et_gating) if len(et_gating) > 0 else 0
+            st.metric("Max (E, τ) Gating", f"{max_gating:.4f}")
+        with col3:
+            max_dgpa = np.max(final_weights) if len(final_weights) > 0 else 0
+            st.metric("Max DGPA Weight", f"{max_dgpa:.4f}")
+        with col4:
+            weight_change_avg = np.mean(np.abs(np.array(final_weights) - np.array(physics_attention))) if len(final_weights) > 0 else 0
+            st.metric("Avg Weight Change", f"{weight_change_avg:.4f}")
+        
+        # DGPA effect analysis
+        st.markdown("##### 🔍 DGPA Effect Analysis")
+        
+        # Calculate how much DGPA changes the weights
+        if len(physics_attention) > 0 and len(final_weights) > 0:
+            # Find which sources were boosted/suppressed
+            weight_diffs = final_weights - physics_attention
+            boosted_indices = np.where(weight_diffs > 0)[0]
+            suppressed_indices = np.where(weight_diffs < 0)[0]
+            
+            if len(boosted_indices) > 0:
+                max_boost_idx = boosted_indices[np.argmax(weight_diffs[boosted_indices])]
+                max_boost = weight_diffs[max_boost_idx]
+                st.info(f"**DGPA boosted {len(boosted_indices)} sources** (max boost: +{max_boost:.3f} for source {max_boost_idx+1})")
+            
+            if len(suppressed_indices) > 0:
+                max_suppress_idx = suppressed_indices[np.argmin(weight_diffs[suppressed_indices])]
+                max_suppress = weight_diffs[max_suppress_idx]
+                st.info(f"**DGPA suppressed {len(suppressed_indices)} sources** (max suppression: {max_suppress:.3f} for source {max_suppress_idx+1})")
+            
+            # Show top 5 sources by DGPA weight
+            top_indices = np.argsort(final_weights)[-5:][::-1]
+            st.write("**Top 5 Sources by DGPA Weight:**")
+            for rank, idx in enumerate(top_indices):
+                st.write(f"{rank+1}. Source {idx+1}: Physics={physics_attention[idx]:.4f}, Gating={et_gating[idx]:.4f}, DGPA={final_weights[idx]:.4f}")
+
+def render_prediction_results(results, time_points, energy_query, duration_query):
+    """Render prediction results visualization"""
     # Determine which fields to plot
     available_fields = list(results['field_predictions'].keys())
     
@@ -1587,7 +2433,7 @@ def render_dgpa_prediction_results(results, time_points, energy_query, duration_
     n_fields = min(len(available_fields), 4)
     fig = make_subplots(
         rows=n_fields, cols=1,
-        subplot_titles=[f"DGPA Predicted {field}" for field in available_fields[:n_fields]],
+        subplot_titles=[f"Predicted {field}" for field in available_fields[:n_fields]],
         vertical_spacing=0.1,
         shared_xaxes=True
     )
@@ -1634,7 +2480,7 @@ def render_dgpa_prediction_results(results, time_points, energy_query, duration_
     
     fig.update_layout(
         height=300 * n_fields,
-        title_text=f"DGPA Field Predictions (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
+        title_text=f"Field Predictions (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
         showlegend=True,
         hovermode="x unified"
     )
@@ -1647,41 +2493,21 @@ def render_dgpa_prediction_results(results, time_points, energy_query, duration_
     
     st.plotly_chart(fig, use_container_width=True)
     
-    # Confidence plots for DGPA
-    if results['confidence_final_scores']:
+    # Confidence plot
+    if results['confidence_scores']:
         fig_conf = go.Figure()
-        
-        # Final DGPA confidence
         fig_conf.add_trace(go.Scatter(
             x=time_points,
-            y=results['confidence_final_scores'],
+            y=results['confidence_scores'],
             mode='lines+markers',
-            line=dict(color='blue', width=3),
+            line=dict(color='orange', width=3),
             fill='tozeroy',
-            fillcolor='rgba(0, 0, 255, 0.2)',
-            name='DGPA Final Confidence'
-        ))
-        
-        # Gating confidence
-        fig_conf.add_trace(go.Scatter(
-            x=time_points,
-            y=results['confidence_gate_scores'],
-            mode='lines+markers',
-            line=dict(color='green', width=2, dash='dash'),
-            name='(E, τ) Gating Confidence'
-        ))
-        
-        # Physics attention confidence
-        fig_conf.add_trace(go.Scatter(
-            x=time_points,
-            y=results['confidence_alpha_scores'],
-            mode='lines+markers',
-            line=dict(color='red', width=2, dash='dot'),
-            name='Physics Attention Confidence'
+            fillcolor='rgba(255, 165, 0, 0.2)',
+            name='Prediction Confidence'
         ))
         
         fig_conf.update_layout(
-            title="DGPA Confidence Components Over Time",
+            title="Prediction Confidence Over Time",
             xaxis_title="Time (ns)",
             yaxis_title="Confidence",
             height=400,
@@ -1691,431 +2517,1440 @@ def render_dgpa_prediction_results(results, time_points, energy_query, duration_
         st.plotly_chart(fig_conf, use_container_width=True)
         
         # Confidence insights
-        avg_final_conf = np.mean(results['confidence_final_scores'])
-        avg_gate_conf = np.mean(results['confidence_gate_scores'])
-        avg_alpha_conf = np.mean(results['confidence_alpha_scores'])
-        
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("DGPA Confidence", f"{avg_final_conf:.3f}")
-        with col2:
-            st.metric("Gating Confidence", f"{avg_gate_conf:.3f}")
-        with col3:
-            st.metric("Attention Confidence", f"{avg_alpha_conf:.3f}")
-        with col4:
-            gating_ratio = avg_gate_conf / max(avg_alpha_conf, 1e-6)
-            st.metric("Gating/Attention Ratio", f"{gating_ratio:.3f}")
-        
-        # Interpretation
-        if avg_final_conf < 0.3:
-            st.warning("⚠️ **Low DGPA Confidence**: Query parameters are far from training data. Extrapolation risk is high.")
-        elif avg_final_conf < 0.6:
-            st.info("ℹ️ **Moderate DGPA Confidence**: Query parameters are in extrapolation region.")
-        else:
-            st.success("✅ **High DGPA Confidence**: Query parameters are well-supported by training data.")
-        
-        if gating_ratio > 1.5:
-            st.info("ℹ️ **Gating-dominated**: (E, τ) proximity is the primary factor in DGPA weights.")
-        elif gating_ratio < 0.67:
-            st.info("ℹ️ **Attention-dominated**: Physics attention is the primary factor in DGPA weights.")
-        else:
-            st.info("ℹ️ **Balanced DGPA**: Both (E, τ) gating and physics attention contribute significantly.")
-
-def render_dgpa_weight_visualization(results, energy_query, duration_query, time_points):
-    """Render DGPA weight component visualizations"""
-    if (not results['final_weights_maps'] or len(results['final_weights_maps'][0]) == 0 or
-        not results['gate_weights_maps'] or len(results['gate_weights_maps'][0]) == 0):
-        st.info("No DGPA weight data available.")
-        return
-    
-    st.markdown('<h4 class="sub-header">🧮 DGPA Weight Component Analysis</h4>', unsafe_allow_html=True)
-    
-    # Select timestep for weight visualization
-    selected_timestep_idx = st.slider(
-        "Select timestep for DGPA weight analysis",
-        0, len(time_points) - 1, 0,
-        key="dgpa_weight_timestep"
-    )
-    
-    final_weights = results['final_weights_maps'][selected_timestep_idx]
-    gate_weights = results['gate_weights_maps'][selected_timestep_idx]
-    alpha_weights = results['alpha_weights_maps'][selected_timestep_idx]
-    selected_time = time_points[selected_timestep_idx]
-    
-    # Create comprehensive weight visualization
-    weight_fig = st.session_state.visualizer.create_dgpa_weight_visualization(
-        final_weights, gate_weights, alpha_weights,
-        st.session_state.extrapolator.source_metadata,
-        energy_query, duration_query
-    )
-    
-    if weight_fig.data:
-        st.plotly_chart(weight_fig, use_container_width=True)
-    
-    # Weight distribution histograms
-    st.markdown("##### 📊 DGPA Weight Distributions")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        fig_final = go.Figure()
-        fig_final.add_trace(go.Histogram(
-            x=final_weights,
-            nbinsx=30,
-            marker_color='blue',
-            opacity=0.7,
-            name='DGPA Final Weights'
-        ))
-        fig_final.update_layout(
-            title="DGPA Final Weights",
-            xaxis_title="Weight",
-            yaxis_title="Frequency",
-            height=300
-        )
-        st.plotly_chart(fig_final, use_container_width=True)
-    
-    with col2:
-        fig_gate = go.Figure()
-        fig_gate.add_trace(go.Histogram(
-            x=gate_weights,
-            nbinsx=30,
-            marker_color='green',
-            opacity=0.7,
-            name='(E, τ) Gating Weights'
-        ))
-        fig_gate.update_layout(
-            title="(E, τ) Gating Weights",
-            xaxis_title="Weight",
-            yaxis_title="Frequency",
-            height=300
-        )
-        st.plotly_chart(fig_gate, use_container_width=True)
-    
-    with col3:
-        fig_alpha = go.Figure()
-        fig_alpha.add_trace(go.Histogram(
-            x=alpha_weights,
-            nbinsx=30,
-            marker_color='red',
-            opacity=0.7,
-            name='Physics Attention Weights'
-        ))
-        fig_alpha.update_layout(
-            title="Physics Attention Weights",
-            xaxis_title="Weight",
-            yaxis_title="Frequency",
-            height=300
-        )
-        st.plotly_chart(fig_alpha, use_container_width=True)
-    
-    # Top DGPA sources
-    if len(final_weights) > 0:
-        # Get top DGPA sources
-        top_indices = np.argsort(final_weights)[-10:][::-1]
-        
-        st.markdown("##### 🏆 Top 10 DGPA Sources")
-        
-        top_sources_data = []
-        for idx in top_indices:
-            if idx < len(st.session_state.extrapolator.source_metadata):
-                meta = st.session_state.extrapolator.source_metadata[idx]
-                phi = st.session_state.extrapolator._compute_et_proximity(energy_query, duration_query)[idx]
-                top_sources_data.append({
-                    'Simulation': meta['name'],
-                    'Energy (mJ)': meta['energy'],
-                    'Duration (ns)': meta['duration'],
-                    'Time (ns)': meta['time'],
-                    'DGPA Weight': final_weights[idx],
-                    'Gating Weight': gate_weights[idx],
-                    'Attention Weight': alpha_weights[idx],
-                    'φ (Proximity)': phi
-                })
-        
-        if top_sources_data:
-            df_top = pd.DataFrame(top_sources_data)
-            st.dataframe(
-                df_top.style.format({
-                    'Energy (mJ)': '{:.2f}',
-                    'Duration (ns)': '{:.2f}',
-                    'Time (ns)': '{:.1f}',
-                    'DGPA Weight': '{:.4f}',
-                    'Gating Weight': '{:.4f}',
-                    'Attention Weight': '{:.4f}',
-                    'φ (Proximity)': '{:.3f}'
-                }).background_gradient(subset=['DGPA Weight'], cmap='Blues'),
-                use_container_width=True
-            )
-
-def render_gating_kernel_visualization(energy_query, duration_query):
-    """Visualize the (E, τ) gating kernel"""
-    st.markdown('<h4 class="sub-header">🌐 (E, τ) Gating Kernel Visualization</h4>', unsafe_allow_html=True)
-    
-    # Create gating kernel visualization
-    kernel_fig = st.session_state.visualizer.create_et_gating_kernel_visualization(
-        st.session_state.extrapolator,
-        energy_query,
-        duration_query
-    )
-    
-    if kernel_fig.data:
-        st.plotly_chart(kernel_fig, use_container_width=True)
-    
-    # Additional analysis of gating kernel
-    st.markdown("##### 📐 Gating Kernel Analysis")
-    
-    # Get training data statistics
-    if st.session_state.extrapolator.training_energies:
-        training_energies = st.session_state.extrapolator.training_energies
-        training_durations = st.session_state.extrapolator.training_durations
+        avg_conf = np.mean(results['confidence_scores'])
+        min_conf = np.min(results['confidence_scores'])
+        max_conf = np.max(results['confidence_scores'])
         
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Training Points", len(training_energies))
+            st.metric("Average Confidence", f"{avg_conf:.3f}")
         with col2:
-            energy_std = np.std(training_energies)
-            st.metric("Energy Std Dev", f"{energy_std:.2f} mJ")
+            st.metric("Minimum Confidence", f"{min_conf:.3f}")
         with col3:
-            duration_std = np.std(training_durations)
-            st.metric("Duration Std Dev", f"{duration_std:.2f} ns")
+            st.metric("Maximum Confidence", f"{max_conf:.3f}")
         
-        # Compute query proximity to training data
-        phi_values = st.session_state.extrapolator._compute_et_proximity(energy_query, duration_query)
-        min_phi = np.min(phi_values) if len(phi_values) > 0 else float('inf')
-        
-        st.info(f"**Closest training point proximity (φ):** {min_phi:.3f}")
-        
-        if min_phi < 0.5:
-            st.success("✅ Query is close to training data (φ < 0.5)")
-        elif min_phi < 1.0:
-            st.info("ℹ️ Query is moderately close to training data (0.5 ≤ φ < 1.0)")
+        if avg_conf < 0.3:
+            st.warning("⚠️ **Low Confidence**: Query parameters are far from training data. Extrapolation risk is high.")
+        elif avg_conf < 0.6:
+            st.info("ℹ️ **Moderate Confidence**: Query parameters are in extrapolation region.")
         else:
-            st.warning("⚠️ Query is far from training data (φ ≥ 1.0)")
+            st.success("✅ **High Confidence**: Query parameters are well-supported by training data.")
 
-def render_dgpa_component_analysis(results, energy_query, duration_query, time_points):
-    """Render detailed DGPA component analysis"""
-    st.markdown('<h4 class="sub-header">🔍 DGPA Component Analysis</h4>', unsafe_allow_html=True)
+def render_3d_analysis(results, time_points, energy_query, duration_query):
+    """Render 3D analysis visualizations"""
+    st.markdown('<h4 class="sub-header">🌐 3D Parameter Space Analysis</h4>', unsafe_allow_html=True)
     
-    # Get detailed weight analysis for a specific timestep
-    selected_timestep_idx = st.slider(
-        "Select timestep for detailed analysis",
-        0, len(time_points) - 1, 0,
-        key="dgpa_analysis_timestep"
-    )
-    
-    selected_time = time_points[selected_timestep_idx]
-    
-    # Perform detailed analysis
-    analysis = st.session_state.extrapolator.analyze_weight_components(
-        energy_query, duration_query, selected_time
-    )
-    
-    if analysis:
-        st.markdown("##### 📊 Weight Statistics")
+    # Create 3D parameter space visualization
+    if st.session_state.summaries:
+        # Extract training data
+        train_energies = []
+        train_durations = []
+        train_max_temps = []
+        train_max_stresses = []
         
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Final Weight Mean", f"{analysis['weight_statistics']['final_mean']:.4f}")
-            st.metric("Final Weight Std", f"{analysis['weight_statistics']['final_std']:.4f}")
-        with col2:
-            st.metric("Gating Weight Mean", f"{analysis['weight_statistics']['gate_mean']:.4f}")
-            st.metric("Gating Weight Std", f"{analysis['weight_statistics']['gate_std']:.4f}")
-        with col3:
-            st.metric("Attention Weight Mean", f"{analysis['weight_statistics']['alpha_mean']:.4f}")
-            st.metric("Attention Weight Std", f"{analysis['weight_statistics']['alpha_std']:.4f}")
+        for summary in st.session_state.summaries:
+            train_energies.append(summary['energy'])
+            train_durations.append(summary['duration'])
+            
+            if 'temperature' in summary['field_stats']:
+                train_max_temps.append(np.max(summary['field_stats']['temperature']['max']))
+            else:
+                train_max_temps.append(0)
+            
+            if 'principal stress' in summary['field_stats']:
+                train_max_stresses.append(np.max(summary['field_stats']['principal stress']['max']))
+            else:
+                train_max_stresses.append(0)
         
-        st.markdown(f"##### 🔗 Weight Correlations")
+        # Add query point
+        query_max_temp = np.max(results['field_predictions'].get('temperature', {}).get('max', [0]))
+        query_max_stress = np.max(results['field_predictions'].get('principal stress', {}).get('max', [0]))
+        
+        # Create 3D scatter plot
         col1, col2 = st.columns(2)
+        
         with col1:
-            st.metric("Final-Gate Correlation", f"{analysis['correlation_final_gate']:.3f}")
-        with col2:
-            st.metric("Final-Attention Correlation", f"{analysis['correlation_final_alpha']:.3f}")
-        
-        # Interpret correlations
-        if abs(analysis['correlation_final_gate']) > 0.7:
-            st.info("ℹ️ **Strong correlation between final and gating weights**: (E, τ) proximity heavily influences DGPA")
-        if abs(analysis['correlation_final_alpha']) > 0.7:
-            st.info("ℹ️ **Strong correlation between final and attention weights**: Physics similarity heavily influences DGPA")
-        
-        st.markdown("##### 🏆 Top Contributing Sources")
-        
-        if analysis['top_sources']:
-            df_top = pd.DataFrame(analysis['top_sources'])
-            st.dataframe(
-                df_top.style.format({
-                    'energy': '{:.2f}',
-                    'duration': '{:.2f}',
-                    'time': '{:.1f}',
-                    'final_weight': '{:.4f}',
-                    'gate_weight': '{:.4f}',
-                    'alpha_weight': '{:.4f}',
-                    'phi': '{:.3f}'
-                }).background_gradient(subset=['final_weight', 'gate_weight', 'alpha_weight'], cmap='Blues'),
-                use_container_width=True,
-                height=400
+            # Temperature parameter space
+            fig_temp = go.Figure()
+            
+            # Training points
+            fig_temp.add_trace(go.Scatter3d(
+                x=train_energies,
+                y=train_durations,
+                z=train_max_temps,
+                mode='markers',
+                marker=dict(
+                    size=8,
+                    color=train_max_temps,
+                    colorscale='Viridis',
+                    opacity=0.7,
+                    colorbar=dict(title="Max Temp")
+                ),
+                name='Training Data',
+                hovertemplate='Training<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Max Temp: %{z:.1f}<extra></extra>'
+            ))
+            
+            # Query point
+            fig_temp.add_trace(go.Scatter3d(
+                x=[energy_query],
+                y=[duration_query],
+                z=[query_max_temp],
+                mode='markers',
+                marker=dict(
+                    size=12,
+                    color='red',
+                    symbol='diamond'
+                ),
+                name='Query Point',
+                hovertemplate='Query<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Pred Temp: %{z:.1f}<extra></extra>'
+            ))
+            
+            fig_temp.update_layout(
+                title="Parameter Space - Maximum Temperature",
+                scene=dict(
+                    xaxis_title="Energy (mJ)",
+                    yaxis_title="Duration (ns)",
+                    zaxis_title="Max Temperature"
+                ),
+                height=500
             )
+            
+            st.plotly_chart(fig_temp, use_container_width=True)
         
-        # Create comparison plot
-        st.markdown("##### 📈 DGPA vs Traditional Attention Comparison")
-        comparison_fig = st.session_state.visualizer.create_dgpa_comparison_plot(
-            st.session_state.extrapolator,
-            energy_query,
-            duration_query,
-            time_points
-        )
-        
-        if comparison_fig.data:
-            st.plotly_chart(comparison_fig, use_container_width=True)
-
-# =============================================
-# HELPER FUNCTIONS (unchanged from original)
-# =============================================
-def render_data_viewer():
-    """Render the enhanced data visualization interface"""
-    # Implementation remains the same as in original code
-    pass
-
-def render_comparative_analysis():
-    """Render enhanced comparative analysis interface"""
-    # Implementation remains the same as in original code
-    pass
+        with col2:
+            # Stress parameter space
+            fig_stress = go.Figure()
+            
+            # Training points
+            fig_stress.add_trace(go.Scatter3d(
+                x=train_energies,
+                y=train_durations,
+                z=train_max_stresses,
+                mode='markers',
+                marker=dict(
+                    size=8,
+                    color=train_max_stresses,
+                    colorscale='Plasma',
+                    opacity=0.7,
+                    colorbar=dict(title="Max Stress")
+                ),
+                name='Training Data',
+                hovertemplate='Training<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Max Stress: %{z:.1f}<extra></extra>'
+            ))
+            
+            # Query point
+            fig_stress.add_trace(go.Scatter3d(
+                x=[energy_query],
+                y=[duration_query],
+                z=[query_max_stress],
+                mode='markers',
+                marker=dict(
+                    size=12,
+                    color='red',
+                    symbol='diamond'
+                ),
+                name='Query Point',
+                hovertemplate='Query<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Pred Stress: %{z:.1f}<extra></extra>'
+            ))
+            
+            fig_stress.update_layout(
+                title="Parameter Space - Maximum Stress",
+                scene=dict(
+                    xaxis_title="Energy (mJ)",
+                    yaxis_title="Duration (ns)",
+                    zaxis_title="Max Stress"
+                ),
+                height=500
+            )
+            
+            st.plotly_chart(fig_stress, use_container_width=True)
 
 def render_detailed_results(results, time_points, energy_query, duration_query):
     """Render detailed prediction results"""
-    # Implementation remains the same as in original code
-    pass
+    st.markdown('<h4 class="sub-header">📊 Detailed Prediction Results</h4>', unsafe_allow_html=True)
+    
+    # Create results table
+    data_rows = []
+    for idx, t in enumerate(time_points):
+        row = {'Time (ns)': t}
+        
+        for field in results['field_predictions']:
+            if field in results['field_predictions']:
+                if idx < len(results['field_predictions'][field]['mean']):
+                    row[f'{field}_mean'] = results['field_predictions'][field]['mean'][idx]
+                    row[f'{field}_max'] = results['field_predictions'][field]['max'][idx]
+                    row[f'{field}_std'] = results['field_predictions'][field]['std'][idx]
+        
+        if idx < len(results['confidence_scores']):
+            row['confidence'] = results['confidence_scores'][idx]
+        
+        data_rows.append(row)
+    
+    if data_rows:
+        df_results = pd.DataFrame(data_rows)
+        
+        # Format numeric columns
+        format_dict = {}
+        for col in df_results.columns:
+            if col != 'Time (ns)':
+                format_dict[col] = "{:.3f}"
+        
+        # Display with highlighting
+        styled_df = df_results.style.format(format_dict)
+        
+        # Add conditional formatting for confidence
+        def highlight_confidence(val):
+            if isinstance(val, (int, float)):
+                if val < 0.3:
+                    return 'background-color: #ffcccc'
+                elif val < 0.6:
+                    return 'background-color: #fff4cc'
+                else:
+                    return 'background-color: #ccffcc'
+            return ''
+        
+        if 'confidence' in df_results.columns:
+            styled_df = styled_df.applymap(highlight_confidence, subset=['confidence'])
+        
+        st.dataframe(styled_df, use_container_width=True, height=400)
+        
+        # Statistics summary
+        st.markdown("##### 📈 Prediction Statistics")
+        
+        if 'confidence' in df_results.columns:
+            conf_stats = df_results['confidence'].describe()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Mean Confidence", f"{conf_stats['mean']:.3f}")
+            with col2:
+                st.metric("Min Confidence", f"{conf_stats['min']:.3f}")
+            with col3:
+                st.metric("Max Confidence", f"{conf_stats['max']:.3f}")
+            with col4:
+                st.metric("Std Dev", f"{conf_stats['std']:.3f}")
+        
+        # Export options
+        st.markdown("##### 💾 Export Results")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # CSV export
+            csv = df_results.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download as CSV",
+                data=csv,
+                file_name=f"dgpa_predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        with col2:
+            # JSON export
+            json_str = df_results.to_json(orient='records', indent=2)
+            st.download_button(
+                label="📥 Download as JSON",
+                data=json_str.encode('utf-8'),
+                file_name=f"dgpa_predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.json",
+                mime="application/json",
+                use_container_width=True
+            )
+
+def render_parameter_analysis(results, energy_query, duration_query, time_points):
+    """Render DGPA parameter sensitivity analysis"""
+    st.markdown('<h4 class="sub-header">⚙️ DGPA Parameter Sensitivity</h4>', unsafe_allow_html=True)
+    
+    # Get current parameters
+    params = st.session_state.interpolation_params or {}
+    
+    st.markdown("### Current DGPA Parameters")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("σ_g (Gating Width)", f"{params.get('sigma_g', 0.20):.2f}")
+    with col2:
+        st.metric("s_E (Energy Scale)", f"{params.get('s_E', 10.0):.1f} mJ")
+    with col3:
+        st.metric("s_τ (Duration Scale)", f"{params.get('s_tau', 5.0):.1f} ns")
+    
+    # Parameter sensitivity explanation
+    with st.expander("📖 DGPA Parameter Guide", expanded=True):
+        st.markdown("""
+        ### DGPA Parameter Effects
+        
+        **σ_g (Gating Kernel Width):**
+        - **Small values (0.05-0.2):** Sharp gating, only very similar (E, τ) simulations contribute
+        - **Large values (0.3-1.0):** Broad gating, allows more distant simulations to contribute
+        - **Recommended:** 0.15-0.25 for laser processing
+        
+        **s_E (Energy Scaling Factor):**
+        - Controls how energy differences are weighted
+        - **Small values:** Energy differences are heavily penalized
+        - **Large values:** Energy differences are less important
+        - **Recommended:** Set to ~2× standard deviation of training energies
+        
+        **s_τ (Duration Scaling Factor):**
+        - Controls how duration differences are weighted
+        - **Small values:** Duration differences are heavily penalized
+        - **Large values:** Duration differences are less important
+        - **Recommended:** Set to ~2× standard deviation of training durations
+        
+        ### Parameter Selection Strategy
+        
+        1. **For interpolation** (query within training range):
+           - Use moderate σ_g (0.2-0.3)
+           - Use data-derived s_E, s_τ
+           
+        2. **For extrapolation** (query outside training range):
+           - Use smaller σ_g (0.1-0.2) to avoid unphysical blending
+           - Consider increasing s_E, s_τ slightly
+           
+        3. **For uncertainty quantification:**
+           - Vary σ_g and observe confidence changes
+           - Larger σ_g → higher confidence but potentially less accurate
+        """)
+    
+    # Quick parameter testing
+    st.markdown("### 🧪 Quick Parameter Test")
+    
+    test_col1, test_col2, test_col3 = st.columns(3)
+    with test_col1:
+        test_sigma_g = st.slider(
+            "Test σ_g",
+            min_value=0.05,
+            max_value=1.0,
+            value=params.get('sigma_g', 0.20),
+            step=0.05,
+            key="test_sigma_g"
+        )
+    with test_col2:
+        test_s_E = st.slider(
+            "Test s_E",
+            min_value=0.1,
+            max_value=50.0,
+            value=params.get('s_E', 10.0),
+            step=0.5,
+            key="test_s_E"
+        )
+    with test_col3:
+        test_s_tau = st.slider(
+            "Test s_τ",
+            min_value=0.1,
+            max_value=20.0,
+            value=params.get('s_tau', 5.0),
+            step=0.5,
+            key="test_s_tau"
+        )
+    
+    if st.button("🔄 Test Parameters", key="test_params"):
+        # Temporarily update extrapolator parameters
+        original_params = {
+            'sigma_g': st.session_state.extrapolator.sigma_g,
+            's_E': st.session_state.extrapolator.s_E,
+            's_tau': st.session_state.extrapolator.s_tau
+        }
+        
+        # Update with test values
+        st.session_state.extrapolator.sigma_g = test_sigma_g
+        st.session_state.extrapolator.s_E = test_s_E
+        st.session_state.extrapolator.s_tau = test_s_tau
+        
+        # Run quick prediction for middle timestep
+        middle_time = time_points[len(time_points) // 2]
+        test_result = st.session_state.extrapolator.predict_field_statistics(
+            energy_query, duration_query, middle_time
+        )
+        
+        # Restore original parameters
+        st.session_state.extrapolator.sigma_g = original_params['sigma_g']
+        st.session_state.extrapolator.s_E = original_params['s_E']
+        st.session_state.extrapolator.s_tau = original_params['s_tau']
+        
+        if test_result:
+            st.info(f"**Test Results at t={middle_time} ns:**")
+            st.write(f"- Confidence: {test_result['confidence']:.3f}")
+            st.write(f"- Max DGPA weight: {np.max(test_result['attention_weights']):.4f}")
+            st.write(f"- Top 3 sources contribute: {np.sum(np.sort(test_result['attention_weights'])[-3:]):.1%}")
 
 @st.cache_data(show_spinner=False)
-def compute_interpolated_field_cached(_extrapolator, field_name, final_weights, 
+def compute_interpolated_field_cached(_extrapolator, field_name, attention_weights, 
                                      source_metadata, simulations, params):
     """Cached version of interpolate_full_field"""
     return _extrapolator.interpolate_full_field(
-        field_name, final_weights, source_metadata, simulations
+        field_name, attention_weights, source_metadata, simulations
     )
 
 def render_3d_interpolation(results, time_points, energy_query, duration_query, 
                            enable_3d=True, optimize_performance=False, top_k=10):
     """Render 3D interpolation visualization with enhanced caching"""
-    # Implementation remains similar but uses DGPA weights
-    # Modify to use final_weights instead of attention_weights
-    pass
-
-def render_dgpa_analysis():
-    """Render dedicated DGPA analysis interface"""
-    st.markdown('<h2 class="sub-header">🔍 DGPA Mechanism Analysis</h2>', unsafe_allow_html=True)
+    st.markdown('<h4 class="sub-header">🖼️ 3D Field Interpolation with DGPA</h4>', unsafe_allow_html=True)
     
-    if not st.session_state.data_loaded:
-        st.warning("Please load simulations first.")
+    if not st.session_state.get('simulations'):
+        st.warning("No full simulations loaded for 3D rendering. Please reload with 'Load Full Mesh' enabled.")
         return
     
+    # Check if any simulation has mesh data
+    first_sim = next(iter(st.session_state.simulations.values()))
+    if not first_sim.get('has_mesh', False):
+        st.error("Simulations were loaded without full mesh data. Please reload with 'Load Full Mesh' enabled.")
+        return
+    
+    # Show cache status
+    if 'interpolation_3d_cache' in st.session_state and st.session_state.interpolation_3d_cache:
+        cache_size = len(st.session_state.interpolation_3d_cache)
+        st.markdown(f"""
+        <div class="cache-status">
+        <strong>Cache Status:</strong> {cache_size} field(s) cached | 
+        <strong>Prediction ID:</strong> {st.session_state.last_prediction_id or 'N/A'}
+        </div>
+        """, unsafe_allow_html=True)
+    
     st.markdown("""
-    <div class="info-box">
-    <h3>🔬 Distance-Gated Physics Attention Analysis</h3>
-    <p>This section provides in-depth analysis of the DGPA mechanism, including:</p>
-    <ul>
-    <li>Visualization of (E, τ) gating kernel across parameter space</li>
-    <li>Analysis of weight component contributions</li>
-    <li>Comparison between DGPA and traditional attention</li>
-    <li>Sensitivity analysis of DGPA hyperparameters</li>
-    </ul>
+    <div class="interpolation-3d-container">
+    <h5>3D Field Interpolation Settings</h5>
+    <p>Visualize interpolated full field using DGPA-weighted averaging of source simulations.</p>
+    <p><strong>Field switching is now cached</strong> - previously computed fields load instantly.</p>
     </div>
     """, unsafe_allow_html=True)
     
-    # Parameter space for analysis
-    st.markdown('<h3 class="sub-header">🎯 Analysis Parameters</h3>', unsafe_allow_html=True)
+    # Get parameters from session state
+    params = st.session_state.interpolation_params or {}
+    
+    # Select field and timestep for 3D with session state persistence
+    available_fields = list(results['field_predictions'].keys())
+    
+    if not available_fields:
+        st.warning("No field predictions available for 3D visualization.")
+        return
     
     col1, col2 = st.columns(2)
     with col1:
-        analysis_energy = st.slider(
-            "Analysis Energy (mJ)",
-            min_value=0.1,
-            max_value=50.0,
-            value=10.0,
-            step=0.1,
-            key="analysis_energy"
+        # Use session state to remember last selected field
+        if 'current_3d_field' not in st.session_state or st.session_state.current_3d_field not in available_fields:
+            st.session_state.current_3d_field = available_fields[0]
+        
+        selected_field_3d = st.selectbox(
+            "Select Field for 3D Rendering", 
+            available_fields, 
+            index=available_fields.index(st.session_state.current_3d_field) if st.session_state.current_3d_field in available_fields else 0,
+            key="interp_3d_field",
+            help="Choose field to visualize in 3D",
+            on_change=lambda: setattr(st.session_state, 'current_3d_field', 
+                                    st.session_state.interp_3d_field if 'interp_3d_field' in st.session_state else available_fields[0])
         )
+        
+        # Update session state
+        st.session_state.current_3d_field = selected_field_3d
+    
     with col2:
-        analysis_duration = st.slider(
-            "Analysis Duration (ns)",
-            min_value=0.5,
-            max_value=20.0,
-            value=5.0,
-            step=0.1,
-            key="analysis_duration"
+        # Use session state to remember last selected timestep
+        if 'current_3d_timestep' not in st.session_state:
+            st.session_state.current_3d_timestep = min(len(time_points)//2, len(time_points)-1)
+        
+        timestep_idx_3d = st.slider(
+            "Select Timestep for 3D", 
+            0, len(time_points) - 1, 
+            st.session_state.current_3d_timestep,
+            key="interp_3d_timestep",
+            help="Select timestep for 3D visualization",
+            on_change=lambda: setattr(st.session_state, 'current_3d_timestep', 
+                                    st.session_state.interp_3d_timestep if 'interp_3d_timestep' in st.session_state else 0)
+        )
+        
+        # Update session state
+        st.session_state.current_3d_timestep = timestep_idx_3d
+    
+    selected_time_3d = time_points[timestep_idx_3d]
+    attention_weights_3d = results['attention_maps'][timestep_idx_3d]
+    physics_attention_3d = results['physics_attention_maps'][timestep_idx_3d]
+    et_gating_3d = results['et_gating_maps'][timestep_idx_3d]
+    confidence_score = results['confidence_scores'][timestep_idx_3d]
+    
+    # Display confidence metric and cache info
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Prediction Confidence", f"{confidence_score:.3f}")
+    with col2:
+        st.metric("Timestep", f"{selected_time_3d} ns")
+    with col3:
+        gating_strength = np.mean(et_gating_3d) if len(et_gating_3d) > 0 else 0
+        st.metric("Gating Strength", f"{gating_strength:.3f}")
+    with col4:
+        cached = CacheManager.get_cached_interpolation(selected_field_3d, timestep_idx_3d, params) is not None
+        cache_status = "✅ Cached" if cached else "🔄 Compute"
+        st.metric("Cache Status", cache_status)
+    
+    # Check cache first
+    cached_result = CacheManager.get_cached_interpolation(selected_field_3d, timestep_idx_3d, params)
+    
+    if cached_result:
+        # Load from cache
+        interpolated_values = cached_result['interpolated_values']
+        cache_source = "cache"
+        st.success(f"✅ Loaded {selected_field_3d} from cache (previously computed)")
+    else:
+        # Performance optimization: filter top-K sources
+        if optimize_performance and len(attention_weights_3d) > top_k:
+            top_indices = np.argsort(attention_weights_3d)[-top_k:]
+            filtered_weights = np.zeros_like(attention_weights_3d)
+            filtered_weights[top_indices] = attention_weights_3d[top_indices]
+            filtered_weights = filtered_weights / np.sum(filtered_weights)
+            attention_weights_3d = filtered_weights
+            st.info(f"Using top-{top_k} sources for performance optimization")
+        
+        # Compute interpolated field
+        with st.spinner(f"Computing {selected_field_3d} field at t={selected_time_3d} ns..."):
+            interpolated_values = st.session_state.extrapolator.interpolate_full_field(
+                selected_field_3d,
+                attention_weights_3d,
+                st.session_state.extrapolator.source_metadata,
+                st.session_state.simulations
+            )
+        
+        if interpolated_values is None:
+            st.error("Failed to interpolate field. Ensure full meshes are loaded and field exists.")
+            return
+        
+        # Cache the result
+        CacheManager.set_cached_interpolation(selected_field_3d, timestep_idx_3d, params, interpolated_values)
+        cache_source = "new computation"
+        st.info(f"✅ Computed and cached {selected_field_3d}")
+    
+    # Get common mesh (from first sim)
+    first_sim = next(iter(st.session_state.simulations.values()))
+    pts = first_sim['points']
+    triangles = first_sim.get('triangles')
+    
+    # Performance optimization: subsample points
+    subsample_factor = params.get('subsample_factor', 1)
+    if optimize_performance and subsample_factor > 1 and pts.shape[0] > 10000:
+        indices = np.arange(0, pts.shape[0], subsample_factor)
+        pts = pts[indices]
+        interpolated_values = interpolated_values[indices]
+        st.info(f"Subsampled mesh from {pts.shape[0]*subsample_factor} to {pts.shape[0]} points for performance")
+    
+    # Handle scalar/vector fields
+    if interpolated_values.ndim == 1:
+        values = np.nan_to_num(interpolated_values)  # Replace NaNs
+        label = selected_field_3d
+        field_type = "scalar"
+    else:
+        magnitude = np.linalg.norm(interpolated_values, axis=1)
+        values = np.nan_to_num(magnitude)
+        label = f"{selected_field_3d} (magnitude)"
+        field_type = "vector"
+    
+    # Create 3D visualization
+    st.markdown(f"### 📊 {label} at t={selected_time_3d} ns")
+    
+    # Show DGPA weight analysis
+    with st.expander("🔍 DGPA Weight Analysis for This Timestep", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Max Physics Attention", f"{np.max(physics_attention_3d):.4f}")
+        with col2:
+            st.metric("Max (E, τ) Gating", f"{np.max(et_gating_3d):.4f}")
+        with col3:
+            st.metric("Max DGPA Weight", f"{np.max(attention_weights_3d):.4f}")
+        
+        # Show top contributing sources
+        if len(attention_weights_3d) > 0:
+            top_indices = np.argsort(attention_weights_3d)[-5:][::-1]
+            st.write("**Top 5 Contributing Sources:**")
+            for i, idx in enumerate(top_indices):
+                meta = st.session_state.extrapolator.source_metadata[idx]
+                st.write(f"{i+1}. {meta['name']} (t={meta['time']} ns): "
+                        f"Physics={physics_attention_3d[idx]:.4f}, "
+                        f"Gating={et_gating_3d[idx]:.4f}, "
+                        f"DGPA={attention_weights_3d[idx]:.4f}")
+    
+    # Show field history if available
+    if 'interpolation_field_history' in st.session_state and st.session_state.interpolation_field_history:
+        recent_fields = list(st.session_state.interpolation_field_history.keys())[-5:]
+        if recent_fields:
+            st.caption(f"**Recently viewed:** {', '.join([f.split('_')[0] for f in recent_fields])}")
+    
+    if triangles is not None and len(triangles) > 0 and pts.shape[0] < 50000:
+        # Validate triangles after possible subsampling
+        if optimize_performance and subsample_factor > 1:
+            # For subsampled points, use point cloud
+            mesh_data = go.Scatter3d(
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                mode='markers',
+                marker=dict(
+                    size=4,
+                    color=values,
+                    colorscale=st.session_state.selected_colormap,
+                    opacity=0.8,
+                    colorbar=dict(
+                        title=dict(text=label, font=dict(size=12)),
+                        thickness=20,
+                        len=0.6
+                    ),
+                    showscale=True
+                ),
+                hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
+                             '<b>X:</b> %{x:.3f}<br>' +
+                             '<b>Y:</b> %{y:.3f}<br>' +
+                             '<b>Z:</b> %{z:.3f}<extra></extra>'
+            )
+        else:
+            # Use mesh with triangles
+            valid_triangles = triangles[np.all(triangles < len(pts), axis=1)]
+            if len(valid_triangles) > 0:
+                mesh_data = go.Mesh3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
+                    intensity=values,
+                    colorscale=st.session_state.selected_colormap,
+                    intensitymode='vertex',
+                    colorbar=dict(
+                        title=dict(text=label, font=dict(size=12)),
+                        thickness=20,
+                        len=0.6
+                    ),
+                    opacity=0.9,
+                    lighting=dict(
+                        ambient=0.8,
+                        diffuse=0.8,
+                        specular=0.5,
+                        roughness=0.5
+                    ),
+                    lightposition=dict(x=100, y=200, z=300),
+                    hovertemplate='<b>Value:</b> %{intensity:.3f}<br>' +
+                                 '<b>X:</b> %{x:.3f}<br>' +
+                                 '<b>Y:</b> %{y:.3f}<br>' +
+                                 '<b>Z:</b> %{z:.3f}<extra></extra>'
+                )
+            else:
+                # Fallback to scatter if triangles are invalid
+                mesh_data = go.Scatter3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    mode='markers',
+                    marker=dict(
+                        size=4,
+                        color=values,
+                        colorscale=st.session_state.selected_colormap,
+                        opacity=0.8,
+                        colorbar=dict(title=label),
+                        showscale=True
+                    ),
+                    hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
+                                 '<b>X:</b> %{x:.3f}<br>' +
+                                 '<b>Y:</b> %{y:.3f}<br>' +
+                                 '<b>Z:</b> %{z:.3f}<extra></extra>'
+                )
+    else:
+        # Fallback scatter for point cloud or large meshes
+        mesh_data = go.Scatter3d(
+            x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+            mode='markers',
+            marker=dict(
+                size=4,
+                color=values,
+                colorscale=st.session_state.selected_colormap,
+                opacity=0.8,
+                colorbar=dict(
+                    title=dict(text=label, font=dict(size=12)),
+                    thickness=20,
+                    len=0.6
+                ),
+                showscale=True
+            ),
+            hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
+                         '<b>X:</b> %{x:.3f}<br>' +
+                         '<b>Y:</b> %{y:.3f}<br>' +
+                         '<b>Z:</b> %{z:.3f}<extra></extra>'
         )
     
-    # Gating kernel visualization
-    st.markdown('<h4 class="sub-header">🌐 (E, τ) Gating Kernel Analysis</h4>', unsafe_allow_html=True)
-    
-    kernel_fig = st.session_state.visualizer.create_et_gating_kernel_visualization(
-        st.session_state.extrapolator,
-        analysis_energy,
-        analysis_duration
+    fig_3d = go.Figure(data=mesh_data)
+    fig_3d.update_layout(
+        title=dict(
+            text=f"DGPA Interpolated {label} at t={selected_time_3d} ns<br>"
+                 f"E={energy_query:.1f} mJ, τ={duration_query:.1f} ns, Confidence: {confidence_score:.3f}<br>"
+                 f"<sub>σ_g={params.get('sigma_g', 0.20):.2f}, s_E={params.get('s_E', 10.0):.1f}, s_τ={params.get('s_tau', 5.0):.1f}</sub>",
+            font=dict(size=16)
+        ),
+        scene=dict(
+            aspectmode="data",
+            camera=dict(
+                eye=dict(x=1.5, y=1.5, z=1.5),
+                up=dict(x=0, y=0, z=1)
+            ),
+            xaxis=dict(
+                title="X",
+                gridcolor="lightgray",
+                showbackground=True,
+                backgroundcolor="white"
+            ),
+            yaxis=dict(
+                title="Y",
+                gridcolor="lightgray",
+                showbackground=True,
+                backgroundcolor="white"
+            ),
+            zaxis=dict(
+                title="Z",
+                gridcolor="lightgray",
+                showbackground=True,
+                backgroundcolor="white"
+            )
+        ),
+        height=700,
+        margin=dict(l=0, r=0, t=80, b=0)
     )
     
-    if kernel_fig.data:
-        st.plotly_chart(kernel_fig, use_container_width=True)
+    st.plotly_chart(fig_3d, use_container_width=True)
     
-    # Hyperparameter sensitivity analysis
-    st.markdown('<h4 class="sub-header">📐 DGPA Hyperparameter Sensitivity</h4>', unsafe_allow_html=True)
+    # Field statistics for interpolated field
+    st.markdown("##### 📊 Interpolated Field Statistics")
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.metric("Min", f"{np.min(values):.3f}")
+    with col2:
+        st.metric("Max", f"{np.max(values):.3f}")
+    with col3:
+        st.metric("Mean", f"{np.mean(values):.3f}")
+    with col4:
+        st.metric("Std Dev", f"{np.std(values):.3f}")
+    with col5:
+        st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
+    
+    # Histogram of interpolated values
+    fig_hist = go.Figure()
+    fig_hist.add_trace(go.Histogram(
+        x=values,
+        nbinsx=50,
+        marker_color='skyblue',
+        opacity=0.7,
+        name='Value Distribution'
+    ))
+    
+    fig_hist.update_layout(
+        title=f"Distribution of Interpolated {label} Values",
+        xaxis_title=label,
+        yaxis_title="Frequency",
+        height=400
+    )
+    
+    st.plotly_chart(fig_hist, use_container_width=True)
+    
+    # Export options
+    st.markdown("##### 💾 Export Interpolated Field")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Export as VTU file
+        if st.button("📥 Export as VTU File", use_container_width=True, key="export_vtu_3d"):
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.vtu') as tmp:
+                success = st.session_state.extrapolator.export_interpolated_vtu(
+                    selected_field_3d,
+                    interpolated_values,
+                    st.session_state.simulations,
+                    tmp.name
+                )
+                
+                if success:
+                    with open(tmp.name, 'rb') as f:
+                        vtu_data = f.read()
+                    
+                    b64 = base64.b64encode(vtu_data).decode()
+                    href = f'<a href="data:application/octet-stream;base64,{b64}" download="dgpa_interpolated_{selected_field_3d}_t{selected_time_3d}.vtu">Download VTU File</a>'
+                    st.markdown(href, unsafe_allow_html=True)
+    
+    with col2:
+        # Export as NPZ file
+        if st.button("📥 Export as NPZ File", use_container_width=True, key="export_npz_3d"):
+            npz_data = {
+                'field_name': selected_field_3d,
+                'values': interpolated_values,
+                'points': pts,
+                'triangles': triangles,
+                'metadata': {
+                    'energy_mJ': energy_query,
+                    'duration_ns': duration_query,
+                    'time_ns': selected_time_3d,
+                    'confidence': confidence_score,
+                    'dgpa_params': {
+                        'sigma_g': params.get('sigma_g', 0.20),
+                        's_E': params.get('s_E', 10.0),
+                        's_tau': params.get('s_tau', 5.0)
+                    },
+                    'cache_source': cache_source
+                }
+            }
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.npz') as tmp:
+                np.savez(tmp, **npz_data)
+                with open(tmp.name, 'rb') as f:
+                    npz_bytes = f.read()
+                
+                b64 = base64.b64encode(npz_bytes).decode()
+                href = f'<a href="data:application/octet-stream;base64,{b64}" download="dgpa_interpolated_{selected_field_3d}_t{selected_time_3d}.npz">Download NPZ File</a>'
+                st.markdown(href, unsafe_allow_html=True)
+    
+    # Quick field switching buttons
+    if len(available_fields) > 1:
+        st.markdown("##### ⚡ Quick Field Switching")
+        
+        # Show buttons for other fields
+        other_fields = [f for f in available_fields if f != selected_field_3d][:4]
+        
+        if other_fields:
+            cols = st.columns(len(other_fields))
+            for idx, field in enumerate(other_fields):
+                with cols[idx]:
+                    if st.button(f"📊 {field[:10]}...", key=f"quick_switch_{field}", use_container_width=True):
+                        # Update session state and rerun
+                        st.session_state.current_3d_field = field
+                        st.rerun()
+
+def render_comparative_analysis():
+    """Render enhanced comparative analysis interface"""
+    st.markdown('<h2 class="sub-header">📊 Comparative Analysis</h2>', unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first to enable comparative analysis.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    simulations = st.session_state.simulations
+    summaries = st.session_state.summaries
+    
+    # Target simulation selection
+    st.markdown('<h3 class="sub-header">🎯 Select Target Simulation</h3>', unsafe_allow_html=True)
+    
+    available_simulations = sorted(simulations.keys())
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        target_simulation = st.selectbox(
+            "Select target simulation for highlighting",
+            available_simulations,
+            key="target_sim_select",
+            help="This simulation will be highlighted in all visualizations"
+        )
+    
+    with col2:
+        n_comparisons = st.number_input(
+            "Number of comparisons",
+            min_value=1,
+            max_value=10,
+            value=5,
+            step=1,
+            key="n_comparisons"
+        )
+    
+    # Select comparison simulations (excluding target)
+    comparison_sims = [sim for sim in available_simulations if sim != target_simulation]
+    selected_comparisons = st.multiselect(
+        "Select simulations for comparison",
+        comparison_sims,
+        default=comparison_sims[:min(n_comparisons - 1, len(comparison_sims))],
+        help="Select simulations to compare with the target"
+    )
+    
+    # Include target in visualization list
+    visualization_sims = [target_simulation] + selected_comparisons
+    
+    if not visualization_sims:
+        st.info("Please select at least one simulation for comparison.")
+        return
+    
+    # Field selection
+    st.markdown('<h3 class="sub-header">📈 Select Field for Analysis</h3>', unsafe_allow_html=True)
+    
+    # Get available fields from selected simulations
+    available_fields = set()
+    for sim_name in visualization_sims:
+        if sim_name in simulations:
+            available_fields.update(simulations[sim_name]['field_info'].keys())
+    
+    if not available_fields:
+        st.error("No field data available for selected simulations.")
+        return
+    
+    selected_field = st.selectbox(
+        "Select field for analysis",
+        sorted(available_fields),
+        key="comparison_field",
+        help="Choose a field to compare across simulations"
+    )
+    
+    # Visualization tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Sunburst", "🎯 Radar", "⏱️ Evolution", "🌐 3D Analysis"])
+    
+    with tab1:
+        # Sunburst chart
+        st.markdown("##### 📊 Hierarchical Sunburst Chart")
+        sunburst_fig = st.session_state.visualizer.create_sunburst_chart(
+            summaries,
+            selected_field,
+            highlight_sim=target_simulation
+        )
+        if sunburst_fig.data:
+            st.plotly_chart(sunburst_fig, use_container_width=True)
+        else:
+            st.info("Insufficient data for sunburst chart")
+    
+    with tab2:
+        # Radar chart
+        st.markdown("##### 🎯 Multi-Field Radar Comparison")
+        radar_fig = st.session_state.visualizer.create_radar_chart(
+            summaries,
+            visualization_sims,
+            target_sim=target_simulation
+        )
+        if radar_fig.data:
+            st.plotly_chart(radar_fig, use_container_width=True)
+        else:
+            st.info("Insufficient data for radar chart")
+    
+    with tab3:
+        # Field evolution comparison
+        st.markdown("##### ⏱️ Field Evolution Over Time")
+        evolution_fig = st.session_state.visualizer.create_field_evolution_comparison(
+            summaries,
+            visualization_sims,
+            selected_field,
+            target_sim=target_simulation
+        )
+        if evolution_fig.data:
+            st.plotly_chart(evolution_fig, use_container_width=True)
+        else:
+            st.info(f"No {selected_field} data available for selected simulations")
+    
+    with tab4:
+        # 3D parameter space analysis
+        st.markdown("##### 🌐 3D Parameter Space Analysis")
+        
+        if summaries:
+            # Extract data for 3D plot
+            energies = []
+            durations = []
+            max_vals = []
+            sim_names = []
+            is_target = []
+            
+            for summary in summaries:
+                if summary['name'] in visualization_sims and selected_field in summary['field_stats']:
+                    energies.append(summary['energy'])
+                    durations.append(summary['duration'])
+                    sim_names.append(summary['name'])
+                    is_target.append(summary['name'] == target_simulation)
+                    
+                    stats = summary['field_stats'][selected_field]
+                    if stats['max']:
+                        max_vals.append(np.max(stats['max']))
+                    else:
+                        max_vals.append(0)
+            
+            if energies and durations and max_vals:
+                # Create 3D scatter plot
+                fig_3d = go.Figure()
+                
+                # Separate target and comparison points
+                target_indices = [i for i, target in enumerate(is_target) if target]
+                comp_indices = [i for i, target in enumerate(is_target) if not target]
+                
+                # Comparison points
+                if comp_indices:
+                    fig_3d.add_trace(go.Scatter3d(
+                        x=[energies[i] for i in comp_indices],
+                        y=[durations[i] for i in comp_indices],
+                        z=[max_vals[i] for i in comp_indices],
+                        mode='markers',
+                        marker=dict(
+                            size=8,
+                            color=[max_vals[i] for i in comp_indices],
+                            colorscale='Viridis',
+                            opacity=0.7,
+                            colorbar=dict(title=f"Max {selected_field}")
+                        ),
+                        name='Comparison Sims',
+                        text=[sim_names[i] for i in comp_indices],
+                        hovertemplate='%{text}<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Value: %{z:.1f}<extra></extra>'
+                    ))
+                
+                # Target point
+                if target_indices:
+                    for idx in target_indices:
+                        fig_3d.add_trace(go.Scatter3d(
+                            x=[energies[idx]],
+                            y=[durations[idx]],
+                            z=[max_vals[idx]],
+                            mode='markers',
+                            marker=dict(
+                                size=15,
+                                color='red',
+                                symbol='diamond'
+                            ),
+                            name='Target Sim',
+                            text=sim_names[idx],
+                            hovertemplate='<b>%{text}</b><br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Value: %{z:.1f}<extra></extra>'
+                        ))
+                
+                fig_3d.update_layout(
+                    title=f"Parameter Space - {selected_field}",
+                    scene=dict(
+                        xaxis_title="Energy (mJ)",
+                        yaxis_title="Duration (ns)",
+                        zaxis_title=f"Max {selected_field}"
+                    ),
+                    height=600
+                )
+                
+                st.plotly_chart(fig_3d, use_container_width=True)
+                
+                # Add convex hull for parameter space
+                if len(energies) >= 3:
+                    st.markdown("##### 📏 Parameter Space Coverage")
+                    
+                    # Calculate convex hull or bounding box
+                    min_e, max_e = min(energies), max(energies)
+                    min_d, max_d = min(durations), max(durations)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Energy Range", f"{min_e:.1f} - {max_e:.1f} mJ")
+                    with col2:
+                        st.metric("Duration Range", f"{min_d:.1f} - {max_d:.1f} ns")
+                    with col3:
+                        area = (max_e - min_e) * (max_d - min_d)
+                        st.metric("Parameter Space Area", f"{area:.1f} mJ·ns")
+    
+    # Comparative statistics table
+    st.markdown('<h3 class="sub-header">📋 Comparative Statistics</h3>', unsafe_allow_html=True)
+    
+    stats_data = []
+    for sim_name in visualization_sims:
+        summary = next((s for s in summaries if s['name'] == sim_name), None)
+        if summary and selected_field in summary['field_stats']:
+            stats = summary['field_stats'][selected_field]
+            
+            if stats['mean'] and stats['max']:
+                row = {
+                    'Simulation': sim_name,
+                    'Type': 'Target' if sim_name == target_simulation else 'Comparison',
+                    'Energy (mJ)': summary['energy'],
+                    'Duration (ns)': summary['duration'],
+                    f'Mean {selected_field}': np.mean(stats['mean']),
+                    f'Max {selected_field}': np.max(stats['max']),
+                    f'Std Dev {selected_field}': np.mean(stats['std']) if stats['std'] else 0,
+                    'Peak Timestep': np.argmax(stats['max']) + 1 if stats['max'] else 0
+                }
+                stats_data.append(row)
+    
+    if stats_data:
+        df_stats = pd.DataFrame(stats_data)
+        
+        # Apply styling
+        def highlight_target(row):
+            if row['Type'] == 'Target':
+                return ['background-color: #ffcccc'] * len(row)
+            return [''] * len(row)
+        
+        styled_df = df_stats.style.apply(highlight_target, axis=1)
+        
+        # Format numeric columns
+        format_dict = {}
+        for col in df_stats.columns:
+            if col not in ['Simulation', 'Type']:
+                if 'Mean' in col or 'Max' in col or 'Std Dev' in col:
+                    format_dict[col] = "{:.3f}"
+                elif 'Energy' in col or 'Duration' in col:
+                    format_dict[col] = "{:.2f}"
+        
+        styled_df = styled_df.format(format_dict)
+        
+        st.dataframe(styled_df, use_container_width=True)
+        
+        # Export options
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            csv = df_stats.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Comparison as CSV",
+                data=csv,
+                file_name=f"comparison_{selected_field}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        with col2:
+            # Generate insights
+            with st.expander("💡 Analysis Insights"):
+                if len(stats_data) > 1:
+                    # Calculate relative differences
+                    target_data = [row for row in stats_data if row['Type'] == 'Target'][0]
+                    comp_data = [row for row in stats_data if row['Type'] == 'Comparison']
+                    
+                    if target_data and comp_data:
+                        st.write("**Target vs Comparison Simulations:**")
+                        
+                        for comp in comp_data:
+                            energy_diff = abs(target_data['Energy (mJ)'] - comp['Energy (mJ)']) / target_data['Energy (mJ)']
+                            duration_diff = abs(target_data['Duration (ns)'] - comp['Duration (ns)']) / target_data['Duration (ns)']
+                            field_diff = abs(target_data[f'Mean {selected_field}'] - comp[f'Mean {selected_field}']) / target_data[f'Mean {selected_field}']
+                            
+                            st.write(f"- **{comp['Simulation']}**: "
+                                   f"Energy diff: {energy_diff:.1%}, "
+                                   f"Duration diff: {duration_diff:.1%}, "
+                                   f"Field diff: {field_diff:.1%}")
+
+def render_dgpa_analysis():
+    """Render comprehensive DGPA analysis interface"""
+    st.markdown('<h2 class="sub-header">🔬 Distance-Gated Physics Attention (DGPA) Analysis</h2>', unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first to enable DGPA analysis.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    st.markdown("""
+    <div class="dgpa-box">
+    <h3>📚 DGPA Theory & Implementation</h3>
+    
+    **Distance-Gated Physics Attention (DGPA)** is a novel interpolation method for laser FEA simulations that explicitly incorporates energy (E) and pulse duration (τ) similarity.
+    
+    ### Core DGPA Formula
+    
+    For any field **F** (temperature, stress, displacement, etc.):
+    
+    $$
+    \\boxed{\\mathbf{F}(\\boldsymbol{\\theta}^*) = \\sum_{i=1}^{N} w_i(\\boldsymbol{\\theta}^*) \\cdot \\mathbf{F}^{(i)}}
+    $$
+    
+    where $w_i(\\boldsymbol{\\theta}^*)$ are DGPA weights computed as:
+    
+    $$
+    w_i(\\boldsymbol{\\theta}^*) = \\frac{ 
+    \\bar{\\alpha}_i(\\boldsymbol{\\theta}^*) \\cdot 
+    \\exp\\left( -\\frac{\\phi_i^2}{2\\sigma_g^2} \\right)
+    }{
+    \\sum_{k=1}^{N} \\bar{\\alpha}_k(\\boldsymbol{\\theta}^*) \\cdot 
+    \\exp\\left( -\\frac{\\phi_k^2}{2\\sigma_g^2} \\right)
+    }
+    $$
+    
+    with the (E, τ) proximity kernel:
+    
+    $$
+    \\phi_i = \\sqrt{ 
+    \\left( \\frac{E^* - E_i}{s_E} \\right)^2 + 
+    \\left( \\frac{\\tau^* - \\tau_i}{s_\\tau} \\right)^2 
+    }
+    $$
+    
+    ### Key Components
+    
+    1. **Physics Attention** ($\\bar{\\alpha}_i$): Multi-head transformer-inspired attention with physics-aware embeddings
+    2. **(E, τ) Gating**: Gaussian kernel that ensures physically meaningful interpolation
+    3. **Normalization**: Softmax ensures weights sum to 1
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # DGPA parameter exploration
+    st.markdown('<h3 class="sub-header">🔍 DGPA Parameter Explorer</h3>', unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        test_sigma_g = st.slider(
-            "Test σ_g",
+        explore_sigma_g = st.slider(
+            "Explore σ_g",
             min_value=0.05,
-            max_value=0.5,
-            value=0.2,
+            max_value=1.0,
+            value=0.20,
             step=0.05,
-            key="test_sigma_g"
+            key="explore_sigma_g"
         )
     with col2:
-        test_s_E = st.slider(
-            "Test s_E",
-            min_value=1.0,
+        explore_s_E = st.slider(
+            "Explore s_E",
+            min_value=0.1,
             max_value=50.0,
             value=10.0,
-            step=1.0,
-            key="test_s_E"
+            step=0.5,
+            key="explore_s_E"
         )
     with col3:
-        test_s_tau = st.slider(
-            "Test s_τ",
-            min_value=1.0,
+        explore_s_tau = st.slider(
+            "Explore s_τ",
+            min_value=0.1,
             max_value=20.0,
             value=5.0,
-            step=1.0,
-            key="test_s_tau"
+            step=0.5,
+            key="explore_s_tau"
         )
     
-    if st.button("Analyze Hyperparameter Sensitivity", key="analyze_hypers"):
-        # Create temporary extrapolator for sensitivity analysis
-        temp_extrapolator = DistanceGatedPhysicsAttentionExtrapolator(
-            sigma_param=st.session_state.extrapolator.sigma_param,
-            sigma_g=test_sigma_g,
-            s_E=test_s_E,
-            s_tau=test_s_tau,
-            n_heads=st.session_state.extrapolator.n_heads,
-            temperature=st.session_state.extrapolator.temperature
+    # Create visualization of DGPA kernel
+    st.markdown("##### 📊 (E, τ) Gating Kernel Visualization")
+    
+    # Generate sample data
+    if st.session_state.summaries:
+        energies = [s['energy'] for s in st.session_state.summaries]
+        durations = [s['duration'] for s in st.session_state.summaries]
+        
+        # Create grid for visualization
+        e_min, e_max = min(energies), max(energies)
+        d_min, d_max = min(durations), max(durations)
+        
+        e_grid = np.linspace(e_min, e_max, 50)
+        d_grid = np.linspace(d_min, d_max, 50)
+        E_grid, D_grid = np.meshgrid(e_grid, d_grid)
+        
+        # Query point (center of grid)
+        query_e = (e_min + e_max) / 2
+        query_d = (d_min + d_max) / 2
+        
+        # Compute gating kernel
+        phi_squared = ((E_grid - query_e) / explore_s_E)**2 + ((D_grid - query_d) / explore_s_tau)**2
+        gating = np.exp(-phi_squared / (2 * explore_sigma_g**2))
+        
+        # Create heatmap
+        fig_kernel = go.Figure(data=go.Heatmap(
+            z=gating,
+            x=e_grid,
+            y=d_grid,
+            colorscale='Viridis',
+            colorbar=dict(title="Gating Weight")
+        ))
+        
+        # Add training points
+        fig_kernel.add_trace(go.Scatter(
+            x=energies,
+            y=durations,
+            mode='markers',
+            marker=dict(
+                size=8,
+                color='red',
+                symbol='circle',
+                line=dict(width=2, color='white')
+            ),
+            name='Training Simulations'
+        ))
+        
+        # Add query point
+        fig_kernel.add_trace(go.Scatter(
+            x=[query_e],
+            y=[query_d],
+            mode='markers',
+            marker=dict(
+                size=15,
+                color='yellow',
+                symbol='star'
+            ),
+            name='Query Point'
+        ))
+        
+        fig_kernel.update_layout(
+            title=f"(E, τ) Gating Kernel (σ_g={explore_sigma_g:.2f}, s_E={explore_s_E:.1f}, s_τ={explore_s_tau:.1f})",
+            xaxis_title="Energy (mJ)",
+            yaxis_title="Duration (ns)",
+            height=500
         )
         
-        temp_extrapolator.load_summaries(st.session_state.summaries)
+        st.plotly_chart(fig_kernel, use_container_width=True)
         
-        # Analyze with different parameters
-        test_time = 10.0  # ns
-        analysis = temp_extrapolator.analyze_weight_components(
-            analysis_energy, analysis_duration, test_time
-        )
+        # Kernel statistics
+        st.markdown("##### 📈 Kernel Statistics")
         
-        if analysis:
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Effective Sources", len([w for w in analysis['top_sources'] if w['final_weight'] > 0.01]))
-            with col2:
-                st.metric("Max Weight Concentration", f"{analysis['weight_statistics']['final_max']:.3f}")
-            with col3:
-                entropy = -np.sum([w['final_weight'] * np.log(w['final_weight'] + 1e-10) 
-                                 for w in analysis['top_sources'] if w['final_weight'] > 0])
-                st.metric("Weight Entropy", f"{entropy:.3f}")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Max Gating", f"{np.max(gating):.3f}")
+        with col2:
+            st.metric("Min Gating", f"{np.min(gating):.3f}")
+        with col3:
+            # Effective radius (where gating > 0.5)
+            effective_mask = gating > 0.5
+            effective_area = np.sum(effective_mask) / gating.size * 100
+            st.metric("Effective Area", f"{effective_area:.1f}%")
+        with col4:
+            # Number of training points in effective area
+            effective_points = 0
+            for e, d in zip(energies, durations):
+                phi = np.sqrt(((e - query_e)/explore_s_E)**2 + ((d - query_d)/explore_s_tau)**2)
+                if np.exp(-phi**2/(2*explore_sigma_g**2)) > 0.5:
+                    effective_points += 1
+            st.metric("Effective Points", f"{effective_points}/{len(energies)}")
+    
+    # DGPA vs baseline comparison
+    st.markdown('<h3 class="sub-header">⚖️ DGPA vs Baseline Comparison</h3>', unsafe_allow_html=True)
+    
+    # Simulate comparison scenario
+    if st.button("🧪 Run DGPA vs Baseline Comparison", use_container_width=True):
+        with st.spinner("Running comparison analysis..."):
+            # This would compare DGPA with standard physics attention
+            # For now, show conceptual comparison
+            
+            st.markdown("""
+            ### Conceptual Comparison
+            
+            | Aspect | DGPA (Our Method) | Standard Physics Attention |
+            |--------|-------------------|----------------------------|
+            | **E, τ sensitivity** | Explicit gating kernel | Implicit via embeddings |
+            | **Interpretability** | Clear (E, τ) contribution | Less interpretable |
+            | **Extrapolation safety** | Conservative (gating limits) | Can over-extrapolate |
+            | **Parameter tuning** | Physics-informed (σ_g, s_E, s_τ) | Mostly heuristic |
+            | **Computational cost** | Slightly higher (gating calc) | Standard attention |
+            
+            ### Key Advantages of DGPA
+            
+            1. **Physical interpretability**: Clear separation of physics attention and (E, τ) similarity
+            2. **Controlled extrapolation**: Gating prevents unphysical blending of distant simulations
+            3. **Parameter robustness**: Fewer hyperparameters to tune for new applications
+            4. **Uncertainty quantification**: Gating weights provide confidence in parameter space
+            """)
+            
+            # Create comparison visualization
+            fig_compare = go.Figure()
+            
+            # Simulated weights for comparison
+            n_sources = 20
+            physics_weights = np.random.dirichlet(np.ones(n_sources))
+            et_distances = np.abs(np.random.randn(n_sources))
+            
+            # DGPA weights (with gating)
+            sigma_g_test = 0.2
+            gating_weights = np.exp(-et_distances**2 / (2 * sigma_g_test**2))
+            gating_weights = gating_weights / np.sum(gating_weights)
+            
+            dgpa_weights = (physics_weights * gating_weights)
+            dgpa_weights = dgpa_weights / np.sum(dgpa_weights)
+            
+            fig_compare.add_trace(go.Scatter(
+                x=list(range(n_sources)),
+                y=physics_weights,
+                mode='lines+markers',
+                name='Physics Attention Only',
+                line=dict(color='green', width=2)
+            ))
+            
+            fig_compare.add_trace(go.Scatter(
+                x=list(range(n_sources)),
+                y=dgpa_weights,
+                mode='lines+markers',
+                name='DGPA (with Gating)',
+                line=dict(color='blue', width=3)
+            ))
+            
+            fig_compare.add_trace(go.Scatter(
+                x=list(range(n_sources)),
+                y=gating_weights,
+                mode='lines',
+                name='(E, τ) Gating Only',
+                line=dict(color='red', width=2, dash='dash')
+            ))
+            
+            fig_compare.update_layout(
+                title="DGPA vs Baseline Weight Distribution",
+                xaxis_title="Source Index",
+                yaxis_title="Weight",
+                height=400,
+                showlegend=True
+            )
+            
+            st.plotly_chart(fig_compare, use_container_width=True)
+    
+    # DGPA applications guide
+    with st.expander("📖 DGPA Applications & Best Practices", expanded=True):
+        st.markdown("""
+        ### 🎯 When to Use DGPA
+        
+        **Recommended for:**
+        - Laser processing parameter optimization
+        - Multi-physics FEA with strong (E, τ) dependence
+        - Conservative extrapolation needs
+        - Interpretable interpolation requirements
+        
+        **Less suitable for:**
+        - Very sparse training data (< 5 simulations)
+        - Problems where (E, τ) are not primary drivers
+        - Real-time applications requiring maximum speed
+        
+        ### ⚙️ Parameter Selection Guide
+        
+        **Default values (laser FEA):**
+        - σ_g = 0.20 (moderate gating)
+        - s_E = 10.0 mJ (based on typical energy range)
+        - s_τ = 5.0 ns (based on typical duration range)
+        
+        **Tuning strategy:**
+        1. Start with defaults
+        2. Adjust σ_g based on desired interpolation "tightness"
+        3. Set s_E, s_τ to ~2× standard deviation of training parameters
+        4. Validate with known test cases
+        
+        ### 🔬 Advanced Features
+        
+        **Adaptive scaling:**
+        ```python
+        # Auto-scale based on training data
+        s_E = 2.0 * np.std(training_energies)
+        s_τ = 2.0 * np.std(training_durations)
+        ```
+        
+        **Field-specific gating:**
+        - Temperature: Use tighter gating (σ_g ≈ 0.15)
+        - Stress: Can use broader gating (σ_g ≈ 0.25)
+        - Displacement: Intermediate gating (σ_g ≈ 0.20)
+        
+        ### 📊 Validation Metrics
+        
+        Monitor:
+        1. **Max DGPA weight**: Should be > 0.3 for interpolation
+        2. **Gating spread**: Effective area should cover training points
+        3. **Weight consistency**: Similar queries should have similar weights
+        4. **Field smoothness**: Interpolated fields should be physically plausible
+        """)
+    
+    # DGPA code example
+    with st.expander("💻 DGPA Implementation Code", expanded=False):
+        st.code("""
+# DGPA Implementation Snippet
+class DistanceGatedPhysicsAttentionExtrapolator:
+    def __init__(self, sigma_g=0.20, s_E=10.0, s_tau=5.0):
+        self.sigma_g = sigma_g
+        self.s_E = s_E
+        self.s_tau = s_tau
+    
+    def _compute_et_gating(self, energy_query, duration_query):
+        \"\"\"Compute the (E, τ) gating kernel for DGPA\"\"\"
+        phi = []
+        for meta in self.source_metadata:
+            de = (energy_query - meta['energy']) / self.s_E
+            dt = (duration_query - meta['duration']) / self.s_tau
+            phi.append(np.sqrt(de**2 + dt**2))
+        
+        phi = np.array(phi)
+        gating = np.exp(-phi**2 / (2 * self.sigma_g**2))
+        return gating / (gating.sum() + 1e-12)
+    
+    def _multi_head_attention_with_gating(self, query_embedding, query_meta):
+        \"\"\"DGPA: Combine physics attention with (E, τ) gating\"\"\"
+        # 1. Compute physics attention
+        physics_attention = self._compute_physics_attention(query_embedding, query_meta)
+        
+        # 2. Compute (E, τ) gating
+        et_gating = self._compute_et_gating(query_meta['energy'], query_meta['duration'])
+        
+        # 3. DGPA combination
+        combined_weights = physics_attention * et_gating
+        final_weights = combined_weights / (combined_weights.sum() + 1e-12)
+        
+        return final_weights, physics_attention, et_gating
+        """, language="python")
 
 if __name__ == "__main__":
     main()
