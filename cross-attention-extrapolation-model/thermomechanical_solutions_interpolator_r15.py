@@ -43,13 +43,12 @@ class CacheManager:
     @staticmethod
     def generate_cache_key(field_name, timestep_idx, energy, duration, time, 
                           sigma_param, spatial_weight, n_heads, temperature,
-                          sigma_g, s_E, s_tau, s_t, temporal_weight,  # Enhanced parameters
+                          sigma_g, s_E, s_tau,  # New DGPA parameters
                           top_k=None, subsample_factor=None):
         """Generate a unique cache key for interpolation parameters"""
         params_str = f"{field_name}_{timestep_idx}_{energy:.2f}_{duration:.2f}_{time:.2f}"
         params_str += f"_{sigma_param:.2f}_{spatial_weight:.2f}_{n_heads}_{temperature:.2f}"
-        params_str += f"_{sigma_g:.2f}_{s_E:.2f}_{s_tau:.2f}_{s_t:.2f}_{temporal_weight:.2f}"  # Include ST-DGPA params
-        
+        params_str += f"_{sigma_g:.2f}_{s_E:.2f}_{s_tau:.2f}"  # Include DGPA params
         if top_k:
             params_str += f"_top{top_k}"
         if subsample_factor:
@@ -80,11 +79,9 @@ class CacheManager:
             params.get('spatial_weight', 0.5),
             params.get('n_heads', 4),
             params.get('temperature', 1.0),
-            params.get('sigma_g', 0.20),
-            params.get('s_E', 10.0),
-            params.get('s_tau', 5.0),
-            params.get('s_t', 20.0),  # New: time scaling
-            params.get('temporal_weight', 0.3),  # New: temporal weight
+            params.get('sigma_g', 0.20),  # New
+            params.get('s_E', 10.0),      # New
+            params.get('s_tau', 5.0),     # New
             params.get('top_k'),
             params.get('subsample_factor')
         )
@@ -106,11 +103,9 @@ class CacheManager:
             params.get('spatial_weight', 0.5),
             params.get('n_heads', 4),
             params.get('temperature', 1.0),
-            params.get('sigma_g', 0.20),
-            params.get('s_E', 10.0),
-            params.get('s_tau', 5.0),
-            params.get('s_t', 20.0),  # New: time scaling
-            params.get('temporal_weight', 0.3),  # New: temporal weight
+            params.get('sigma_g', 0.20),  # New
+            params.get('s_E', 10.0),      # New
+            params.get('s_tau', 5.0),     # New
             params.get('top_k'),
             params.get('subsample_factor')
         )
@@ -341,29 +336,22 @@ class UnifiedFEADataLoader:
         return summary
 
 # =============================================
-# SPATIO-TEMPORAL GATED PHYSICS ATTENTION (ST-DGPA)
+# ENHANCED ATTENTION WITH DISTANCE-GATED PHYSICS AWARENESS (DGPA)
 # =============================================
-class SpatioTemporalGatedPhysicsAttentionExtrapolator:
-    """Advanced extrapolator with Spatio-Temporal Gated Physics Attention (ST-DGPA)"""
+class DistanceGatedPhysicsAttentionExtrapolator:
+    """Advanced extrapolator with Distance-Gated Physics Attention (DGPA)"""
     
     def __init__(self, sigma_param=0.3, spatial_weight=0.5, n_heads=4, temperature=1.0,
-                 sigma_g=0.20, s_E=10.0, s_tau=5.0, s_t=20.0, temporal_weight=0.3):
+                 sigma_g=0.20, s_E=10.0, s_tau=5.0):
         self.sigma_param = sigma_param
         self.spatial_weight = spatial_weight
         self.n_heads = n_heads
         self.temperature = temperature
         
-        # ST-DGPA specific parameters
+        # DGPA specific parameters
         self.sigma_g = sigma_g  # Gating kernel width
         self.s_E = s_E          # Energy scaling factor (mJ)
         self.s_tau = s_tau      # Duration scaling factor (ns)
-        self.s_t = s_t          # Time scaling factor (ns) - NEW: temporal parameter
-        self.temporal_weight = temporal_weight  # Weight for temporal similarity
-        
-        # Physics parameters for heat transfer characterization
-        self.thermal_diffusivity = 1e-5  # m²/s, typical for metals (adjust based on material)
-        self.laser_spot_radius = 50e-6   # m, typical laser spot size
-        self.characteristic_length = 100e-6  # m, characteristic length for heat diffusion
         
         self.source_db = []
         self.embedding_scaler = StandardScaler()
@@ -387,8 +375,8 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         
         for summary_idx, summary in enumerate(summaries):
             for timestep_idx, t in enumerate(summary['timesteps']):
-                # Compute physics-aware embedding with enhanced temporal features
-                emb = self._compute_enhanced_physics_embedding(
+                # Compute physics-aware embedding
+                emb = self._compute_physics_embedding(
                     summary['energy'], 
                     summary['duration'], 
                     t
@@ -411,16 +399,14 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
                 
                 all_values.append(field_vals)
                 
-                # Store metadata for spatial and temporal correlations
+                # Store metadata for spatial correlations
                 metadata.append({
                     'summary_idx': summary_idx,
                     'timestep_idx': timestep_idx,
                     'energy': summary['energy'],
                     'duration': summary['duration'],
                     'time': t,
-                    'name': summary['name'],
-                    'fourier_number': self._compute_fourier_number(t),  # Heat transfer characterization
-                    'thermal_penetration': self._compute_thermal_penetration(t)  # Diffusion depth
+                    'name': summary['name']
                 })
         
         if all_embeddings and all_values:
@@ -440,20 +426,8 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             
             st.info(f"✅ Prepared {len(all_embeddings)} embeddings with {all_embeddings.shape[1]} features")
     
-    def _compute_fourier_number(self, time_ns):
-        """Compute Fourier number (Fo = αt/L²) for heat transfer characterization"""
-        time_s = time_ns * 1e-9  # Convert ns to s
-        Fo = self.thermal_diffusivity * time_s / (self.characteristic_length ** 2)
-        return Fo
-    
-    def _compute_thermal_penetration(self, time_ns):
-        """Compute thermal penetration depth (δ ~ √(αt))"""
-        time_s = time_ns * 1e-9  # Convert ns to s
-        penetration = np.sqrt(self.thermal_diffusivity * time_s) * 1e6  # Convert to μm
-        return penetration
-    
-    def _compute_enhanced_physics_embedding(self, energy, duration, time):
-        """Compute comprehensive physics-aware embedding with temporal features"""
+    def _compute_physics_embedding(self, energy, duration, time):
+        """Compute comprehensive physics-aware embedding"""
         # Basic physical parameters
         logE = np.log1p(energy)
         power = energy / max(duration, 1e-6)
@@ -472,18 +446,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         strain_rate = energy_density / (time + 1e-6)
         stress_rate = power / (time + 1e-6)
         
-        # Heat transfer specific features
-        fourier_number = self._compute_fourier_number(time)
-        thermal_penetration_depth = self._compute_thermal_penetration(time)
-        diffusion_time_scale = time / (duration + 1e-6)
-        
-        # Temporal phase indicators
-        heating_phase = 1.0 if time < duration else 0.0
-        cooling_phase = 1.0 if time >= duration else 0.0
-        early_time = 1.0 if time < duration * 0.5 else 0.0
-        late_time = 1.0 if time > duration * 2.0 else 0.0
-        
-        # Combined features with enhanced temporal information
+        # Combined features
         return np.array([
             logE,
             duration,
@@ -497,43 +460,24 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             thermal_penetration,
             strain_rate,
             stress_rate,
-            fourier_number,
-            thermal_penetration_depth,
-            diffusion_time_scale,
-            heating_phase,
-            cooling_phase,
-            early_time,
-            late_time,
             np.log1p(power),
-            np.log1p(time),
-            np.sqrt(time),  # Square root for diffusion scaling
-            time / (duration + 1e-6),  # Normalized time
+            np.log1p(time)
         ], dtype=np.float32)
     
-    def _compute_ett_gating(self, energy_query, duration_query, time_query, source_metadata=None):
-        """Compute the (E, τ, t) gating kernel for ST-DGPA
+    def _compute_et_gating(self, energy_query, duration_query, source_metadata=None):
+        """Compute the (E, τ) gating kernel for DGPA
         
-        Extended from DGPA to include temporal parameter:
-        φ_i = sqrt( ((E* - E_i)/s_E)^2 + ((τ* - τ_i)/s_τ)^2 + ((t* - t_i)/s_t)^2 )
+        φ_i = sqrt( ((E* - E_i)/s_E)^2 + ((τ* - τ_i)/s_τ)^2 )
         gating_i = exp( - (φ_i^2) / (2 * sigma_g^2) )
         """
         if source_metadata is None:
             source_metadata = self.source_metadata
-        
+            
         phi_squared = []
         for meta in source_metadata:
             de = (energy_query - meta['energy']) / self.s_E
             dt = (duration_query - meta['duration']) / self.s_tau
-            dtime = (time_query - meta['time']) / self.s_t  # NEW: temporal difference
-            
-            # Apply physics-aware temporal scaling for heat transfer
-            if self.temporal_weight > 0:
-                # For heat transfer: early times (heating) need tighter temporal matching
-                # than late times (diffusion-dominated)
-                time_scaling_factor = 1.0 + 0.5 * (time_query / max(duration_query, 1e-6))  # Looser at later times
-                dtime = dtime * time_scaling_factor
-            
-            phi_squared.append(de**2 + dt**2 + dtime**2)
+            phi_squared.append(de**2 + dt**2)
         
         phi_squared = np.array(phi_squared)
         gating = np.exp(-phi_squared / (2 * self.sigma_g**2))
@@ -547,39 +491,6 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         
         return gating
     
-    def _compute_temporal_similarity(self, query_meta, source_metas):
-        """Compute temporal similarity with physics-aware weighting for heat transfer"""
-        similarities = []
-        
-        for meta in source_metas:
-            time_diff = abs(query_meta['time'] - meta['time'])
-            
-            # Physics-aware temporal similarity:
-            # 1. For heating phase (t < τ): tight matching
-            # 2. For cooling phase (t > τ): looser matching
-            if query_meta['time'] < query_meta['duration'] * 1.5:  # Heating/early cooling
-                # Tighter matching during heating phase
-                temporal_tolerance = max(query_meta['duration'] * 0.1, 1.0)
-            else:
-                # Looser matching during late cooling/diffusion phase
-                temporal_tolerance = max(query_meta['duration'] * 0.3, 3.0)
-            
-            # Fourier number similarity for heat transfer characterization
-            if 'fourier_number' in meta and 'fourier_number' in query_meta:
-                fourier_diff = abs(query_meta['fourier_number'] - meta['fourier_number'])
-                fourier_similarity = np.exp(-fourier_diff / 0.1)  # Scale by typical Fo range
-            else:
-                fourier_similarity = 1.0
-            
-            # Combine time difference and Fourier number similarity
-            time_similarity = np.exp(-time_diff / temporal_tolerance)
-            combined_similarity = (1 - self.temporal_weight) * time_similarity + \
-                                 self.temporal_weight * fourier_similarity
-            
-            similarities.append(combined_similarity)
-        
-        return np.array(similarities)
-    
     def _compute_spatial_similarity(self, query_meta, source_metas):
         """Compute spatial similarity based on parameter proximity"""
         similarities = []
@@ -587,18 +498,19 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             # Normalized differences
             e_diff = abs(query_meta['energy'] - meta['energy']) / 50.0
             d_diff = abs(query_meta['duration'] - meta['duration']) / 20.0
+            t_diff = abs(query_meta['time'] - meta['time']) / 50.0
             
             # Combined similarity (inverse distance)
-            total_diff = np.sqrt(e_diff**2 + d_diff**2)
+            total_diff = np.sqrt(e_diff**2 + d_diff**2 + t_diff**2)
             similarity = np.exp(-total_diff / self.sigma_param)
             similarities.append(similarity)
         
         return np.array(similarities)
     
     def _multi_head_attention_with_gating(self, query_embedding, query_meta):
-        """Multi-head attention mechanism with ST-DGPA (Spatio-Temporal Gated Physics Attention)"""
+        """Multi-head attention mechanism with DGPA (Distance-Gated Physics Attention)"""
         if not self.fitted or len(self.source_embeddings) == 0:
-            return None, None, None, None
+            return None, None
         
         # Normalize query embedding
         query_norm = self.embedding_scaler.transform([query_embedding])[0]
@@ -625,11 +537,6 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
                 spatial_sim = self._compute_spatial_similarity(query_meta, self.source_metadata)
                 scores = (1 - self.spatial_weight) * scores + self.spatial_weight * spatial_sim
             
-            # Apply temporal regulation if enabled
-            if self.temporal_weight > 0:
-                temporal_sim = self._compute_temporal_similarity(query_meta, self.source_metadata)
-                scores = (1 - self.temporal_weight) * scores + self.temporal_weight * temporal_sim
-            
             head_weights[head] = scores
         
         # Combine head weights
@@ -644,11 +551,11 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         exp_weights = np.exp(avg_weights - max_weight)
         physics_attention = exp_weights / (np.sum(exp_weights) + 1e-12)
         
-        # Apply ST-DGPA: Combine physics attention with (E, τ, t) gating
-        ett_gating = self._compute_ett_gating(query_meta['energy'], query_meta['duration'], query_meta['time'])
+        # Apply DGPA: Combine physics attention with (E, τ) gating
+        et_gating = self._compute_et_gating(query_meta['energy'], query_meta['duration'])
         
-        # ST-DGPA formula: w_i = (α_i * gating_i) / (sum_j α_j * gating_j)
-        combined_weights = physics_attention * ett_gating
+        # DGPA formula: w_i = (α_i * gating_i) / (sum_j α_j * gating_j)
+        combined_weights = physics_attention * et_gating
         combined_sum = np.sum(combined_weights)
         
         if combined_sum > 1e-12:
@@ -663,25 +570,23 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         else:
             prediction = np.zeros(1)
         
-        return prediction, final_weights, physics_attention, ett_gating
+        return prediction, final_weights, physics_attention, et_gating
     
     def predict_field_statistics(self, energy_query, duration_query, time_query):
-        """Predict field statistics for given parameters using ST-DGPA"""
+        """Predict field statistics for given parameters using DGPA"""
         if not self.fitted:
             return None
         
-        # Compute query embedding and metadata with enhanced temporal features
-        query_embedding = self._compute_enhanced_physics_embedding(energy_query, duration_query, time_query)
+        # Compute query embedding and metadata
+        query_embedding = self._compute_physics_embedding(energy_query, duration_query, time_query)
         query_meta = {
             'energy': energy_query,
             'duration': duration_query,
-            'time': time_query,
-            'fourier_number': self._compute_fourier_number(time_query),
-            'thermal_penetration': self._compute_thermal_penetration(time_query)
+            'time': time_query
         }
         
-        # Apply ST-DGPA attention mechanism
-        prediction, final_weights, physics_attention, ett_gating = self._multi_head_attention_with_gating(query_embedding, query_meta)
+        # Apply DGPA attention mechanism
+        prediction, final_weights, physics_attention, et_gating = self._multi_head_attention_with_gating(query_embedding, query_meta)
         
         if prediction is None:
             return None
@@ -691,10 +596,8 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             'prediction': prediction,
             'attention_weights': final_weights,
             'physics_attention': physics_attention,
-            'ett_gating': ett_gating,
+            'et_gating': et_gating,
             'confidence': float(np.max(final_weights)) if len(final_weights) > 0 else 0.0,
-            'temporal_confidence': self._compute_temporal_confidence(time_query, duration_query),
-            'heat_transfer_indicators': self._compute_heat_transfer_indicators(energy_query, duration_query, time_query),
             'field_predictions': {}
         }
         
@@ -715,60 +618,15 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         
         return result
     
-    def _compute_temporal_confidence(self, time_query, duration_query):
-        """Compute confidence in temporal prediction based on heat transfer physics"""
-        # Early times have lower confidence due to rapid changes
-        # Late times have higher confidence due to diffusion smoothing
-        if time_query < duration_query * 0.5:  # Early heating phase
-            return 0.6  # Moderate confidence
-        elif time_query < duration_query * 1.5:  # Peak and early cooling
-            return 0.8  # Higher confidence
-        else:  # Late cooling/diffusion
-            return 0.9  # Highest confidence (diffusion-dominated)
-    
-    def _compute_heat_transfer_indicators(self, energy, duration, time):
-        """Compute heat transfer characterization indicators"""
-        fourier_number = self._compute_fourier_number(time)
-        thermal_penetration = self._compute_thermal_penetration(time)
-        
-        # Phase identification
-        if time < duration * 0.3:
-            phase = "Early Heating"
-            heat_transfer_regime = "Adiabatic-like"
-        elif time < duration:
-            phase = "Heating"
-            heat_transfer_regime = "Conduction-dominated"
-        elif time < duration * 2:
-            phase = "Early Cooling"
-            heat_transfer_regime = "Mixed conduction"
-        else:
-            phase = "Diffusion Cooling"
-            heat_transfer_regime = "Thermal diffusion"
-        
-        # Dimensionless indicators
-        energy_density = energy / duration
-        normalized_time = time / max(duration, 1e-6)
-        
-        return {
-            'phase': phase,
-            'regime': heat_transfer_regime,
-            'fourier_number': fourier_number,
-            'thermal_penetration_um': thermal_penetration,
-            'normalized_time': normalized_time,
-            'energy_density': energy_density
-        }
-    
     def predict_time_series(self, energy_query, duration_query, time_points):
-        """Predict over a series of time points using ST-DGPA"""
+        """Predict over a series of time points using DGPA"""
         results = {
             'time_points': time_points,
             'field_predictions': {},
             'attention_maps': [],
             'physics_attention_maps': [],
-            'ett_gating_maps': [],
-            'confidence_scores': [],
-            'temporal_confidences': [],
-            'heat_transfer_indicators': []
+            'et_gating_maps': [],
+            'confidence_scores': []
         }
         
         # Initialize field predictions structure
@@ -795,10 +653,8 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
                 
                 results['attention_maps'].append(pred['attention_weights'])
                 results['physics_attention_maps'].append(pred['physics_attention'])
-                results['ett_gating_maps'].append(pred['ett_gating'])
+                results['et_gating_maps'].append(pred['et_gating'])
                 results['confidence_scores'].append(pred['confidence'])
-                results['temporal_confidences'].append(pred['temporal_confidence'])
-                results['heat_transfer_indicators'].append(pred['heat_transfer_indicators'])
             else:
                 # Fill with NaN if prediction failed
                 for field in results['field_predictions']:
@@ -807,15 +663,13 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
                     results['field_predictions'][field]['std'].append(np.nan)
                 results['attention_maps'].append(np.array([]))
                 results['physics_attention_maps'].append(np.array([]))
-                results['ett_gating_maps'].append(np.array([]))
+                results['et_gating_maps'].append(np.array([]))
                 results['confidence_scores'].append(0.0)
-                results['temporal_confidences'].append(0.0)
-                results['heat_transfer_indicators'].append({})
         
         return results
     
     def interpolate_full_field(self, field_name, attention_weights, source_metadata, simulations):
-        """Compute interpolated full field using ST-DGPA weights."""
+        """Compute interpolated full field using DGPA weights."""
         
         if not self.fitted or len(attention_weights) == 0:
             return None
@@ -863,34 +717,10 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             'n_sources_used': n_sources_used,
             'total_weight': total_weight,
             'max_weight': np.max(attention_weights) if len(attention_weights) > 0 else 0,
-            'min_weight': np.min(attention_weights) if len(attention_weights) > 0 else 0,
-            'temporal_coherence': self._assess_temporal_coherence(source_metadata, attention_weights)
+            'min_weight': np.min(attention_weights) if len(attention_weights) > 0 else 0
         }
         
         return interpolated_field
-    
-    def _assess_temporal_coherence(self, source_metadata, attention_weights):
-        """Assess temporal coherence of the interpolation sources"""
-        if len(source_metadata) == 0 or len(attention_weights) == 0:
-            return 0.0
-        
-        times = np.array([meta['time'] for meta in source_metadata])
-        weighted_times = times * attention_weights
-        mean_time = np.sum(weighted_times) / np.sum(attention_weights)
-        
-        # Compute temporal spread (weighted standard deviation)
-        time_diff = times - mean_time
-        weighted_variance = np.sum(attention_weights * time_diff**2) / np.sum(attention_weights)
-        temporal_spread = np.sqrt(weighted_variance)
-        
-        # Normalize by typical time scale
-        avg_duration = np.mean([meta['duration'] for meta in source_metadata])
-        normalized_spread = temporal_spread / max(avg_duration, 1e-6)
-        
-        # Convert to coherence score (higher is better)
-        coherence = np.exp(-normalized_spread)
-        
-        return float(coherence)
     
     def export_interpolated_vtu(self, field_name, interpolated_values, simulations, output_path):
         """Export interpolated field to VTU file"""
@@ -923,7 +753,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             return False
 
 # =============================================
-# ADVANCED VISUALIZATION COMPONENTS WITH ST-DGPA ANALYSIS
+# ADVANCED VISUALIZATION COMPONENTS WITH DGPA ANALYSIS
 # =============================================
 class EnhancedVisualizer:
     """Comprehensive visualization with extended colormaps and advanced features"""
@@ -947,8 +777,8 @@ class EnhancedVisualizer:
     ]
     
     @staticmethod
-    def create_stdgpa_analysis(results, energy_query, duration_query, time_points):
-        """Create ST-DGPA-specific analysis visualizations"""
+    def create_dgpa_analysis(results, energy_query, duration_query, time_points):
+        """Create DGPA-specific analysis visualizations"""
         if not results or 'attention_maps' not in results or len(results['attention_maps']) == 0:
             return None
         
@@ -957,33 +787,28 @@ class EnhancedVisualizer:
         time = time_points[timestep_idx]
         
         fig = make_subplots(
-            rows=3, cols=3,
+            rows=2, cols=3,
             subplot_titles=[
-                "ST-DGPA Final Weights", "Physics Attention Only", 
-                "(E, τ, t) Gating Only", "ST-DGPA vs Physics Attention",
-                "Temporal Coherence Analysis", "Heat Transfer Phase",
-                "Parameter Space 3D", "Attention Network", "Weight Evolution"
+                "DGPA Final Weights", "Physics Attention Only", 
+                "(E, τ) Gating Only", "DGPA vs Physics Attention",
+                "Weight Contribution Heatmap", "Source (E, τ) Distribution"
             ],
-            vertical_spacing=0.1,
-            horizontal_spacing=0.1,
-            specs=[[{'type': 'xy'}, {'type': 'xy'}, {'type': 'xy'}],
-                   [{'type': 'xy'}, {'type': 'xy'}, {'type': 'domain'}],
-                   [{'type': 'scatter3d'}, {'type': 'scatter'}, {'type': 'xy'}]]
+            vertical_spacing=0.12,
+            horizontal_spacing=0.1
         )
         
         # Get weights for selected timestep
         final_weights = results['attention_maps'][timestep_idx]
         physics_attention = results['physics_attention_maps'][timestep_idx]
-        ett_gating = results['ett_gating_maps'][timestep_idx]
+        et_gating = results['et_gating_maps'][timestep_idx]
         
-        # 1. Final ST-DGPA weights
+        # 1. Final DGPA weights
         fig.add_trace(
             go.Bar(
                 x=list(range(len(final_weights))),
                 y=final_weights,
-                name='ST-DGPA Weights',
-                marker_color='blue',
-                showlegend=False
+                name='DGPA Weights',
+                marker_color='blue'
             ),
             row=1, col=1
         )
@@ -994,31 +819,29 @@ class EnhancedVisualizer:
                 x=list(range(len(physics_attention))),
                 y=physics_attention,
                 name='Physics Attention',
-                marker_color='green',
-                showlegend=False
+                marker_color='green'
             ),
             row=1, col=2
         )
         
-        # 3. (E, τ, t) gating only
+        # 3. (E, τ) gating only
         fig.add_trace(
             go.Bar(
-                x=list(range(len(ett_gating))),
-                y=ett_gating,
-                name='(E, τ, t) Gating',
-                marker_color='red',
-                showlegend=False
+                x=list(range(len(et_gating))),
+                y=et_gating,
+                name='(E, τ) Gating',
+                marker_color='red'
             ),
             row=1, col=3
         )
         
-        # 4. Comparison: ST-DGPA vs Physics Attention
+        # 4. Comparison: DGPA vs Physics Attention
         fig.add_trace(
             go.Scatter(
                 x=list(range(len(final_weights))),
                 y=final_weights,
                 mode='lines+markers',
-                name='ST-DGPA Weights',
+                name='DGPA Weights',
                 line=dict(color='blue', width=3)
             ),
             row=2, col=1
@@ -1034,178 +857,82 @@ class EnhancedVisualizer:
             row=2, col=1
         )
         
-        # 5. Temporal coherence analysis
-        if st.session_state.get('summaries'):
-            # Extract time differences
-            times = []
-            weights = []
-            for i, weight in enumerate(final_weights):
-                if weight > 0.01:  # Only significant weights
-                    # Get time from metadata
-                    if hasattr(st.session_state.extrapolator, 'source_metadata'):
-                        meta = st.session_state.extrapolator.source_metadata[i]
-                        times.append(meta['time'])
-                        weights.append(weight)
+        # 5. Weight contribution heatmap
+        # Create a matrix showing how each source contributes to different fields
+        if results['field_predictions']:
+            fields = list(results['field_predictions'].keys())[:5]  # First 5 fields
+            n_fields = min(len(fields), 5)
             
-            if times and weights:
+            # For each field, compute the weighted contribution of each source
+            # This is a simplified visualization
+            heatmap_data = []
+            for field in fields:
+                # Use final weights as proxy for field contribution
+                heatmap_data.append(final_weights)
+            
+            if len(heatmap_data) > 0:
+                heatmap_data = np.array(heatmap_data[:n_fields])
                 fig.add_trace(
-                    go.Scatter(
-                        x=times,
-                        y=weights,
-                        mode='markers',
-                        marker=dict(
-                            size=np.array(weights) * 50,
-                            color=weights,
-                            colorscale='Viridis',
-                            showscale=False
-                        ),
-                        name='Weight vs Time',
-                        showlegend=False
+                    go.Heatmap(
+                        z=heatmap_data,
+                        x=list(range(len(final_weights))),
+                        y=fields[:n_fields],
+                        colorscale='Viridis',
+                        showscale=False
                     ),
                     row=2, col=2
                 )
-                fig.add_vline(x=time, line_dash="dash", line_color="red", row=2, col=2)
         
-        # 6. Heat transfer phase indicator
-        if 'heat_transfer_indicators' in results and results['heat_transfer_indicators']:
-            indicators = results['heat_transfer_indicators'][timestep_idx]
-            if indicators:
-                # Create a radar/polar plot for phase indicators
-                categories = ['Heating', 'Cooling', 'Diffusion', 'Adiabatic']
-                values = [0.7, 0.5, 0.3, 0.2]  # Placeholder values
-                
-                fig.add_trace(
-                    go.Scatterpolar(
-                        r=values,
-                        theta=categories,
-                        fill='toself',
-                        name='Heat Transfer',
-                        line=dict(color='orange', width=2),
-                        fillcolor='rgba(255, 165, 0, 0.5)',
-                        showlegend=False
-                    ),
-                    row=2, col=3
-                )
-        
-        # 7. Parameter space 3D visualization
+        # 6. Source (E, τ) distribution
         if st.session_state.get('summaries'):
             energies = []
             durations = []
-            times = []
-            weights = []
+            source_names = []
             
-            for i, summary in enumerate(st.session_state.summaries[:10]):  # First 10 sources
-                for t_idx, t in enumerate(summary['timesteps'][:5]):  # First 5 timesteps
-                    energies.append(summary['energy'])
-                    durations.append(summary['duration'])
-                    times.append(t)
-                    # Use average weight for visualization
-                    weights.append(np.mean(final_weights) if i < len(final_weights) else 0.1)
+            for summary in st.session_state.summaries[:10]:  # First 10 sources
+                energies.append(summary['energy'])
+                durations.append(summary['duration'])
+                source_names.append(summary['name'])
             
             fig.add_trace(
-                go.Scatter3d(
+                go.Scatter(
                     x=energies,
                     y=durations,
-                    z=times,
-                    mode='markers',
+                    mode='markers+text',
+                    text=source_names,
+                    textposition='top center',
                     marker=dict(
-                        size=np.array(weights) * 20,
-                        color=weights,
+                        size=15,
+                        color=final_weights[:len(energies)] if len(final_weights) >= len(energies) else 'blue',
                         colorscale='Viridis',
-                        opacity=0.7,
-                        colorbar=dict(title="Weight")
+                        showscale=True,
+                        colorbar=dict(title="DGPA Weight")
                     ),
-                    name='Sources (E, τ, t)',
-                    showlegend=False
+                    name='Source Simulations'
                 ),
-                row=3, col=1
+                row=2, col=3
             )
             
             # Add query point
             fig.add_trace(
-                go.Scatter3d(
+                go.Scatter(
                     x=[energy_query],
                     y=[duration_query],
-                    z=[time],
                     mode='markers',
                     marker=dict(
-                        size=15,
+                        size=20,
                         color='red',
-                        symbol='diamond'
+                        symbol='star'
                     ),
-                    name='Query Point',
-                    showlegend=False
+                    name='Query Point'
                 ),
-                row=3, col=1
+                row=2, col=3
             )
-        
-        # 8. Attention network (simplified)
-        # Create a simple network visualization
-        if len(final_weights) > 5:
-            top_indices = np.argsort(final_weights)[-5:]
-            top_weights = final_weights[top_indices]
-            
-            node_x = [0] + list(range(1, 6))
-            node_y = [0] + [0] * 5
-            node_text = ['Query'] + [f'Source {i+1}' for i in top_indices]
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=node_x,
-                    y=node_y,
-                    mode='markers+text',
-                    text=node_text,
-                    textposition="top center",
-                    marker=dict(
-                        size=[30] + list(top_weights * 50),
-                        color=['red'] + ['blue'] * 5
-                    ),
-                    name='Attention Network',
-                    showlegend=False
-                ),
-                row=3, col=2
-            )
-            
-            # Add edges
-            for i in range(1, 6):
-                fig.add_trace(
-                    go.Scatter(
-                        x=[0, i],
-                        y=[0, 0],
-                        mode='lines',
-                        line=dict(width=top_weights[i-1] * 10, color='gray'),
-                        showlegend=False
-                    ),
-                    row=3, col=2
-                )
-        
-        # 9. Weight evolution over time (if multiple timesteps)
-        if len(results['attention_maps']) > 1:
-            # Show how top source weights evolve
-            if len(final_weights) > 0:
-                top_idx = np.argmax(final_weights)
-                weight_evolution = []
-                for t_idx in range(len(results['attention_maps'])):
-                    if top_idx < len(results['attention_maps'][t_idx]):
-                        weight_evolution.append(results['attention_maps'][t_idx][top_idx])
-                
-                fig.add_trace(
-                    go.Scatter(
-                        x=time_points[:len(weight_evolution)],
-                        y=weight_evolution,
-                        mode='lines+markers',
-                        line=dict(color='purple', width=3),
-                        name='Top Source Weight',
-                        showlegend=False
-                    ),
-                    row=3, col=3
-                )
         
         fig.update_layout(
-            height=1000,
-            title_text=f"ST-DGPA Analysis at t={time} ns (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
-            showlegend=True,
-            legend=dict(x=1.05, y=1)
+            height=800,
+            title_text=f"DGPA Analysis at t={time} ns (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
+            showlegend=True
         )
         
         # Update axes labels
@@ -1217,143 +944,10 @@ class EnhancedVisualizer:
         fig.update_yaxes(title_text="Weight", row=1, col=3)
         fig.update_xaxes(title_text="Source Index", row=2, col=1)
         fig.update_yaxes(title_text="Weight", row=2, col=1)
-        fig.update_xaxes(title_text="Time (ns)", row=2, col=2)
-        fig.update_yaxes(title_text="Weight", row=2, col=2)
-        
-        fig.update_scenes(
-            xaxis_title="Energy (mJ)",
-            yaxis_title="Duration (ns)",
-            zaxis_title="Time (ns)",
-            row=3, col=1
-        )
-        
-        fig.update_xaxes(title_text="Node", row=3, col=2)
-        fig.update_yaxes(title_text="", showticklabels=False, row=3, col=2)
-        fig.update_xaxes(title_text="Time (ns)", row=3, col=3)
-        fig.update_yaxes(title_text="Weight", row=3, col=3)
-        
-        return fig
-    
-    @staticmethod
-    def create_temporal_analysis(results, time_points):
-        """Create temporal-specific analysis visualizations"""
-        if not results or 'heat_transfer_indicators' not in results:
-            return None
-        
-        fig = make_subplots(
-            rows=2, cols=2,
-            subplot_titles=[
-                "Heat Transfer Phase Evolution",
-                "Fourier Number Evolution",
-                "Temporal Confidence",
-                "Thermal Penetration Depth"
-            ],
-            vertical_spacing=0.15,
-            horizontal_spacing=0.15
-        )
-        
-        # 1. Heat transfer phase evolution
-        phases = []
-        for indicators in results['heat_transfer_indicators']:
-            if indicators:
-                phases.append(indicators.get('phase', 'Unknown'))
-        
-        # Convert phases to numerical values for plotting
-        phase_mapping = {
-            'Early Heating': 0,
-            'Heating': 1,
-            'Early Cooling': 2,
-            'Diffusion Cooling': 3
-        }
-        
-        phase_values = [phase_mapping.get(p, 0) for p in phases]
-        
-        fig.add_trace(
-            go.Scatter(
-                x=time_points[:len(phase_values)],
-                y=phase_values,
-                mode='lines+markers',
-                line=dict(color='red', width=3),
-                name='Phase',
-                showlegend=False
-            ),
-            row=1, col=1
-        )
-        
-        # Add phase annotations
-        for phase_name, phase_val in phase_mapping.items():
-            fig.add_hline(y=phase_val, line_dash="dot", line_color="gray", 
-                         annotation_text=phase_name, row=1, col=1)
-        
-        # 2. Fourier number evolution
-        fourier_numbers = []
-        for indicators in results['heat_transfer_indicators']:
-            if indicators:
-                fourier_numbers.append(indicators.get('fourier_number', 0))
-        
-        if fourier_numbers:
-            fig.add_trace(
-                go.Scatter(
-                    x=time_points[:len(fourier_numbers)],
-                    y=fourier_numbers,
-                    mode='lines+markers',
-                    line=dict(color='blue', width=3),
-                    name='Fourier Number',
-                    showlegend=False
-                ),
-                row=1, col=2
-            )
-        
-        # 3. Temporal confidence
-        if 'temporal_confidences' in results:
-            fig.add_trace(
-                go.Scatter(
-                    x=time_points[:len(results['temporal_confidences'])],
-                    y=results['temporal_confidences'],
-                    mode='lines+markers',
-                    line=dict(color='green', width=3),
-                    fill='tozeroy',
-                    fillcolor='rgba(0, 255, 0, 0.2)',
-                    name='Temporal Confidence',
-                    showlegend=False
-                ),
-                row=2, col=1
-            )
-        
-        # 4. Thermal penetration depth
-        penetration_depths = []
-        for indicators in results['heat_transfer_indicators']:
-            if indicators:
-                penetration_depths.append(indicators.get('thermal_penetration_um', 0))
-        
-        if penetration_depths:
-            fig.add_trace(
-                go.Scatter(
-                    x=time_points[:len(penetration_depths)],
-                    y=penetration_depths,
-                    mode='lines+markers',
-                    line=dict(color='orange', width=3),
-                    name='Penetration (μm)',
-                    showlegend=False
-                ),
-                row=2, col=2
-            )
-        
-        fig.update_layout(
-            height=700,
-            title_text="Temporal Analysis of Heat Transfer Characteristics",
-            showlegend=False
-        )
-        
-        # Update axes labels
-        fig.update_xaxes(title_text="Time (ns)", row=1, col=1)
-        fig.update_yaxes(title_text="Phase", row=1, col=1)
-        fig.update_xaxes(title_text="Time (ns)", row=1, col=2)
-        fig.update_yaxes(title_text="Fourier Number", row=1, col=2)
-        fig.update_xaxes(title_text="Time (ns)", row=2, col=1)
-        fig.update_yaxes(title_text="Confidence", row=2, col=1)
-        fig.update_xaxes(title_text="Time (ns)", row=2, col=2)
-        fig.update_yaxes(title_text="Depth (μm)", row=2, col=2)
+        fig.update_xaxes(title_text="Source Index", row=2, col=2)
+        fig.update_yaxes(title_text="Field", row=2, col=2)
+        fig.update_xaxes(title_text="Energy (mJ)", row=2, col=3)
+        fig.update_yaxes(title_text="Duration (ns)", row=2, col=3)
         
         return fig
     
@@ -1580,7 +1174,7 @@ class EnhancedVisualizer:
         ))
         
         fig.update_layout(
-            title="3D Attention Weight Distribution in (E, τ, t) Space",
+            title="3D Attention Weight Distribution",
             scene=dict(
                 xaxis_title="Energy (mJ)",
                 yaxis_title="Duration (ns)",
@@ -1634,7 +1228,6 @@ class EnhancedVisualizer:
                       label=sim_name,
                       energy=sim_meta['energy'] if sim_meta else 0,
                       duration=sim_meta['duration'] if sim_meta else 0,
-                      time=sim_meta['time'] if sim_meta else 0,
                       weight=weight)
             
             # Add edge from query to simulation
@@ -1684,14 +1277,12 @@ class EnhancedVisualizer:
                 sim_data = G.nodes[node]
                 energy = sim_data.get('energy', 0)
                 duration = sim_data.get('duration', 0)
-                time = sim_data.get('time', 0)
                 weight = sim_data.get('weight', 0)
                 
                 node_text.append(
                     f"Simulation: {sim_data['label']}<br>"
                     f"Energy: {energy:.1f} mJ<br>"
                     f"Duration: {duration:.1f} ns<br>"
-                    f"Time: {time:.1f} ns<br>"
                     f"Attention: {weight:.3f}"
                 )
                 node_size.append(sim_data['size'] + 10)
@@ -1788,7 +1379,7 @@ class EnhancedVisualizer:
 # =============================================
 def main():
     st.set_page_config(
-        page_title="Enhanced FEA Laser Simulation Platform with ST-DGPA",
+        page_title="Enhanced FEA Laser Simulation Platform with DGPA",
         layout="wide",
         initial_sidebar_state="expanded",
         page_icon="🔬"
@@ -1839,17 +1430,9 @@ def main():
         margin: 1.5rem 0;
         box-shadow: 0 10px 20px rgba(0,0,0,0.1);
     }
-    .stdgpa-box {
+    .dgpa-box {
         background: linear-gradient(135deg, #f093fb 0%, #00f2fe 100%);
         color: white;
-        padding: 1.5rem;
-        border-radius: 10px;
-        margin: 1.5rem 0;
-        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
-    }
-    .heat-transfer-box {
-        background: linear-gradient(135deg, #ff9a9e 0%, #fad0c4 100%);
-        color: #333;
         padding: 1.5rem;
         border-radius: 10px;
         margin: 1.5rem 0;
@@ -1912,16 +1495,16 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<h1 class="main-header">🔬 Enhanced FEA Laser Simulation Platform with ST-DGPA</h1>', 
+    st.markdown('<h1 class="main-header">🔬 Enhanced FEA Laser Simulation Platform with DGPA</h1>', 
                 unsafe_allow_html=True)
     
     # Initialize session state with enhanced cache management
     if 'data_loader' not in st.session_state:
         st.session_state.data_loader = UnifiedFEADataLoader()
-        # Use ST-DGPA-enhanced extrapolator
-        st.session_state.extrapolator = SpatioTemporalGatedPhysicsAttentionExtrapolator(
+        # Use DGPA-enhanced extrapolator
+        st.session_state.extrapolator = DistanceGatedPhysicsAttentionExtrapolator(
             sigma_param=0.3, spatial_weight=0.5, n_heads=4, temperature=1.0,
-            sigma_g=0.20, s_E=10.0, s_tau=5.0, s_t=20.0, temporal_weight=0.3
+            sigma_g=0.20, s_E=10.0, s_tau=5.0
         )
         st.session_state.visualizer = EnhancedVisualizer()
         st.session_state.data_loaded = False
@@ -1940,8 +1523,8 @@ def main():
         st.markdown("### ⚙️ Navigation")
         app_mode = st.radio(
             "Select Mode",
-            ["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis", "ST-DGPA Analysis", "Heat Transfer Analysis"],
-            index=["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis", "ST-DGPA Analysis", "Heat Transfer Analysis"].index(
+            ["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis", "DGPA Analysis"],
+            index=["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis", "DGPA Analysis"].index(
                 st.session_state.current_mode if 'current_mode' in st.session_state else "Data Viewer"
             ),
             key="nav_mode"
@@ -2042,10 +1625,8 @@ def main():
         render_interpolation_extrapolation()
     elif app_mode == "Comparative Analysis":
         render_comparative_analysis()
-    elif app_mode == "ST-DGPA Analysis":
-        render_stdgpa_analysis()
-    elif app_mode == "Heat Transfer Analysis":
-        render_heat_transfer_analysis()
+    elif app_mode == "DGPA Analysis":
+        render_dgpa_analysis()
 
 def render_data_viewer():
     """Render the enhanced data visualization interface"""
@@ -2373,8 +1954,8 @@ fea_solutions/
         st.info(f"No time series data available for {field}")
 
 def render_interpolation_extrapolation():
-    """Render the enhanced interpolation/extrapolation interface with ST-DGPA"""
-    st.markdown('<h2 class="sub-header">🔮 Interpolation/Extrapolation Engine with ST-DGPA</h2>', 
+    """Render the enhanced interpolation/extrapolation interface with DGPA"""
+    st.markdown('<h2 class="sub-header">🔮 Interpolation/Extrapolation Engine with DGPA</h2>', 
                unsafe_allow_html=True)
     
     if not st.session_state.data_loaded:
@@ -2396,16 +1977,15 @@ def render_interpolation_extrapolation():
         """, unsafe_allow_html=True)
     
     st.markdown("""
-    <div class="stdgpa-box">
-    <h3>🧠 Spatio-Temporal Gated Physics Attention (ST-DGPA)</h3>
-    <p>This engine uses <strong>Spatio-Temporal Gated Physics Attention (ST-DGPA)</strong> to interpolate and extrapolate simulation results. ST-DGPA extends DGPA to include temporal parameter gating:</p>
+    <div class="dgpa-box">
+    <h3>🧠 Distance-Gated Physics Attention (DGPA)</h3>
+    <p>This engine uses <strong>Distance-Gated Physics Attention (DGPA)</strong> to interpolate and extrapolate simulation results. DGPA combines:</p>
     <ol>
-    <li><strong>Physics-informed attention</strong>: Multi-head transformer-like attention with enhanced physics-aware embeddings</li>
-    <li><strong>Energy-duration-time gating</strong>: Explicit (E, τ, t) proximity kernel that ensures physically meaningful interpolation across time</li>
-    <li><strong>Heat transfer characterization</strong>: Incorporates Fourier number and thermal penetration depth for temporal similarity</li>
+    <li><strong>Physics-informed attention</strong>: Multi-head transformer-like attention with physics-aware embeddings</li>
+    <li><strong>Energy-duration gating</strong>: Explicit (E, τ) proximity kernel that ensures physically meaningful interpolation</li>
     </ol>
-    <p><strong>ST-DGPA Formula:</strong> w_i = (α_i × gating_i) / (∑_j α_j × gating_j)</p>
-    <p>where φ_i = √(((E*-E_i)/s_E)² + ((τ*-τ_i)/s_τ)² + ((t*-t_i)/s_t)²) and gating_i = exp(-φ_i²/(2σ_g²))</p>
+    <p><strong>DGPA Formula:</strong> w_i = (α_i × gating_i) / (∑_j α_j × gating_j)</p>
+    <p>where φ_i = √(((E*-E_i)/s_E)² + ((τ*-τ_i)/s_τ)²) and gating_i = exp(-φ_i²/(2σ_g²))</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -2417,7 +1997,6 @@ def render_interpolation_extrapolation():
                 'Energy (mJ)': s['energy'],
                 'Duration (ns)': s['duration'],
                 'Timesteps': len(s['timesteps']),
-                'Max Time (ns)': max(s['timesteps']) if s['timesteps'] else 0,
                 'Fields': ', '.join(sorted(s['field_stats'].keys())[:3]) + ('...' if len(s['field_stats']) > 3 else ''),
                 'Has Full Mesh': 'Yes' if st.session_state.simulations.get(s['name'], {}).get('has_mesh', False) else 'No'
             } for s in st.session_state.summaries])
@@ -2425,9 +2004,8 @@ def render_interpolation_extrapolation():
             st.dataframe(
                 df_summary.style.format({
                     'Energy (mJ)': '{:.2f}',
-                    'Duration (ns)': '{:.2f}',
-                    'Max Time (ns)': '{:.0f}'
-                }).background_gradient(subset=['Energy (mJ)', 'Duration (ns)', 'Max Time (ns)'], cmap='Blues'),
+                    'Duration (ns)': '{:.2f}'
+                }).background_gradient(subset=['Energy (mJ)', 'Duration (ns)'], cmap='Blues'),
                 use_container_width=True,
                 height=300
             )
@@ -2475,18 +2053,17 @@ def render_interpolation_extrapolation():
         max_time = st.number_input(
             "Max Prediction Time (ns)",
             min_value=1,
-            max_value=200,
-            value=50,
+            max_value=1000,
+            value=20,
             step=1,
-            key="interp_maxtime",
-            help="Maximum time for prediction (ns)"
+            key="interp_maxtime"
         )
     
     with col4:
         time_resolution = st.selectbox(
             "Time Resolution",
             ["1 ns", "2 ns", "5 ns", "10 ns"],
-            index=1,
+            index=0,
             key="interp_resolution"
         )
     
@@ -2495,8 +2072,8 @@ def render_interpolation_extrapolation():
     time_step = time_step_map[time_resolution]
     time_points = np.arange(1, max_time + 1, time_step)
     
-    # Model parameters with ST-DGPA-specific parameters
-    with st.expander("⚙️ ST-DGPA Attention Parameters", expanded=False):
+    # Model parameters with DGPA-specific parameters
+    with st.expander("⚙️ DGPA Attention Parameters", expanded=False):
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             sigma_param = st.slider(
@@ -2539,9 +2116,9 @@ def render_interpolation_extrapolation():
                 help="Softmax temperature for attention weights"
             )
         
-        # ST-DGPA-specific parameters
-        st.markdown("### 🎯 ST-DGPA Gating Parameters")
-        col5, col6, col7, col8 = st.columns(4)
+        # DGPA-specific parameters
+        st.markdown("### 🎯 DGPA Gating Parameters")
+        col5, col6, col7 = st.columns(3)
         with col5:
             sigma_g = st.slider(
                 "Gating Kernel Width (σ_g)",
@@ -2550,7 +2127,7 @@ def render_interpolation_extrapolation():
                 value=0.20,
                 step=0.05,
                 key="interp_sigma_g",
-                help="Sharpness of the (E, τ, t) gating kernel"
+                help="Sharpness of the (E, τ) gating kernel"
             )
         with col6:
             s_E = st.slider(
@@ -2572,28 +2149,6 @@ def render_interpolation_extrapolation():
                 key="interp_s_tau",
                 help="Scaling factor for pulse duration in gating kernel"
             )
-        with col8:
-            s_t = st.slider(
-                "Time Scale (s_t) [ns]",
-                min_value=1.0,
-                max_value=50.0,
-                value=20.0,
-                step=1.0,
-                key="interp_s_t",
-                help="Scaling factor for time in gating kernel"
-            )
-        
-        # Temporal weight parameter
-        st.markdown("### ⏱️ Temporal Weighting")
-        temporal_weight = st.slider(
-            "Temporal Similarity Weight",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.3,
-            step=0.05,
-            key="interp_temporal_weight",
-            help="Weight for temporal similarity in attention calculation"
-        )
         
         # Update extrapolator parameters
         st.session_state.extrapolator.sigma_param = sigma_param
@@ -2603,51 +2158,6 @@ def render_interpolation_extrapolation():
         st.session_state.extrapolator.sigma_g = sigma_g
         st.session_state.extrapolator.s_E = s_E
         st.session_state.extrapolator.s_tau = s_tau
-        st.session_state.extrapolator.s_t = s_t
-        st.session_state.extrapolator.temporal_weight = temporal_weight
-    
-    # Heat transfer physics parameters
-    with st.expander("🔥 Heat Transfer Physics Parameters", expanded=False):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            thermal_diffusivity = st.number_input(
-                "Thermal Diffusivity (m²/s)",
-                min_value=1e-7,
-                max_value=1e-4,
-                value=1e-5,
-                format="%.1e",
-                key="thermal_diffusivity",
-                help="Material thermal diffusivity (typical metals: ~1e-5 m²/s)"
-            )
-            st.session_state.extrapolator.thermal_diffusivity = thermal_diffusivity
-        
-        with col2:
-            spot_radius = st.number_input(
-                "Laser Spot Radius (μm)",
-                min_value=1.0,
-                max_value=200.0,
-                value=50.0,
-                key="spot_radius",
-                help="Laser spot radius for heat transfer calculations"
-            )
-            st.session_state.extrapolator.laser_spot_radius = spot_radius * 1e-6
-        
-        with col3:
-            char_length = st.number_input(
-                "Characteristic Length (μm)",
-                min_value=10.0,
-                max_value=500.0,
-                value=100.0,
-                key="char_length",
-                help="Characteristic length for heat diffusion"
-            )
-            st.session_state.extrapolator.characteristic_length = char_length * 1e-6
-        
-        # Display derived heat transfer parameters
-        fourier_max = st.session_state.extrapolator._compute_fourier_number(max_time)
-        penetration_max = st.session_state.extrapolator._compute_thermal_penetration(max_time)
-        
-        st.info(f"**Derived Parameters:** Max Fourier Number: {fourier_max:.3f}, Max Thermal Penetration: {penetration_max:.1f} μm")
     
     # 3D interpolation specific settings
     with st.expander("🖼️ 3D Interpolation Settings", expanded=False):
@@ -2682,8 +2192,8 @@ def render_interpolation_extrapolation():
                 )
     
     # Run prediction
-    if st.button("🚀 Run ST-DGPA Prediction", type="primary", use_container_width=True):
-        with st.spinner("Running Spatio-Temporal Gated Physics Attention (ST-DGPA) prediction..."):
+    if st.button("🚀 Run DGPA Prediction", type="primary", use_container_width=True):
+        with st.spinner("Running Distance-Gated Physics Attention (DGPA) prediction..."):
             # Clear cache for new prediction
             CacheManager.clear_3d_cache()
             
@@ -2704,54 +2214,47 @@ def render_interpolation_extrapolation():
                     'sigma_g': sigma_g,
                     's_E': s_E,
                     's_tau': s_tau,
-                    's_t': s_t,
-                    'temporal_weight': temporal_weight,
-                    'thermal_diffusivity': thermal_diffusivity,
                     'top_k': top_k if 'top_k' in locals() and optimize_performance else None,
                     'subsample_factor': subsample_factor if 'subsample_factor' in locals() and optimize_performance else None
                 }
                 
                 # Generate prediction ID for cache tracking
                 prediction_id = hashlib.md5(
-                    f"{energy_query}_{duration_query}_{sigma_param}_{sigma_g}_{s_t}".encode()
+                    f"{energy_query}_{duration_query}_{sigma_param}_{sigma_g}".encode()
                 ).hexdigest()[:8]
                 st.session_state.last_prediction_id = prediction_id
                 
                 st.markdown("""
                 <div class="success-box">
-                <h3>✅ ST-DGPA Prediction Successful</h3>
-                <p>Spatio-Temporal Gated Physics Attention predictions generated with explicit energy-duration-time gating.</p>
-                <p><strong>Heat transfer characterized:</strong> Fourier numbers and thermal penetration depths computed.</p>
+                <h3>✅ DGPA Prediction Successful</h3>
+                <p>Distance-Gated Physics Attention predictions generated with explicit energy-duration gating.</p>
                 <p><strong>Cache initialized:</strong> 3D field interpolations will be cached for faster switching.</p>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Visualization tabs - Updated with ST-DGPA tabs
-                tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-                    "📈 Predictions", "🧠 ST-DGPA Analysis", "⏱️ Temporal Analysis", 
-                    "🌐 3D Analysis", "📊 Details", "🖼️ 3D Rendering", "⚙️ Parameters"
+                # Visualization tabs - Updated with DGPA tab
+                tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+                    "📈 Predictions", "🧠 DGPA Analysis", "🌐 3D Analysis", 
+                    "📊 Details", "🖼️ 3D Rendering", "⚙️ Parameters"
                 ])
                 
                 with tab1:
                     render_prediction_results(results, time_points, energy_query, duration_query)
                 
                 with tab2:
-                    render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points)
+                    render_dgpa_attention_visualization(results, energy_query, duration_query, time_points)
                 
                 with tab3:
-                    render_temporal_analysis(results, time_points, energy_query, duration_query)
-                
-                with tab4:
                     render_3d_analysis(results, time_points, energy_query, duration_query)
                 
-                with tab5:
+                with tab4:
                     render_detailed_results(results, time_points, energy_query, duration_query)
                 
-                with tab6:
+                with tab5:
                     render_3d_interpolation(results, time_points, energy_query, duration_query, 
                                            enable_3d, optimize_performance, top_k if optimize_performance else None)
                 
-                with tab7:
+                with tab6:
                     render_parameter_analysis(results, energy_query, duration_query, time_points)
             else:
                 st.error("Prediction failed. Please check input parameters and ensure sufficient training data.")
@@ -2760,11 +2263,10 @@ def render_interpolation_extrapolation():
     elif st.session_state.interpolation_results is not None:
         st.markdown(f"""
         <div class="info-box">
-        <h3>📊 Previous ST-DGPA Prediction Results Available</h3>
-        <p>Showing results from previous ST-DGPA prediction run with temporal gating.</p>
+        <h3>📊 Previous DGPA Prediction Results Available</h3>
+        <p>Showing results from previous DGPA prediction run.</p>
         <p><strong>Prediction ID:</strong> {st.session_state.last_prediction_id or 'N/A'}</p>
         <p><strong>Cached fields:</strong> {len(st.session_state.interpolation_3d_cache)}</p>
-        <p><strong>Temporal gating enabled:</strong> Yes (s_t = {st.session_state.extrapolator.s_t:.1f} ns)</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -2776,27 +2278,24 @@ def render_interpolation_extrapolation():
         results = st.session_state.interpolation_results
         
         # Visualization tabs
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-            "📈 Predictions", "🧠 ST-DGPA Analysis", "⏱️ Temporal Analysis", 
-            "🌐 3D Analysis", "📊 Details", "🖼️ 3D Rendering", "⚙️ Parameters"
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "📈 Predictions", "🧠 DGPA Analysis", "🌐 3D Analysis", 
+            "📊 Details", "🖼️ 3D Rendering", "⚙️ Parameters"
         ])
         
         with tab1:
             render_prediction_results(results, time_points, energy_query, duration_query)
         
         with tab2:
-            render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points)
+            render_dgpa_attention_visualization(results, energy_query, duration_query, time_points)
         
         with tab3:
-            render_temporal_analysis(results, time_points, energy_query, duration_query)
-        
-        with tab4:
             render_3d_analysis(results, time_points, energy_query, duration_query)
         
-        with tab5:
+        with tab4:
             render_detailed_results(results, time_points, energy_query, duration_query)
         
-        with tab6:
+        with tab5:
             # Get optimization parameters
             enable_3d = True
             optimize_performance = params.get('top_k') is not None
@@ -2804,39 +2303,39 @@ def render_interpolation_extrapolation():
             render_3d_interpolation(results, time_points, energy_query, duration_query, 
                                    enable_3d, optimize_performance, top_k)
         
-        with tab7:
+        with tab6:
             render_parameter_analysis(results, energy_query, duration_query, time_points)
 
-def render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points):
-    """Render ST-DGPA-specific attention visualizations"""
+def render_dgpa_attention_visualization(results, energy_query, duration_query, time_points):
+    """Render DGPA-specific attention visualizations"""
     if not results.get('physics_attention_maps') or len(results['physics_attention_maps'][0]) == 0:
-        st.info("No ST-DGPA attention data available.")
+        st.info("No DGPA attention data available.")
         return
     
-    st.markdown('<h4 class="sub-header">🧠 ST-DGPA Attention Analysis</h4>', unsafe_allow_html=True)
+    st.markdown('<h4 class="sub-header">🧠 DGPA Attention Analysis</h4>', unsafe_allow_html=True)
     
-    # Select timestep for ST-DGPA visualization
+    # Select timestep for DGPA visualization
     selected_timestep_idx = st.slider(
-        "Select timestep for ST-DGPA analysis",
+        "Select timestep for DGPA analysis",
         0, len(time_points) - 1, len(time_points) // 2,
-        key="stdgpa_timestep"
+        key="dgpa_timestep"
     )
     
     final_weights = results['attention_maps'][selected_timestep_idx]
     physics_attention = results['physics_attention_maps'][selected_timestep_idx]
-    ett_gating = results['ett_gating_maps'][selected_timestep_idx]
+    et_gating = results['et_gating_maps'][selected_timestep_idx]
     selected_time = time_points[selected_timestep_idx]
     
-    # Create comprehensive ST-DGPA analysis plot
-    fig = st.session_state.visualizer.create_stdgpa_analysis(
+    # Create comprehensive DGPA analysis plot
+    fig = st.session_state.visualizer.create_dgpa_analysis(
         results, energy_query, duration_query, time_points
     )
     
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     
-    # Detailed ST-DGPA analysis
-    st.markdown("##### 📊 ST-DGPA Weight Analysis")
+    # Detailed DGPA analysis
+    st.markdown("##### 📊 DGPA Weight Analysis")
     
     if len(final_weights) > 0:
         # Create comparison dataframe
@@ -2845,8 +2344,8 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             comparison_data.append({
                 'Source': f"Source {i+1}",
                 'Physics Attention': physics_attention[i],
-                '(E, τ, t) Gating': ett_gating[i],
-                'ST-DGPA Final Weight': final_weights[i],
+                '(E, τ) Gating': et_gating[i],
+                'DGPA Final Weight': final_weights[i],
                 'Weight Change (%)': ((final_weights[i] - physics_attention[i]) / physics_attention[i] * 100) if physics_attention[i] > 0 else 0
             })
         
@@ -2855,12 +2354,19 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         # Display with highlighting
         styled_df = df_comparison.style.format({
             'Physics Attention': '{:.4f}',
-            '(E, τ, t) Gating': '{:.4f}',
-            'ST-DGPA Final Weight': '{:.4f}',
+            '(E, τ) Gating': '{:.4f}',
+            'DGPA Final Weight': '{:.4f}',
             'Weight Change (%)': '{:.1f}%'
         })
         
         # Highlight significant changes
+        def highlight_dgpa_change(val):
+            if isinstance(val, str) and 'Weight Change' in val:
+                num_val = float(val.replace('%', ''))
+                if abs(num_val) > 50:
+                    return 'background-color: #ffcccc' if num_val < -50 else 'background-color: #ccffcc'
+            return ''
+        
         if 'Weight Change (%)' in df_comparison.columns:
             styled_df = styled_df.background_gradient(
                 subset=['Weight Change (%)'], 
@@ -2871,27 +2377,27 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         
         st.dataframe(styled_df, use_container_width=True)
         
-        # ST-DGPA statistics
-        st.markdown("##### 📈 ST-DGPA Statistics")
+        # DGPA statistics
+        st.markdown("##### 📈 DGPA Statistics")
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             max_physics = np.max(physics_attention) if len(physics_attention) > 0 else 0
             st.metric("Max Physics Attention", f"{max_physics:.4f}")
         with col2:
-            max_gating = np.max(ett_gating) if len(ett_gating) > 0 else 0
-            st.metric("Max (E, τ, t) Gating", f"{max_gating:.4f}")
+            max_gating = np.max(et_gating) if len(et_gating) > 0 else 0
+            st.metric("Max (E, τ) Gating", f"{max_gating:.4f}")
         with col3:
-            max_stdgpa = np.max(final_weights) if len(final_weights) > 0 else 0
-            st.metric("Max ST-DGPA Weight", f"{max_stdgpa:.4f}")
+            max_dgpa = np.max(final_weights) if len(final_weights) > 0 else 0
+            st.metric("Max DGPA Weight", f"{max_dgpa:.4f}")
         with col4:
             weight_change_avg = np.mean(np.abs(np.array(final_weights) - np.array(physics_attention))) if len(final_weights) > 0 else 0
             st.metric("Avg Weight Change", f"{weight_change_avg:.4f}")
         
-        # ST-DGPA effect analysis
-        st.markdown("##### 🔍 ST-DGPA Effect Analysis")
+        # DGPA effect analysis
+        st.markdown("##### 🔍 DGPA Effect Analysis")
         
-        # Calculate how much ST-DGPA changes the weights
+        # Calculate how much DGPA changes the weights
         if len(physics_attention) > 0 and len(final_weights) > 0:
             # Find which sources were boosted/suppressed
             weight_diffs = final_weights - physics_attention
@@ -2901,121 +2407,18 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             if len(boosted_indices) > 0:
                 max_boost_idx = boosted_indices[np.argmax(weight_diffs[boosted_indices])]
                 max_boost = weight_diffs[max_boost_idx]
-                st.info(f"**ST-DGPA boosted {len(boosted_indices)} sources** (max boost: +{max_boost:.3f} for source {max_boost_idx+1})")
+                st.info(f"**DGPA boosted {len(boosted_indices)} sources** (max boost: +{max_boost:.3f} for source {max_boost_idx+1})")
             
             if len(suppressed_indices) > 0:
                 max_suppress_idx = suppressed_indices[np.argmin(weight_diffs[suppressed_indices])]
                 max_suppress = weight_diffs[max_suppress_idx]
-                st.info(f"**ST-DGPA suppressed {len(suppressed_indices)} sources** (max suppression: {max_suppress:.3f} for source {max_suppress_idx+1})")
+                st.info(f"**DGPA suppressed {len(suppressed_indices)} sources** (max suppression: {max_suppress:.3f} for source {max_suppress_idx+1})")
             
-            # Show top 5 sources by ST-DGPA weight with temporal information
+            # Show top 5 sources by DGPA weight
             top_indices = np.argsort(final_weights)[-5:][::-1]
-            st.write("**Top 5 Sources by ST-DGPA Weight:**")
+            st.write("**Top 5 Sources by DGPA Weight:**")
             for rank, idx in enumerate(top_indices):
-                # Get temporal information
-                if hasattr(st.session_state.extrapolator, 'source_metadata') and idx < len(st.session_state.extrapolator.source_metadata):
-                    meta = st.session_state.extrapolator.source_metadata[idx]
-                    time_info = f", t={meta['time']} ns"
-                else:
-                    time_info = ""
-                
-                st.write(f"{rank+1}. Source {idx+1}{time_info}: Physics={physics_attention[idx]:.4f}, Gating={ett_gating[idx]:.4f}, ST-DGPA={final_weights[idx]:.4f}")
-
-def render_temporal_analysis(results, time_points, energy_query, duration_query):
-    """Render temporal-specific analysis"""
-    if not results or 'heat_transfer_indicators' not in results:
-        st.info("No temporal analysis data available.")
-        return
-    
-    st.markdown('<h4 class="sub-header">⏱️ Temporal Analysis</h4>', unsafe_allow_html=True)
-    
-    # Create temporal analysis visualization
-    fig = st.session_state.visualizer.create_temporal_analysis(results, time_points)
-    
-    if fig:
-        st.plotly_chart(fig, use_container_width=True)
-    
-    # Detailed temporal metrics
-    st.markdown("##### 📊 Temporal Metrics")
-    
-    # Calculate phase durations
-    if results['heat_transfer_indicators']:
-        phases = []
-        for indicators in results['heat_transfer_indicators']:
-            if indicators:
-                phases.append(indicators.get('phase', 'Unknown'))
-        
-        # Count phase occurrences
-        phase_counts = {}
-        for phase in phases:
-            phase_counts[phase] = phase_counts.get(phase, 0) + 1
-        
-        # Display phase distribution
-        col1, col2, col3, col4 = st.columns(4)
-        
-        phase_list = ['Early Heating', 'Heating', 'Early Cooling', 'Diffusion Cooling']
-        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4']
-        
-        for idx, phase in enumerate(phase_list):
-            count = phase_counts.get(phase, 0)
-            percentage = (count / len(phases) * 100) if phases else 0
-            
-            with [col1, col2, col3, col4][idx % 4]:
-                st.metric(
-                    f"{phase}",
-                    f"{percentage:.1f}%",
-                    delta=f"{count} timesteps" if count > 0 else None
-                )
-        
-        # Temporal confidence analysis
-        if 'temporal_confidences' in results:
-            avg_temporal_conf = np.mean(results['temporal_confidences'])
-            min_temporal_conf = np.min(results['temporal_confidences'])
-            max_temporal_conf = np.max(results['temporal_confidences'])
-            
-            st.markdown("##### 📈 Temporal Confidence")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Average Temporal Confidence", f"{avg_temporal_conf:.3f}")
-            with col2:
-                st.metric("Minimum Temporal Confidence", f"{min_temporal_conf:.3f}")
-            with col3:
-                st.metric("Maximum Temporal Confidence", f"{max_temporal_conf:.3f}")
-            
-            # Interpretation
-            if avg_temporal_conf < 0.5:
-                st.warning("⚠️ **Low Temporal Confidence**: Time interpolation may be unreliable, especially during heating phases.")
-            elif avg_temporal_conf < 0.7:
-                st.info("ℹ️ **Moderate Temporal Confidence**: Time interpolation is reasonable but may have artifacts during rapid changes.")
-            else:
-                st.success("✅ **High Temporal Confidence**: Time interpolation is reliable across all phases.")
-        
-        # Heat transfer regime analysis
-        st.markdown("##### 🔥 Heat Transfer Regime Analysis")
-        
-        # Create a table of heat transfer indicators
-        if results['heat_transfer_indicators']:
-            # Sample at key timesteps
-            sample_indices = [0, len(time_points)//4, len(time_points)//2, 3*len(time_points)//4, -1]
-            sample_data = []
-            
-            for idx in sample_indices:
-                if idx < len(results['heat_transfer_indicators']):
-                    indicators = results['heat_transfer_indicators'][idx]
-                    if indicators:
-                        sample_data.append({
-                            'Time (ns)': time_points[idx],
-                            'Phase': indicators.get('phase', 'Unknown'),
-                            'Regime': indicators.get('regime', 'Unknown'),
-                            'Fourier Number': f"{indicators.get('fourier_number', 0):.3f}",
-                            'Penetration (μm)': f"{indicators.get('thermal_penetration_um', 0):.1f}",
-                            'Norm. Time': f"{indicators.get('normalized_time', 0):.2f}"
-                        })
-            
-            if sample_data:
-                df_heat_transfer = pd.DataFrame(sample_data)
-                st.dataframe(df_heat_transfer, use_container_width=True)
+                st.write(f"{rank+1}. Source {idx+1}: Physics={physics_attention[idx]:.4f}, Gating={et_gating[idx]:.4f}, DGPA={final_weights[idx]:.4f}")
 
 def render_prediction_results(results, time_points, energy_query, duration_query):
     """Render prediction results visualization"""
@@ -3103,16 +2506,6 @@ def render_prediction_results(results, time_points, energy_query, duration_query
             name='Prediction Confidence'
         ))
         
-        # Add temporal confidence if available
-        if 'temporal_confidences' in results:
-            fig_conf.add_trace(go.Scatter(
-                x=time_points,
-                y=results['temporal_confidences'],
-                mode='lines+markers',
-                line=dict(color='green', width=3, dash='dash'),
-                name='Temporal Confidence'
-            ))
-        
         fig_conf.update_layout(
             title="Prediction Confidence Over Time",
             xaxis_title="Time (ns)",
@@ -3169,7 +2562,7 @@ def render_3d_analysis(results, time_points, energy_query, duration_query):
             else:
                 train_max_stresses.append(0)
         
-        # Add query point predictions
+        # Add query point
         query_max_temp = np.max(results['field_predictions'].get('temperature', {}).get('max', [0]))
         query_max_stress = np.max(results['field_predictions'].get('principal stress', {}).get('max', [0]))
         
@@ -3271,67 +2664,12 @@ def render_3d_analysis(results, time_points, energy_query, duration_query):
             )
             
             st.plotly_chart(fig_stress, use_container_width=True)
-        
-        # Time evolution in 3D
-        st.markdown("##### ⏱️ Time Evolution in Parameter Space")
-        
-        if 'field_predictions' in results and 'temperature' in results['field_predictions']:
-            # Create animation of temperature evolution
-            temp_evolution = results['field_predictions']['temperature']['mean']
-            
-            fig_evolution = go.Figure()
-            
-            # Training points (static)
-            fig_evolution.add_trace(go.Scatter3d(
-                x=train_energies,
-                y=train_durations,
-                z=[train_max_temps[0]] * len(train_energies),  # Placeholder z
-                mode='markers',
-                marker=dict(
-                    size=6,
-                    color='lightblue',
-                    opacity=0.3
-                ),
-                name='Training Data'
-            ))
-            
-            # Query point evolution
-            fig_evolution.add_trace(go.Scatter3d(
-                x=[energy_query] * len(time_points),
-                y=[duration_query] * len(time_points),
-                z=temp_evolution,
-                mode='lines+markers',
-                marker=dict(
-                    size=8,
-                    color=temp_evolution,
-                    colorscale='Viridis',
-                    showscale=True,
-                    colorbar=dict(title="Temperature")
-                ),
-                line=dict(
-                    color='gray',
-                    width=2
-                ),
-                name='Temperature Evolution'
-            ))
-            
-            fig_evolution.update_layout(
-                title="Temperature Evolution Over Time",
-                scene=dict(
-                    xaxis_title="Energy (mJ)",
-                    yaxis_title="Duration (ns)",
-                    zaxis_title="Temperature"
-                ),
-                height=500
-            )
-            
-            st.plotly_chart(fig_evolution, use_container_width=True)
 
 def render_detailed_results(results, time_points, energy_query, duration_query):
     """Render detailed prediction results"""
     st.markdown('<h4 class="sub-header">📊 Detailed Prediction Results</h4>', unsafe_allow_html=True)
     
-    # Create results table with enhanced temporal information
+    # Create results table
     data_rows = []
     for idx, t in enumerate(time_points):
         row = {'Time (ns)': t}
@@ -3346,17 +2684,6 @@ def render_detailed_results(results, time_points, energy_query, duration_query):
         if idx < len(results['confidence_scores']):
             row['confidence'] = results['confidence_scores'][idx]
         
-        if idx < len(results.get('temporal_confidences', [])):
-            row['temporal_confidence'] = results['temporal_confidences'][idx]
-        
-        # Add heat transfer indicators
-        if idx < len(results.get('heat_transfer_indicators', [])):
-            indicators = results['heat_transfer_indicators'][idx]
-            if indicators:
-                row['phase'] = indicators.get('phase', 'Unknown')
-                row['fourier_number'] = indicators.get('fourier_number', 0)
-                row['penetration_um'] = indicators.get('thermal_penetration_um', 0)
-        
         data_rows.append(row)
     
     if data_rows:
@@ -3365,16 +2692,10 @@ def render_detailed_results(results, time_points, energy_query, duration_query):
         # Format numeric columns
         format_dict = {}
         for col in df_results.columns:
-            if col not in ['Time (ns)', 'phase']:
-                if 'mean' in col or 'max' in col or 'std' in col:
-                    format_dict[col] = "{:.3f}"
-                elif 'confidence' in col:
-                    format_dict[col] = "{:.3f}"
-                elif 'fourier_number' in col:
-                    format_dict[col] = "{:.4f}"
-                elif 'penetration_um' in col:
-                    format_dict[col] = "{:.1f}"
+            if col != 'Time (ns)':
+                format_dict[col] = "{:.3f}"
         
+        # Display with highlighting
         styled_df = df_results.style.format(format_dict)
         
         # Add conditional formatting for confidence
@@ -3388,26 +2709,8 @@ def render_detailed_results(results, time_points, energy_query, duration_query):
                     return 'background-color: #ccffcc'
             return ''
         
-        # Apply formatting to confidence columns
-        confidence_cols = [col for col in df_results.columns if 'confidence' in col]
-        for col in confidence_cols:
-            styled_df = styled_df.applymap(highlight_confidence, subset=[col])
-        
-        # Color phases
-        phase_colors = {
-            'Early Heating': '#FF6B6B',
-            'Heating': '#4ECDC4',
-            'Early Cooling': '#45B7D1',
-            'Diffusion Cooling': '#96CEB4'
-        }
-        
-        def color_phase(val):
-            if val in phase_colors:
-                return f'background-color: {phase_colors[val]}; color: white'
-            return ''
-        
-        if 'phase' in df_results.columns:
-            styled_df = styled_df.applymap(color_phase, subset=['phase'])
+        if 'confidence' in df_results.columns:
+            styled_df = styled_df.applymap(highlight_confidence, subset=['confidence'])
         
         st.dataframe(styled_df, use_container_width=True, height=400)
         
@@ -3430,7 +2733,7 @@ def render_detailed_results(results, time_points, energy_query, duration_query):
         # Export options
         st.markdown("##### 💾 Export Results")
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         
         with col1:
             # CSV export
@@ -3438,7 +2741,7 @@ def render_detailed_results(results, time_points, energy_query, duration_query):
             st.download_button(
                 label="📥 Download as CSV",
                 data=csv,
-                file_name=f"stdgpa_predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.csv",
+                file_name=f"dgpa_predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.csv",
                 mime="text/csv",
                 use_container_width=True
             )
@@ -3449,50 +2752,37 @@ def render_detailed_results(results, time_points, energy_query, duration_query):
             st.download_button(
                 label="📥 Download as JSON",
                 data=json_str.encode('utf-8'),
-                file_name=f"stdgpa_predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.json",
+                file_name=f"dgpa_predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.json",
                 mime="application/json",
-                use_container_width=True
-            )
-        
-        with col3:
-            # HTML export with formatting
-            html = styled_df.to_html()
-            st.download_button(
-                label="📥 Download as HTML",
-                data=html.encode('utf-8'),
-                file_name=f"stdgpa_predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.html",
-                mime="text/html",
                 use_container_width=True
             )
 
 def render_parameter_analysis(results, energy_query, duration_query, time_points):
-    """Render ST-DGPA parameter sensitivity analysis"""
-    st.markdown('<h4 class="sub-header">⚙️ ST-DGPA Parameter Sensitivity</h4>', unsafe_allow_html=True)
+    """Render DGPA parameter sensitivity analysis"""
+    st.markdown('<h4 class="sub-header">⚙️ DGPA Parameter Sensitivity</h4>', unsafe_allow_html=True)
     
     # Get current parameters
     params = st.session_state.interpolation_params or {}
     
-    st.markdown("### Current ST-DGPA Parameters")
+    st.markdown("### Current DGPA Parameters")
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("σ_g (Gating Width)", f"{params.get('sigma_g', 0.20):.2f}")
     with col2:
         st.metric("s_E (Energy Scale)", f"{params.get('s_E', 10.0):.1f} mJ")
     with col3:
         st.metric("s_τ (Duration Scale)", f"{params.get('s_tau', 5.0):.1f} ns")
-    with col4:
-        st.metric("s_t (Time Scale)", f"{params.get('s_t', 20.0):.1f} ns")
     
     # Parameter sensitivity explanation
-    with st.expander("📖 ST-DGPA Parameter Guide", expanded=True):
+    with st.expander("📖 DGPA Parameter Guide", expanded=True):
         st.markdown("""
-        ### ST-DGPA Parameter Effects
+        ### DGPA Parameter Effects
         
         **σ_g (Gating Kernel Width):**
-        - **Small values (0.05-0.2):** Sharp gating, only very similar (E, τ, t) simulations contribute
+        - **Small values (0.05-0.2):** Sharp gating, only very similar (E, τ) simulations contribute
         - **Large values (0.3-1.0):** Broad gating, allows more distant simulations to contribute
-        - **Recommended:** 0.15-0.25 for laser processing with temporal gating
+        - **Recommended:** 0.15-0.25 for laser processing
         
         **s_E (Energy Scaling Factor):**
         - Controls how energy differences are weighted
@@ -3506,39 +2796,25 @@ def render_parameter_analysis(results, energy_query, duration_query, time_points
         - **Large values:** Duration differences are less important
         - **Recommended:** Set to ~2× standard deviation of training durations
         
-        **s_t (Time Scaling Factor):**
-        - **NEW:** Controls how time differences are weighted
-        - **Small values (5-15 ns):** Tight temporal matching, good for heating phase
-        - **Large values (20-50 ns):** Looser temporal matching, good for diffusion phase
-        - **Recommended:** 15-25 ns for typical laser processing
+        ### Parameter Selection Strategy
         
-        **temporal_weight:**
-        - **NEW:** Weight for temporal similarity in attention calculation
-        - **0.0-0.3:** Physics attention dominates
-        - **0.3-0.7:** Balanced temporal and physics attention
-        - **0.7-1.0:** Temporal similarity dominates
-        
-        ### Parameter Selection Strategy for Heat Transfer
-        
-        1. **For heating phase interpolation** (t < τ):
-           - Use smaller s_t (10-15 ns)
-           - Use moderate σ_g (0.2-0.25)
-           - Higher temporal_weight (0.4-0.6)
+        1. **For interpolation** (query within training range):
+           - Use moderate σ_g (0.2-0.3)
+           - Use data-derived s_E, s_τ
            
-        2. **For cooling phase interpolation** (t > τ):
-           - Use larger s_t (20-30 ns)
-           - Use moderate σ_g (0.2-0.25)
-           - Lower temporal_weight (0.2-0.4)
+        2. **For extrapolation** (query outside training range):
+           - Use smaller σ_g (0.1-0.2) to avoid unphysical blending
+           - Consider increasing s_E, s_τ slightly
            
         3. **For uncertainty quantification:**
-           - Vary s_t and observe confidence changes
-           - Larger s_t → higher temporal confidence but potentially less accurate for heating
+           - Vary σ_g and observe confidence changes
+           - Larger σ_g → higher confidence but potentially less accurate
         """)
     
     # Quick parameter testing
     st.markdown("### 🧪 Quick Parameter Test")
     
-    test_col1, test_col2, test_col3, test_col4 = st.columns(4)
+    test_col1, test_col2, test_col3 = st.columns(3)
     with test_col1:
         test_sigma_g = st.slider(
             "Test σ_g",
@@ -3566,41 +2842,19 @@ def render_parameter_analysis(results, energy_query, duration_query, time_points
             step=0.5,
             key="test_s_tau"
         )
-    with test_col4:
-        test_s_t = st.slider(
-            "Test s_t",
-            min_value=1.0,
-            max_value=50.0,
-            value=params.get('s_t', 20.0),
-            step=1.0,
-            key="test_s_t"
-        )
-    
-    test_temporal_weight = st.slider(
-        "Test Temporal Weight",
-        min_value=0.0,
-        max_value=1.0,
-        value=params.get('temporal_weight', 0.3),
-        step=0.05,
-        key="test_temporal_weight"
-    )
     
     if st.button("🔄 Test Parameters", key="test_params"):
         # Temporarily update extrapolator parameters
         original_params = {
             'sigma_g': st.session_state.extrapolator.sigma_g,
             's_E': st.session_state.extrapolator.s_E,
-            's_tau': st.session_state.extrapolator.s_tau,
-            's_t': st.session_state.extrapolator.s_t,
-            'temporal_weight': st.session_state.extrapolator.temporal_weight
+            's_tau': st.session_state.extrapolator.s_tau
         }
         
         # Update with test values
         st.session_state.extrapolator.sigma_g = test_sigma_g
         st.session_state.extrapolator.s_E = test_s_E
         st.session_state.extrapolator.s_tau = test_s_tau
-        st.session_state.extrapolator.s_t = test_s_t
-        st.session_state.extrapolator.temporal_weight = test_temporal_weight
         
         # Run quick prediction for middle timestep
         middle_time = time_points[len(time_points) // 2]
@@ -3612,21 +2866,12 @@ def render_parameter_analysis(results, energy_query, duration_query, time_points
         st.session_state.extrapolator.sigma_g = original_params['sigma_g']
         st.session_state.extrapolator.s_E = original_params['s_E']
         st.session_state.extrapolator.s_tau = original_params['s_tau']
-        st.session_state.extrapolator.s_t = original_params['s_t']
-        st.session_state.extrapolator.temporal_weight = original_params['temporal_weight']
         
         if test_result:
             st.info(f"**Test Results at t={middle_time} ns:**")
             st.write(f"- Confidence: {test_result['confidence']:.3f}")
-            st.write(f"- Temporal Confidence: {test_result['temporal_confidence']:.3f}")
-            st.write(f"- Max ST-DGPA weight: {np.max(test_result['attention_weights']):.4f}")
+            st.write(f"- Max DGPA weight: {np.max(test_result['attention_weights']):.4f}")
             st.write(f"- Top 3 sources contribute: {np.sum(np.sort(test_result['attention_weights'])[-3:]):.1%}")
-            
-            if 'heat_transfer_indicators' in test_result:
-                indicators = test_result['heat_transfer_indicators']
-                st.write(f"- Phase: {indicators.get('phase', 'Unknown')}")
-                st.write(f"- Fourier Number: {indicators.get('fourier_number', 0):.4f}")
-                st.write(f"- Thermal Penetration: {indicators.get('thermal_penetration_um', 0):.1f} μm")
 
 @st.cache_data(show_spinner=False)
 def compute_interpolated_field_cached(_extrapolator, field_name, attention_weights, 
@@ -3639,7 +2884,7 @@ def compute_interpolated_field_cached(_extrapolator, field_name, attention_weigh
 def render_3d_interpolation(results, time_points, energy_query, duration_query, 
                            enable_3d=True, optimize_performance=False, top_k=10):
     """Render 3D interpolation visualization with enhanced caching"""
-    st.markdown('<h4 class="sub-header">🖼️ 3D Field Interpolation with ST-DGPA</h4>', unsafe_allow_html=True)
+    st.markdown('<h4 class="sub-header">🖼️ 3D Field Interpolation with DGPA</h4>', unsafe_allow_html=True)
     
     if not st.session_state.get('simulations'):
         st.warning("No full simulations loaded for 3D rendering. Please reload with 'Load Full Mesh' enabled.")
@@ -3657,15 +2902,14 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
         st.markdown(f"""
         <div class="cache-status">
         <strong>Cache Status:</strong> {cache_size} field(s) cached | 
-        <strong>Prediction ID:</strong> {st.session_state.last_prediction_id or 'N/A'} |
-        <strong>Temporal Gating:</strong> s_t = {st.session_state.extrapolator.s_t:.1f} ns
+        <strong>Prediction ID:</strong> {st.session_state.last_prediction_id or 'N/A'}
         </div>
         """, unsafe_allow_html=True)
     
     st.markdown("""
     <div class="interpolation-3d-container">
     <h5>3D Field Interpolation Settings</h5>
-    <p>Visualize interpolated full field using ST-DGPA-weighted averaging of source simulations with temporal gating.</p>
+    <p>Visualize interpolated full field using DGPA-weighted averaging of source simulations.</p>
     <p><strong>Field switching is now cached</strong> - previously computed fields load instantly.</p>
     </div>
     """, unsafe_allow_html=True)
@@ -3720,18 +2964,18 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
     selected_time_3d = time_points[timestep_idx_3d]
     attention_weights_3d = results['attention_maps'][timestep_idx_3d]
     physics_attention_3d = results['physics_attention_maps'][timestep_idx_3d]
-    ett_gating_3d = results['ett_gating_maps'][timestep_idx_3d]
+    et_gating_3d = results['et_gating_maps'][timestep_idx_3d]
     confidence_score = results['confidence_scores'][timestep_idx_3d]
-    temporal_confidence = results['temporal_confidences'][timestep_idx_3d] if 'temporal_confidences' in results else 0.0
     
     # Display confidence metric and cache info
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Prediction Confidence", f"{confidence_score:.3f}")
     with col2:
-        st.metric("Temporal Confidence", f"{temporal_confidence:.3f}")
-    with col3:
         st.metric("Timestep", f"{selected_time_3d} ns")
+    with col3:
+        gating_strength = np.mean(et_gating_3d) if len(et_gating_3d) > 0 else 0
+        st.metric("Gating Strength", f"{gating_strength:.3f}")
     with col4:
         cached = CacheManager.get_cached_interpolation(selected_field_3d, timestep_idx_3d, params) is not None
         cache_status = "✅ Cached" if cached else "🔄 Compute"
@@ -3800,33 +3044,26 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
     # Create 3D visualization
     st.markdown(f"### 📊 {label} at t={selected_time_3d} ns")
     
-    # Show ST-DGPA weight analysis
-    with st.expander("🔍 ST-DGPA Weight Analysis for This Timestep", expanded=False):
-        col1, col2, col3, col4 = st.columns(4)
+    # Show DGPA weight analysis
+    with st.expander("🔍 DGPA Weight Analysis for This Timestep", expanded=False):
+        col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Max Physics Attention", f"{np.max(physics_attention_3d):.4f}")
         with col2:
-            st.metric("Max (E, τ, t) Gating", f"{np.max(ett_gating_3d):.4f}")
+            st.metric("Max (E, τ) Gating", f"{np.max(et_gating_3d):.4f}")
         with col3:
-            st.metric("Max ST-DGPA Weight", f"{np.max(attention_weights_3d):.4f}")
-        with col4:
-            # Temporal coherence of sources
-            if hasattr(st.session_state.extrapolator, '_assess_temporal_coherence'):
-                coherence = st.session_state.extrapolator._assess_temporal_coherence(
-                    st.session_state.extrapolator.source_metadata, attention_weights_3d
-                )
-                st.metric("Temporal Coherence", f"{coherence:.3f}")
+            st.metric("Max DGPA Weight", f"{np.max(attention_weights_3d):.4f}")
         
-        # Show top contributing sources with temporal information
+        # Show top contributing sources
         if len(attention_weights_3d) > 0:
             top_indices = np.argsort(attention_weights_3d)[-5:][::-1]
             st.write("**Top 5 Contributing Sources:**")
             for i, idx in enumerate(top_indices):
                 meta = st.session_state.extrapolator.source_metadata[idx]
-                st.write(f"{i+1}. {meta['name']} (E={meta['energy']:.1f} mJ, τ={meta['duration']:.1f} ns, t={meta['time']:.1f} ns): "
+                st.write(f"{i+1}. {meta['name']} (t={meta['time']} ns): "
                         f"Physics={physics_attention_3d[idx]:.4f}, "
-                        f"Gating={ett_gating_3d[idx]:.4f}, "
-                        f"ST-DGPA={attention_weights_3d[idx]:.4f}")
+                        f"Gating={et_gating_3d[idx]:.4f}, "
+                        f"DGPA={attention_weights_3d[idx]:.4f}")
     
     # Show field history if available
     if 'interpolation_field_history' in st.session_state and st.session_state.interpolation_field_history:
@@ -3928,21 +3165,12 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
         )
     
     fig_3d = go.Figure(data=mesh_data)
-    
-    # Get heat transfer phase
-    heat_transfer_phase = "Unknown"
-    if 'heat_transfer_indicators' in results and timestep_idx_3d < len(results['heat_transfer_indicators']):
-        indicators = results['heat_transfer_indicators'][timestep_idx_3d]
-        if indicators:
-            heat_transfer_phase = indicators.get('phase', 'Unknown')
-    
     fig_3d.update_layout(
         title=dict(
-            text=f"ST-DGPA Interpolated {label} at t={selected_time_3d} ns<br>"
-                 f"E={energy_query:.1f} mJ, τ={duration_query:.1f} ns, Phase: {heat_transfer_phase}<br>"
-                 f"Confidence: {confidence_score:.3f}, Temporal: {temporal_confidence:.3f}<br>"
-                 f"<sub>σ_g={params.get('sigma_g', 0.20):.2f}, s_E={params.get('s_E', 10.0):.1f}, s_τ={params.get('s_tau', 5.0):.1f}, s_t={params.get('s_t', 20.0):.1f}</sub>",
-            font=dict(size=14)
+            text=f"DGPA Interpolated {label} at t={selected_time_3d} ns<br>"
+                 f"E={energy_query:.1f} mJ, τ={duration_query:.1f} ns, Confidence: {confidence_score:.3f}<br>"
+                 f"<sub>σ_g={params.get('sigma_g', 0.20):.2f}, s_E={params.get('s_E', 10.0):.1f}, s_τ={params.get('s_tau', 5.0):.1f}</sub>",
+            font=dict(size=16)
         ),
         scene=dict(
             aspectmode="data",
@@ -3970,7 +3198,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
             )
         ),
         height=700,
-        margin=dict(l=0, r=0, t=100, b=0)
+        margin=dict(l=0, r=0, t=80, b=0)
     )
     
     st.plotly_chart(fig_3d, use_container_width=True)
@@ -4012,7 +3240,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
     # Export options
     st.markdown("##### 💾 Export Interpolated Field")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     
     with col1:
         # Export as VTU file
@@ -4030,7 +3258,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                         vtu_data = f.read()
                     
                     b64 = base64.b64encode(vtu_data).decode()
-                    href = f'<a href="data:application/octet-stream;base64,{b64}" download="stdgpa_interpolated_{selected_field_3d}_t{selected_time_3d}.vtu">Download VTU File</a>'
+                    href = f'<a href="data:application/octet-stream;base64,{b64}" download="dgpa_interpolated_{selected_field_3d}_t{selected_time_3d}.vtu">Download VTU File</a>'
                     st.markdown(href, unsafe_allow_html=True)
     
     with col2:
@@ -4046,14 +3274,10 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                     'duration_ns': duration_query,
                     'time_ns': selected_time_3d,
                     'confidence': confidence_score,
-                    'temporal_confidence': temporal_confidence,
-                    'heat_transfer_phase': heat_transfer_phase,
-                    'stdgpa_params': {
+                    'dgpa_params': {
                         'sigma_g': params.get('sigma_g', 0.20),
                         's_E': params.get('s_E', 10.0),
-                        's_tau': params.get('s_tau', 5.0),
-                        's_t': params.get('s_t', 20.0),
-                        'temporal_weight': params.get('temporal_weight', 0.3)
+                        's_tau': params.get('s_tau', 5.0)
                     },
                     'cache_source': cache_source
                 }
@@ -4065,44 +3289,8 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                     npz_bytes = f.read()
                 
                 b64 = base64.b64encode(npz_bytes).decode()
-                href = f'<a href="data:application/octet-stream;base64,{b64}" download="stdgpa_interpolated_{selected_field_3d}_t{selected_time_3d}.npz">Download NPZ File</a>'
+                href = f'<a href="data:application/octet-stream;base64,{b64}" download="dgpa_interpolated_{selected_field_3d}_t{selected_time_3d}.npz">Download NPZ File</a>'
                 st.markdown(href, unsafe_allow_html=True)
-    
-    with col3:
-        # Export heat transfer data
-        if st.button("📥 Export Heat Transfer Data", use_container_width=True, key="export_heat_3d"):
-            # Create comprehensive heat transfer analysis
-            if 'heat_transfer_indicators' in results and timestep_idx_3d < len(results['heat_transfer_indicators']):
-                indicators = results['heat_transfer_indicators'][timestep_idx_3d]
-                
-                heat_data = {
-                    'time_ns': selected_time_3d,
-                    'energy_mJ': energy_query,
-                    'duration_ns': duration_query,
-                    'field_stats': {
-                        'min': float(np.min(values)),
-                        'max': float(np.max(values)),
-                        'mean': float(np.mean(values)),
-                        'std': float(np.std(values))
-                    },
-                    'heat_transfer_indicators': indicators,
-                    'attention_analysis': {
-                        'n_sources_used': len([w for w in attention_weights_3d if w > 1e-6]),
-                        'max_weight': float(np.max(attention_weights_3d)),
-                        'temporal_coherence': float(st.session_state.extrapolator._assess_temporal_coherence(
-                            st.session_state.extrapolator.source_metadata, attention_weights_3d
-                        ) if hasattr(st.session_state.extrapolator, '_assess_temporal_coherence') else 0.0)
-                    }
-                }
-                
-                json_str = json.dumps(heat_data, indent=2)
-                st.download_button(
-                    label="📥 Download Heat Data",
-                    data=json_str.encode('utf-8'),
-                    file_name=f"heat_transfer_{selected_field_3d}_t{selected_time_3d}.json",
-                    mime="application/json",
-                    use_container_width=True
-                )
     
     # Quick field switching buttons
     if len(available_fields) > 1:
@@ -4418,26 +3606,26 @@ def render_comparative_analysis():
                                    f"Duration diff: {duration_diff:.1%}, "
                                    f"Field diff: {field_diff:.1%}")
 
-def render_stdgpa_analysis():
-    """Render comprehensive ST-DGPA analysis interface"""
-    st.markdown('<h2 class="sub-header">🔬 Spatio-Temporal Gated Physics Attention (ST-DGPA) Analysis</h2>', unsafe_allow_html=True)
+def render_dgpa_analysis():
+    """Render comprehensive DGPA analysis interface"""
+    st.markdown('<h2 class="sub-header">🔬 Distance-Gated Physics Attention (DGPA) Analysis</h2>', unsafe_allow_html=True)
     
     if not st.session_state.data_loaded:
         st.markdown("""
         <div class="warning-box">
         <h3>⚠️ No Data Loaded</h3>
-        <p>Please load simulations first to enable ST-DGPA analysis.</p>
+        <p>Please load simulations first to enable DGPA analysis.</p>
         </div>
         """, unsafe_allow_html=True)
         return
     
     st.markdown("""
-    <div class="stdgpa-box">
-    <h3>📚 ST-DGPA Theory & Implementation</h3>
+    <div class="dgpa-box">
+    <h3>📚 DGPA Theory & Implementation</h3>
     
-    **Spatio-Temporal Gated Physics Attention (ST-DGPA)** is an advanced interpolation method for laser FEA simulations that explicitly incorporates energy (E), pulse duration (τ), and time (t) similarity with heat transfer characterization.
+    **Distance-Gated Physics Attention (DGPA)** is a novel interpolation method for laser FEA simulations that explicitly incorporates energy (E) and pulse duration (τ) similarity.
     
-    ### Core ST-DGPA Formula
+    ### Core DGPA Formula
     
     For any field **F** (temperature, stress, displacement, etc.):
     
@@ -4445,7 +3633,7 @@ def render_stdgpa_analysis():
     \\boxed{\\mathbf{F}(\\boldsymbol{\\theta}^*) = \\sum_{i=1}^{N} w_i(\\boldsymbol{\\theta}^*) \\cdot \\mathbf{F}^{(i)}}
     $$
     
-    where $w_i(\\boldsymbol{\\theta}^*)$ are ST-DGPA weights computed as:
+    where $w_i(\\boldsymbol{\\theta}^*)$ are DGPA weights computed as:
     
     $$
     w_i(\\boldsymbol{\\theta}^*) = \\frac{ 
@@ -4457,29 +3645,27 @@ def render_stdgpa_analysis():
     }
     $$
     
-    with the (E, τ, t) proximity kernel:
+    with the (E, τ) proximity kernel:
     
     $$
     \\phi_i = \\sqrt{ 
     \\left( \\frac{E^* - E_i}{s_E} \\right)^2 + 
-    \\left( \\frac{\\tau^* - \\tau_i}{s_\\tau} \\right)^2 + 
-    \\left( \\frac{t^* - t_i}{s_t} \\right)^2 
+    \\left( \\frac{\\tau^* - \\tau_i}{s_\\tau} \\right)^2 
     }
     $$
     
     ### Key Components
     
-    1. **Physics Attention** ($\\bar{\\alpha}_i$): Multi-head transformer-inspired attention with enhanced physics-aware embeddings including heat transfer features
-    2. **(E, τ, t) Gating**: Gaussian kernel that ensures physically meaningful interpolation across time
-    3. **Heat Transfer Characterization**: Incorporates Fourier number ($Fo = \\alpha t / L^2$) and thermal penetration depth ($\\delta \\sim \\sqrt{\\alpha t}$)
-    4. **Temporal Weighting**: Explicit control over temporal similarity importance
+    1. **Physics Attention** ($\\bar{\\alpha}_i$): Multi-head transformer-inspired attention with physics-aware embeddings
+    2. **(E, τ) Gating**: Gaussian kernel that ensures physically meaningful interpolation
+    3. **Normalization**: Softmax ensures weights sum to 1
     </div>
     """, unsafe_allow_html=True)
     
-    # ST-DGPA parameter exploration
-    st.markdown('<h3 class="sub-header">🔍 ST-DGPA Parameter Explorer</h3>', unsafe_allow_html=True)
+    # DGPA parameter exploration
+    st.markdown('<h3 class="sub-header">🔍 DGPA Parameter Explorer</h3>', unsafe_allow_html=True)
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
         explore_sigma_g = st.slider(
             "Explore σ_g",
@@ -4507,34 +3693,16 @@ def render_stdgpa_analysis():
             step=0.5,
             key="explore_s_tau"
         )
-    with col4:
-        explore_s_t = st.slider(
-            "Explore s_t",
-            min_value=1.0,
-            max_value=50.0,
-            value=20.0,
-            step=1.0,
-            key="explore_s_t"
-        )
     
-    explore_temporal_weight = st.slider(
-        "Explore Temporal Weight",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.3,
-        step=0.05,
-        key="explore_temporal_weight"
-    )
-    
-    # Create visualization of ST-DGPA kernel
-    st.markdown("##### 📊 (E, τ, t) Gating Kernel Visualization")
+    # Create visualization of DGPA kernel
+    st.markdown("##### 📊 (E, τ) Gating Kernel Visualization")
     
     # Generate sample data
     if st.session_state.summaries:
         energies = [s['energy'] for s in st.session_state.summaries]
         durations = [s['duration'] for s in st.session_state.summaries]
         
-        # Create grid for visualization (E-τ plane)
+        # Create grid for visualization
         e_min, e_max = min(energies), max(energies)
         d_min, d_max = min(durations), max(durations)
         
@@ -4545,9 +3713,8 @@ def render_stdgpa_analysis():
         # Query point (center of grid)
         query_e = (e_min + e_max) / 2
         query_d = (d_min + d_max) / 2
-        query_t = 10.0  # Example time
         
-        # Compute gating kernel at fixed time
+        # Compute gating kernel
         phi_squared = ((E_grid - query_e) / explore_s_E)**2 + ((D_grid - query_d) / explore_s_tau)**2
         gating = np.exp(-phi_squared / (2 * explore_sigma_g**2))
         
@@ -4588,7 +3755,7 @@ def render_stdgpa_analysis():
         ))
         
         fig_kernel.update_layout(
-            title=f"(E, τ) Gating Kernel at t={query_t} ns (σ_g={explore_sigma_g:.2f}, s_E={explore_s_E:.1f}, s_τ={explore_s_tau:.1f}, s_t={explore_s_t:.1f})",
+            title=f"(E, τ) Gating Kernel (σ_g={explore_sigma_g:.2f}, s_E={explore_s_E:.1f}, s_τ={explore_s_tau:.1f})",
             xaxis_title="Energy (mJ)",
             yaxis_title="Duration (ns)",
             height=500
@@ -4618,32 +3785,32 @@ def render_stdgpa_analysis():
                     effective_points += 1
             st.metric("Effective Points", f"{effective_points}/{len(energies)}")
     
-    # ST-DGPA vs baseline comparison
-    st.markdown('<h3 class="sub-header">⚖️ ST-DGPA vs DGPA Comparison</h3>', unsafe_allow_html=True)
+    # DGPA vs baseline comparison
+    st.markdown('<h3 class="sub-header">⚖️ DGPA vs Baseline Comparison</h3>', unsafe_allow_html=True)
     
     # Simulate comparison scenario
-    if st.button("🧪 Run ST-DGPA vs DGPA Comparison", use_container_width=True):
+    if st.button("🧪 Run DGPA vs Baseline Comparison", use_container_width=True):
         with st.spinner("Running comparison analysis..."):
+            # This would compare DGPA with standard physics attention
+            # For now, show conceptual comparison
             
             st.markdown("""
             ### Conceptual Comparison
             
-            | Aspect | ST-DGPA (Extended) | DGPA (Original) |
-            |--------|-------------------|----------------|
-            | **Temporal sensitivity** | Explicit time gating | Implicit via embeddings |
-            | **Heat transfer physics** | Fourier number, penetration depth | Basic time features |
-            | **Temporal phases** | Heating/cooling phase detection | No phase distinction |
-            | **Temporal confidence** | Physics-based confidence scoring | Single confidence score |
-            | **Parameter tuning** | Time-specific scaling (s_t) | No time-specific scaling |
-            | **Computational cost** | Slightly higher (enhanced features) | Standard DGPA |
+            | Aspect | DGPA (Our Method) | Standard Physics Attention |
+            |--------|-------------------|----------------------------|
+            | **E, τ sensitivity** | Explicit gating kernel | Implicit via embeddings |
+            | **Interpretability** | Clear (E, τ) contribution | Less interpretable |
+            | **Extrapolation safety** | Conservative (gating limits) | Can over-extrapolate |
+            | **Parameter tuning** | Physics-informed (σ_g, s_E, s_τ) | Mostly heuristic |
+            | **Computational cost** | Slightly higher (gating calc) | Standard attention |
             
-            ### Key Advantages of ST-DGPA
+            ### Key Advantages of DGPA
             
-            1. **Temporal interpretability**: Clear separation of temporal phases (heating vs cooling)
-            2. **Heat transfer awareness**: Incorporates diffusion physics via Fourier number
-            3. **Phase-appropriate gating**: Tighter temporal matching during heating, looser during cooling
-            4. **Enhanced embeddings**: Physics-aware temporal features improve attention quality
-            5. **Temporal confidence**: Separate confidence metric for time interpolation reliability
+            1. **Physical interpretability**: Clear separation of physics attention and (E, τ) similarity
+            2. **Controlled extrapolation**: Gating prevents unphysical blending of distant simulations
+            3. **Parameter robustness**: Fewer hyperparameters to tune for new applications
+            4. **Uncertainty quantification**: Gating weights provide confidence in parameter space
             """)
             
             # Create comparison visualization
@@ -4653,20 +3820,14 @@ def render_stdgpa_analysis():
             n_sources = 20
             physics_weights = np.random.dirichlet(np.ones(n_sources))
             et_distances = np.abs(np.random.randn(n_sources))
-            time_distances = np.abs(np.random.randn(n_sources)) * 0.5
             
-            # DGPA weights (E, τ only)
-            sigma_g_dgpa = 0.2
-            dgpa_gating = np.exp(-et_distances**2 / (2 * sigma_g_dgpa**2))
-            dgpa_weights = (physics_weights * dgpa_gating)
+            # DGPA weights (with gating)
+            sigma_g_test = 0.2
+            gating_weights = np.exp(-et_distances**2 / (2 * sigma_g_test**2))
+            gating_weights = gating_weights / np.sum(gating_weights)
+            
+            dgpa_weights = (physics_weights * gating_weights)
             dgpa_weights = dgpa_weights / np.sum(dgpa_weights)
-            
-            # ST-DGPA weights (E, τ, t)
-            sigma_g_stdgpa = 0.2
-            stdgpa_distances = np.sqrt(et_distances**2 + (time_distances/explore_s_t)**2)
-            stdgpa_gating = np.exp(-stdgpa_distances**2 / (2 * sigma_g_stdgpa**2))
-            stdgpa_weights = (physics_weights * stdgpa_gating)
-            stdgpa_weights = stdgpa_weights / np.sum(stdgpa_weights)
             
             fig_compare.add_trace(go.Scatter(
                 x=list(range(n_sources)),
@@ -4680,20 +3841,20 @@ def render_stdgpa_analysis():
                 x=list(range(n_sources)),
                 y=dgpa_weights,
                 mode='lines+markers',
-                name='DGPA (E, τ only)',
-                line=dict(color='blue', width=2, dash='dash')
+                name='DGPA (with Gating)',
+                line=dict(color='blue', width=3)
             ))
             
             fig_compare.add_trace(go.Scatter(
                 x=list(range(n_sources)),
-                y=stdgpa_weights,
-                mode='lines+markers',
-                name='ST-DGPA (E, τ, t)',
-                line=dict(color='red', width=3)
+                y=gating_weights,
+                mode='lines',
+                name='(E, τ) Gating Only',
+                line=dict(color='red', width=2, dash='dash')
             ))
             
             fig_compare.update_layout(
-                title="ST-DGPA vs DGPA Weight Distribution",
+                title="DGPA vs Baseline Weight Distribution",
                 xaxis_title="Source Index",
                 yaxis_title="Weight",
                 height=400,
@@ -4701,497 +3862,95 @@ def render_stdgpa_analysis():
             )
             
             st.plotly_chart(fig_compare, use_container_width=True)
-            
-            # Calculate differences
-            dgpa_change = dgpa_weights - physics_weights
-            stdgpa_change = stdgpa_weights - physics_weights
-            
-            st.info(f"**DGPA changes weights by ±{np.max(np.abs(dgpa_change)):.3f} (avg: {np.mean(np.abs(dgpa_change)):.3f})**")
-            st.info(f"**ST-DGPA changes weights by ±{np.max(np.abs(stdgpa_change)):.3f} (avg: {np.mean(np.abs(stdgpa_change)):.3f})**")
     
-    # ST-DGPA applications guide
-    with st.expander("📖 ST-DGPA Applications & Best Practices", expanded=True):
+    # DGPA applications guide
+    with st.expander("📖 DGPA Applications & Best Practices", expanded=True):
         st.markdown("""
-        ### 🎯 When to Use ST-DGPA
-        
-        **Highly recommended for:**
-        - Laser processing with strong time-dependent effects
-        - Heat transfer-dominated simulations
-        - Interpolation across different temporal phases
-        - Conservative temporal extrapolation needs
+        ### 🎯 When to Use DGPA
         
         **Recommended for:**
-        - General laser FEA interpolation with time dependence
-        - Multi-phase physical processes
-        - Uncertainty quantification in time domain
+        - Laser processing parameter optimization
+        - Multi-physics FEA with strong (E, τ) dependence
+        - Conservative extrapolation needs
+        - Interpretable interpolation requirements
         
         **Less suitable for:**
-        - Steady-state simulations (use DGPA)
-        - Very sparse temporal data (< 3 timesteps per simulation)
+        - Very sparse training data (< 5 simulations)
+        - Problems where (E, τ) are not primary drivers
         - Real-time applications requiring maximum speed
         
         ### ⚙️ Parameter Selection Guide
         
-        **Default values (laser FEA with heat transfer):**
+        **Default values (laser FEA):**
         - σ_g = 0.20 (moderate gating)
         - s_E = 10.0 mJ (based on typical energy range)
         - s_τ = 5.0 ns (based on typical duration range)
-        - s_t = 20.0 ns (balanced temporal matching)
-        - temporal_weight = 0.3 (moderate temporal emphasis)
         
-        **Heat transfer-specific tuning:**
-        - **For conductive materials** (high α): Use smaller s_t (10-15 ns)
-        - **For diffusive regimes** (long times): Use larger s_t (25-40 ns)
-        - **For heating phase focus**: Increase temporal_weight (0.4-0.6)
-        - **For cooling phase focus**: Decrease temporal_weight (0.2-0.4)
+        **Tuning strategy:**
+        1. Start with defaults
+        2. Adjust σ_g based on desired interpolation "tightness"
+        3. Set s_E, s_τ to ~2× standard deviation of training parameters
+        4. Validate with known test cases
         
         ### 🔬 Advanced Features
         
-        **Adaptive temporal scaling:**
+        **Adaptive scaling:**
         ```python
-        # Auto-adjust s_t based on time relative to pulse duration
-        if time_query < duration_query:  # Heating phase
-            s_t_effective = s_t * 0.7  # Tighter matching
-        else:  # Cooling phase
-            s_t_effective = s_t * 1.3  # Looser matching
+        # Auto-scale based on training data
+        s_E = 2.0 * np.std(training_energies)
+        s_τ = 2.0 * np.std(training_durations)
         ```
         
-        **Phase-aware gating:**
-        - Early heating (t < 0.3τ): Very tight gating (σ_g ≈ 0.15)
-        - Heating phase (0.3τ < t < τ): Moderate gating (σ_g ≈ 0.20)
-        - Cooling phase (τ < t < 2τ): Standard gating (σ_g ≈ 0.25)
-        - Diffusion phase (t > 2τ): Loose gating (σ_g ≈ 0.30)
+        **Field-specific gating:**
+        - Temperature: Use tighter gating (σ_g ≈ 0.15)
+        - Stress: Can use broader gating (σ_g ≈ 0.25)
+        - Displacement: Intermediate gating (σ_g ≈ 0.20)
         
-        ### 📊 Validation Metrics for Temporal Interpolation
+        ### 📊 Validation Metrics
         
         Monitor:
-        1. **Temporal confidence**: Should be > 0.7 for reliable interpolation
-        2. **Phase consistency**: Sources should be in similar temporal phases
-        3. **Fourier number spread**: Sources should have similar Fo (ΔFo < 0.5)
-        4. **Weight temporal coherence**: High weights should cluster in time
+        1. **Max DGPA weight**: Should be > 0.3 for interpolation
+        2. **Gating spread**: Effective area should cover training points
+        3. **Weight consistency**: Similar queries should have similar weights
+        4. **Field smoothness**: Interpolated fields should be physically plausible
         """)
     
-    # ST-DGPA code example
-    with st.expander("💻 ST-DGPA Implementation Code", expanded=False):
+    # DGPA code example
+    with st.expander("💻 DGPA Implementation Code", expanded=False):
         st.code("""
-# ST-DGPA Implementation Snippet
-class SpatioTemporalGatedPhysicsAttentionExtrapolator:
-    def __init__(self, sigma_g=0.20, s_E=10.0, s_tau=5.0, s_t=20.0, temporal_weight=0.3):
+# DGPA Implementation Snippet
+class DistanceGatedPhysicsAttentionExtrapolator:
+    def __init__(self, sigma_g=0.20, s_E=10.0, s_tau=5.0):
         self.sigma_g = sigma_g
         self.s_E = s_E
         self.s_tau = s_tau
-        self.s_t = s_t  # NEW: Time scaling factor
-        self.temporal_weight = temporal_weight  # NEW: Temporal weight
     
-    def _compute_ett_gating(self, energy_query, duration_query, time_query):
-        \"\"\"Compute the (E, τ, t) gating kernel for ST-DGPA\"\"\"
+    def _compute_et_gating(self, energy_query, duration_query):
+        \"\"\"Compute the (E, τ) gating kernel for DGPA\"\"\"
         phi = []
         for meta in self.source_metadata:
             de = (energy_query - meta['energy']) / self.s_E
             dt = (duration_query - meta['duration']) / self.s_tau
-            dtime = (time_query - meta['time']) / self.s_t  # NEW: Time difference
-            phi.append(np.sqrt(de**2 + dt**2 + dtime**2))
+            phi.append(np.sqrt(de**2 + dt**2))
         
         phi = np.array(phi)
         gating = np.exp(-phi**2 / (2 * self.sigma_g**2))
         return gating / (gating.sum() + 1e-12)
     
-    def _compute_temporal_similarity(self, query_meta, source_metas):
-        \"\"\"Compute temporal similarity with physics-aware weighting\"\"\"
-        similarities = []
-        for meta in source_metas:
-            time_diff = abs(query_meta['time'] - meta['time'])
-            
-            # Physics-aware temporal similarity
-            if query_meta['time'] < query_meta['duration'] * 1.5:
-                temporal_tolerance = max(query_meta['duration'] * 0.1, 1.0)
-            else:
-                temporal_tolerance = max(query_meta['duration'] * 0.3, 3.0)
-            
-            # Fourier number similarity
-            fourier_diff = abs(query_meta['fourier_number'] - meta['fourier_number'])
-            fourier_similarity = np.exp(-fourier_diff / 0.1)
-            
-            # Combine
-            time_similarity = np.exp(-time_diff / temporal_tolerance)
-            combined = (1 - self.temporal_weight) * time_similarity + 
-                      self.temporal_weight * fourier_similarity
-            
-            similarities.append(combined)
-        return np.array(similarities)
-    
     def _multi_head_attention_with_gating(self, query_embedding, query_meta):
-        \"\"\"ST-DGPA: Combine physics attention with (E, τ, t) gating\"\"\"
+        \"\"\"DGPA: Combine physics attention with (E, τ) gating\"\"\"
         # 1. Compute physics attention
         physics_attention = self._compute_physics_attention(query_embedding, query_meta)
         
-        # 2. Apply temporal regulation
-        if self.temporal_weight > 0:
-            temporal_sim = self._compute_temporal_similarity(query_meta, self.source_metadata)
-            physics_attention = (1 - self.temporal_weight) * physics_attention + 
-                               self.temporal_weight * temporal_sim
+        # 2. Compute (E, τ) gating
+        et_gating = self._compute_et_gating(query_meta['energy'], query_meta['duration'])
         
-        # 3. Compute (E, τ, t) gating
-        ett_gating = self._compute_ett_gating(query_meta['energy'], 
-                                             query_meta['duration'], 
-                                             query_meta['time'])
-        
-        # 4. ST-DGPA combination
-        combined_weights = physics_attention * ett_gating
+        # 3. DGPA combination
+        combined_weights = physics_attention * et_gating
         final_weights = combined_weights / (combined_weights.sum() + 1e-12)
         
-        return final_weights, physics_attention, ett_gating
+        return final_weights, physics_attention, et_gating
         """, language="python")
-
-def render_heat_transfer_analysis():
-    """Render heat transfer-specific analysis interface"""
-    st.markdown('<h2 class="sub-header">🔥 Heat Transfer Analysis</h2>', unsafe_allow_html=True)
-    
-    if not st.session_state.data_loaded:
-        st.markdown("""
-        <div class="warning-box">
-        <h3>⚠️ No Data Loaded</h3>
-        <p>Please load simulations first to enable heat transfer analysis.</p>
-        </div>
-        """, unsafe_allow_html=True)
-        return
-    
-    st.markdown("""
-    <div class="heat-transfer-box">
-    <h3>🌡️ Heat Transfer Physics in Laser Processing</h3>
-    
-    This analysis focuses on heat transfer characterization in laser FEA simulations using ST-DGPA.
-    
-    ### Key Heat Transfer Concepts
-    
-    1. **Fourier Number** ($Fo = \\frac{\\alpha t}{L^2}$):
-       - Dimensionless time characterizing heat diffusion
-       - $Fo < 0.1$: Localized heating (conduction-limited)
-       - $Fo > 1$: Well-developed diffusion
-       
-    2. **Thermal Penetration Depth** ($\\delta \\sim \\sqrt{\\alpha t}$):
-       - Characteristic distance heat diffuses in time t
-       - Important for determining affected volume
-       
-    3. **Temporal Phases**:
-       - **Early Heating** ($t < 0.3\\tau$): Rapid temperature rise, minimal diffusion
-       - **Heating** ($0.3\\tau < t < \\tau$): Continued energy deposition
-       - **Early Cooling** ($\\tau < t < 2\\tau$): Rapid cooling, significant gradients
-       - **Diffusion Cooling** ($t > 2\\tau$): Slow thermal diffusion dominates
-       
-    4. **Dimensionless Groups**:
-       - **Energy Density**: $E/\\tau$ (W)
-       - **Normalized Time**: $t/\\tau$
-       - **Thermal Diffusion Ratio**: $\\sqrt{\\alpha\\tau}/L$
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Material properties
-    st.markdown('<h3 class="sub-header">📊 Material Properties</h3>', unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        material_type = st.selectbox(
-            "Material Type",
-            ["Steel", "Aluminum", "Copper", "Titanium", "Custom"],
-            index=0,
-            key="material_type"
-        )
-    
-    # Set default properties based on material
-    material_props = {
-        "Steel": {"α": 1.2e-5, "k": 50, "ρ": 7850, "cp": 450},
-        "Aluminum": {"α": 8.4e-5, "k": 237, "ρ": 2700, "cp": 900},
-        "Copper": {"α": 1.1e-4, "k": 400, "ρ": 8960, "cp": 385},
-        "Titanium": {"α": 8.9e-6, "k": 21.9, "ρ": 4500, "cp": 520},
-        "Custom": {"α": 1e-5, "k": 50, "ρ": 5000, "cp": 500}
-    }
-    
-    props = material_props[material_type]
-    
-    with col2:
-        thermal_diffusivity = st.number_input(
-            "Thermal Diffusivity (m²/s)",
-            min_value=1e-7,
-            max_value=1e-3,
-            value=props["α"],
-            format="%.2e",
-            key="ht_thermal_diffusivity",
-            help="α = k/(ρ·cp)"
-        )
-    
-    with col3:
-        laser_radius = st.number_input(
-            "Laser Spot Radius (μm)",
-            min_value=1.0,
-            max_value=500.0,
-            value=50.0,
-            key="ht_laser_radius"
-        )
-    
-    # Update extrapolator with new properties
-    st.session_state.extrapolator.thermal_diffusivity = thermal_diffusivity
-    st.session_state.extrapolator.laser_spot_radius = laser_radius * 1e-6
-    st.session_state.extrapolator.characteristic_length = laser_radius * 2e-6  # 2× spot radius
-    
-    # Heat transfer calculations
-    st.markdown('<h3 class="sub-header">🧮 Heat Transfer Calculations</h3>', unsafe_allow_html=True)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        calc_time = st.number_input(
-            "Calculation Time (ns)",
-            min_value=1,
-            max_value=500,
-            value=50,
-            key="calc_time"
-        )
-    
-    with col2:
-        calc_duration = st.number_input(
-            "Pulse Duration (ns)",
-            min_value=1,
-            max_value=100,
-            value=10,
-            key="calc_duration"
-        )
-    
-    # Perform calculations
-    fourier_number = st.session_state.extrapolator._compute_fourier_number(calc_time)
-    penetration_depth = st.session_state.extrapolator._compute_thermal_penetration(calc_time)
-    phase = "Unknown"
-    
-    if calc_time < calc_duration * 0.3:
-        phase = "Early Heating"
-    elif calc_time < calc_duration:
-        phase = "Heating"
-    elif calc_time < calc_duration * 2:
-        phase = "Early Cooling"
-    else:
-        phase = "Diffusion Cooling"
-    
-    # Display results
-    st.markdown("##### 📈 Calculation Results")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Fourier Number", f"{fourier_number:.4f}")
-    with col2:
-        st.metric("Thermal Penetration", f"{penetration_depth:.1f} μm")
-    with col3:
-        st.metric("Phase", phase)
-    with col4:
-        normalized_time = calc_time / calc_duration
-        st.metric("Normalized Time", f"{normalized_time:.2f}")
-    
-    # Interpretation
-    st.markdown("##### 💡 Interpretation")
-    
-    interpretation = []
-    if fourier_number < 0.1:
-        interpretation.append("**Conduction-limited regime**: Heat diffusion is minimal, temperature gradients are steep.")
-    elif fourier_number < 1.0:
-        interpretation.append("**Transition regime**: Diffusion is developing, gradients are moderating.")
-    else:
-        interpretation.append("**Diffusion-dominated regime**: Heat has spread significantly, temperature field is smoothing.")
-    
-    if phase == "Early Heating":
-        interpretation.append("**Phase**: Rapid heating with minimal diffusion - high interpolation uncertainty.")
-    elif phase == "Heating":
-        interpretation.append("**Phase**: Active energy deposition - moderate interpolation uncertainty.")
-    elif phase == "Early Cooling":
-        interpretation.append("**Phase**: Rapid cooling with developing gradients - good interpolation conditions.")
-    else:
-        interpretation.append("**Phase**: Slow diffusion cooling - excellent interpolation conditions.")
-    
-    for item in interpretation:
-        st.info(item)
-    
-    # Heat transfer visualization
-    st.markdown('<h3 class="sub-header">📊 Heat Transfer Visualization</h3>', unsafe_allow_html=True)
-    
-    # Create time evolution plot
-    time_range = np.linspace(1, 200, 100)  # 1-200 ns
-    fourier_evolution = [st.session_state.extrapolator._compute_fourier_number(t) for t in time_range]
-    penetration_evolution = [st.session_state.extrapolator._compute_thermal_penetration(t) for t in time_range]
-    
-    fig_evolution = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=["Fourier Number Evolution", "Thermal Penetration Evolution"],
-        vertical_spacing=0.15
-    )
-    
-    # Fourier number
-    fig_evolution.add_trace(
-        go.Scatter(
-            x=time_range,
-            y=fourier_evolution,
-            mode='lines',
-            line=dict(color='blue', width=3),
-            name='Fourier Number'
-        ),
-        row=1, col=1
-    )
-    
-    # Add phase regions
-    phase_boundaries = [calc_duration * 0.3, calc_duration, calc_duration * 2]
-    phase_colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4']
-    phase_labels = ['Early Heating', 'Heating', 'Early Cooling', 'Diffusion Cooling']
-    
-    for i in range(len(phase_boundaries) + 1):
-        if i == 0:
-            x0, x1 = 0, phase_boundaries[0]
-        elif i == len(phase_boundaries):
-            x0, x1 = phase_boundaries[-1], time_range[-1]
-        else:
-            x0, x1 = phase_boundaries[i-1], phase_boundaries[i]
-        
-        fig_evolution.add_vrect(
-            x0=x0, x1=x1,
-            fillcolor=phase_colors[i],
-            opacity=0.2,
-            line_width=0,
-            row=1, col=1
-        )
-        
-        # Add label
-        fig_evolution.add_annotation(
-            x=(x0 + x1) / 2,
-            y=np.max(fourier_evolution) * 0.9,
-            text=phase_labels[i],
-            showarrow=False,
-            font=dict(size=10),
-            row=1, col=1
-        )
-    
-    # Thermal penetration
-    fig_evolution.add_trace(
-        go.Scatter(
-            x=time_range,
-            y=penetration_evolution,
-            mode='lines',
-            line=dict(color='red', width=3),
-            name='Penetration Depth'
-        ),
-        row=2, col=1
-    )
-    
-    fig_evolution.update_layout(
-        height=600,
-        title_text=f"Heat Transfer Evolution (α = {thermal_diffusivity:.2e} m²/s, Laser Radius = {laser_radius} μm)",
-        showlegend=True
-    )
-    
-    fig_evolution.update_xaxes(title_text="Time (ns)", row=1, col=1)
-    fig_evolution.update_yaxes(title_text="Fourier Number", row=1, col=1)
-    fig_evolution.update_xaxes(title_text="Time (ns)", row=2, col=1)
-    fig_evolution.update_yaxes(title_text="Penetration Depth (μm)", row=2, col=1)
-    
-    st.plotly_chart(fig_evolution, use_container_width=True)
-    
-    # ST-DGPA for heat transfer
-    st.markdown('<h3 class="sub-header">🎯 ST-DGPA for Heat Transfer</h3>', unsafe_allow_html=True)
-    
-    st.markdown("""
-    ### How ST-DGPA Enhances Heat Transfer Interpolation
-    
-    1. **Phase-Aware Gating**:
-       - Tighter temporal matching during heating phases (smaller effective s_t)
-       - Looser matching during diffusion phases (larger effective s_t)
-       - Prevents mixing incompatible thermal regimes
-    
-    2. **Physics-Informed Similarity**:
-       - Uses Fourier number for dimensionless time comparison
-       - Considers thermal penetration depth for spatial scale
-       - Incorporates phase information in attention weights
-    
-    3. **Confidence Metrics**:
-       - Temporal confidence based on phase and Fourier number spread
-       - Source coherence assessment for temporal consistency
-       - Uncertainty quantification for time interpolation
-    
-    4. **Optimized Parameters**:
-       ```python
-       # Heat-transfer optimized ST-DGPA parameters
-       st_dgpa_heat = SpatioTemporalGatedPhysicsAttentionExtrapolator(
-           sigma_g=0.22,          # Slightly broader for thermal diffusion
-           s_E=10.0,             # Energy scaling (mJ)
-           s_tau=5.0,            # Duration scaling (ns)
-           s_t=25.0,             # Time scaling for diffusion (ns)
-           temporal_weight=0.4   # Enhanced temporal emphasis
-       )
-       ```
-    
-    ### Best Practices for Heat Transfer Applications
-    
-    1. **Training Data Preparation**:
-       - Ensure sufficient temporal resolution (≥ 5 timesteps per simulation)
-       - Include simulations covering different phases
-       - Balance energy-duration combinations
-    
-    2. **Query Strategy**:
-       - For heating phase queries, prioritize simulations with similar t/τ
-       - For cooling phase, include broader temporal range
-       - Use Fourier number similarity for dimensionless comparison
-    
-    3. **Validation**:
-       - Check phase consistency of top-weighted sources
-       - Verify Fourier number spread is reasonable
-       - Validate against known physical limits (energy conservation, max temperature)
-    
-    4. **Troubleshooting**:
-       - **Low temporal confidence**: Increase s_t or check phase mismatch
-       - **Over-smoothing**: Decrease s_t or increase temporal_weight
-       - **Unphysical results**: Check source coherence and phase consistency
-    """)
-    
-    # Interactive heat transfer exploration
-    if st.button("🔬 Explore Heat Transfer with Current Data", use_container_width=True):
-        if st.session_state.summaries:
-            # Analyze available simulations for heat transfer characteristics
-            st.markdown("##### 📋 Simulation Heat Transfer Analysis")
-            
-            analysis_data = []
-            for summary in st.session_state.summaries[:10]:  # First 10 for brevity
-                # Calculate characteristic Fourier numbers
-                max_time = max(summary['timesteps']) if summary['timesteps'] else 0
-                max_fourier = st.session_state.extrapolator._compute_fourier_number(max_time)
-                max_penetration = st.session_state.extrapolator._compute_thermal_penetration(max_time)
-                
-                # Temperature statistics if available
-                temp_stats = "N/A"
-                if 'temperature' in summary['field_stats']:
-                    stats = summary['field_stats']['temperature']
-                    if stats['max']:
-                        max_temp = np.max(stats['max'])
-                        temp_stats = f"{max_temp:.1f}°C"
-                
-                analysis_data.append({
-                    'Simulation': summary['name'],
-                    'Energy (mJ)': summary['energy'],
-                    'Duration (ns)': summary['duration'],
-                    'Max Time (ns)': max_time,
-                    'Max Fourier': f"{max_fourier:.3f}",
-                    'Max Penetration (μm)': f"{max_penetration:.1f}",
-                    'Max Temp': temp_stats,
-                    'Phase at Max': "Diffusion" if max_time > summary['duration'] * 2 else "Heating/Cooling"
-                })
-            
-            if analysis_data:
-                df_analysis = pd.DataFrame(analysis_data)
-                st.dataframe(df_analysis, use_container_width=True)
-                
-                # Summary statistics
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    avg_fourier = np.mean([float(d['Max Fourier']) for d in analysis_data])
-                    st.metric("Avg Max Fourier", f"{avg_fourier:.3f}")
-                with col2:
-                    avg_penetration = np.mean([float(d['Max Penetration (μm)']) for d in analysis_data])
-                    st.metric("Avg Max Penetration", f"{avg_penetration:.1f} μm")
-                with col3:
-                    heating_sims = len([d for d in analysis_data if d['Phase at Max'] == "Heating/Cooling"])
-                    st.metric("Heating/Cooling Sims", f"{heating_sims}/{len(analysis_data)}")
 
 if __name__ == "__main__":
     main()
