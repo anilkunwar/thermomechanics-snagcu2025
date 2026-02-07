@@ -946,6 +946,7 @@ class EnhancedVisualizer:
         'Tealgrn', 'Twilight', 'Burg', 'Burgyl'
     ]
     
+   
     @staticmethod
     def create_stdgpa_analysis(results, energy_query, duration_query, time_points):
         """Create ST-DGPA-specific analysis visualizations"""
@@ -956,6 +957,7 @@ class EnhancedVisualizer:
         timestep_idx = len(time_points) // 2
         time = time_points[timestep_idx]
         
+        # FIXED: Updated subplot specs to handle all plot types correctly
         fig = make_subplots(
             rows=3, cols=3,
             subplot_titles=[
@@ -964,11 +966,13 @@ class EnhancedVisualizer:
                 "Temporal Coherence Analysis", "Heat Transfer Phase",
                 "Parameter Space 3D", "Attention Network", "Weight Evolution"
             ],
-            vertical_spacing=0.1,
-            horizontal_spacing=0.1,
-            specs=[[{'type': 'xy'}, {'type': 'xy'}, {'type': 'xy'}],
-                   [{'type': 'xy'}, {'type': 'xy'}, {'type': 'domain'}],
-                   [{'type': 'scatter3d'}, {'type': 'scatter'}, {'type': 'xy'}]]
+            vertical_spacing=0.12,
+            horizontal_spacing=0.12,
+            specs=[
+                [{'type': 'xy'}, {'type': 'xy'}, {'type': 'xy'}],
+                [{'type': 'xy'}, {'type': 'xy'}, {'type': 'polar'}],  # Changed 'domain' to 'polar' for radar chart
+                [{'type': 'scene'}, {'type': 'xy'}, {'type': 'xy'}]   # Changed 'scatter3d' to 'scene' for 3D plot
+            ]
         )
         
         # Get weights for selected timestep
@@ -1066,18 +1070,36 @@ class EnhancedVisualizer:
                 )
                 fig.add_vline(x=time, line_dash="dash", line_color="red", row=2, col=2)
         
-        # 6. Heat transfer phase indicator
+        # 6. Heat transfer phase indicator - FIXED: Now using polar subplot correctly
         if 'heat_transfer_indicators' in results and results['heat_transfer_indicators']:
             indicators = results['heat_transfer_indicators'][timestep_idx]
             if indicators:
-                # Create a radar/polar plot for phase indicators
+                # Create radar/polar plot for phase indicators
                 categories = ['Heating', 'Cooling', 'Diffusion', 'Adiabatic']
-                values = [0.7, 0.5, 0.3, 0.2]  # Placeholder values
+                
+                # Use placeholder values or actual values if available
+                if 'phase' in indicators:
+                    phase = indicators['phase']
+                    # Map phase to values
+                    if phase == 'Early Heating' or phase == 'Heating':
+                        values = [0.9, 0.3, 0.2, 0.1]
+                    elif phase == 'Early Cooling':
+                        values = [0.4, 0.8, 0.3, 0.1]
+                    elif phase == 'Diffusion Cooling':
+                        values = [0.2, 0.5, 0.9, 0.2]
+                    else:
+                        values = [0.7, 0.5, 0.3, 0.2]  # Default
+                else:
+                    values = [0.7, 0.5, 0.3, 0.2]  # Placeholder values
+                
+                # Close the loop for radar chart
+                values_closed = list(values) + [values[0]]
+                categories_closed = list(categories) + [categories[0]]
                 
                 fig.add_trace(
                     go.Scatterpolar(
-                        r=values,
-                        theta=categories,
+                        r=values_closed,
+                        theta=categories_closed,
                         fill='toself',
                         name='Heat Transfer',
                         line=dict(color='orange', width=2),
@@ -1113,7 +1135,7 @@ class EnhancedVisualizer:
                         color=weights,
                         colorscale='Viridis',
                         opacity=0.7,
-                        colorbar=dict(title="Weight")
+                        colorbar=dict(title="Weight", x=1.05)
                     ),
                     name='Sources (E, τ, t)',
                     showlegend=False
@@ -1189,17 +1211,18 @@ class EnhancedVisualizer:
                     if top_idx < len(results['attention_maps'][t_idx]):
                         weight_evolution.append(results['attention_maps'][t_idx][top_idx])
                 
-                fig.add_trace(
-                    go.Scatter(
-                        x=time_points[:len(weight_evolution)],
-                        y=weight_evolution,
-                        mode='lines+markers',
-                        line=dict(color='purple', width=3),
-                        name='Top Source Weight',
-                        showlegend=False
-                    ),
-                    row=3, col=3
-                )
+                if weight_evolution:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=time_points[:len(weight_evolution)],
+                            y=weight_evolution,
+                            mode='lines+markers',
+                            line=dict(color='purple', width=3),
+                            name='Top Source Weight',
+                            showlegend=False
+                        ),
+                        row=3, col=3
+                    )
         
         fig.update_layout(
             height=1000,
@@ -1215,15 +1238,32 @@ class EnhancedVisualizer:
         fig.update_yaxes(title_text="Weight", row=1, col=2)
         fig.update_xaxes(title_text="Source Index", row=1, col=3)
         fig.update_yaxes(title_text="Weight", row=1, col=3)
+        
         fig.update_xaxes(title_text="Source Index", row=2, col=1)
         fig.update_yaxes(title_text="Weight", row=2, col=1)
         fig.update_xaxes(title_text="Time (ns)", row=2, col=2)
         fig.update_yaxes(title_text="Weight", row=2, col=2)
         
+        # Update polar plot layout
+        fig.update_polars(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 1]
+            ),
+            angularaxis=dict(
+                direction="clockwise"
+            ),
+            row=2, col=3
+        )
+        
+        # Update 3D scene
         fig.update_scenes(
             xaxis_title="Energy (mJ)",
             yaxis_title="Duration (ns)",
             zaxis_title="Time (ns)",
+            camera=dict(
+                eye=dict(x=1.5, y=1.5, z=1.5)
+            ),
             row=3, col=1
         )
         
@@ -1233,6 +1273,7 @@ class EnhancedVisualizer:
         fig.update_yaxes(title_text="Weight", row=3, col=3)
         
         return fig
+    
     
     @staticmethod
     def create_temporal_analysis(results, time_points):
