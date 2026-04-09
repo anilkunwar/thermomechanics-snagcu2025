@@ -63,6 +63,8 @@
 
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator16-streamlit-red)](https://thermomechanical-solutions-interpolator16.streamlit.app/) (gated attention with weights for flux, pulse duration and time, robust and working interpolation module, no temporal bias and so interpolation only within 20 ns duration, Milestone 1, r11 with a longer estimation duration)
 
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator17-streamlit-red)](https://thermomechanical-solutions-interpolator17.streamlit.app/) (gated attention with weights for flux, pulse duration and time, robust and working interpolation module, no temporal bias and so interpolation only within 20 ns duration, Milestone 1, r11 with a longer estimation duration, opacity of dataviewer changeable for better visualization)
+
    Robust Visualizations
    
    
