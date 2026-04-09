@@ -2087,9 +2087,9 @@ def main():
         render_stdgpa_analysis()
     elif app_mode == "Heat Transfer Analysis":
         render_heat_transfer_analysis()
-
+#
 def render_data_viewer():
-    """Render the enhanced data visualization interface"""
+    """Render the enhanced data visualization interface with adjustable opacity"""
     st.markdown('<h2 class="sub-header">📁 Data Viewer</h2>', unsafe_allow_html=True)
     
     if not st.session_state.data_loaded:
@@ -2146,8 +2146,8 @@ fea_solutions/
         st.error("No field data available for this simulation.")
         return
     
-    # Field and timestep selection
-    col1, col2, col3 = st.columns(3)
+    # Field, timestep, colormap, and opacity selection
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         field = st.selectbox(
             "Select Field",
@@ -2168,6 +2168,16 @@ fea_solutions/
             EnhancedVisualizer.EXTENDED_COLORMAPS,
             index=EnhancedVisualizer.EXTENDED_COLORMAPS.index(st.session_state.selected_colormap),
             key="viewer_colormap"
+        )
+    with col4:
+        opacity = st.slider(
+            "Opacity",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.9,
+            step=0.05,
+            key="viewer_opacity",
+            help="Adjust transparency of the 3D visualization"
         )
     
     # Main 3D visualization
@@ -2207,7 +2217,7 @@ fea_solutions/
                         thickness=20,
                         len=0.75
                     ),
-                    opacity=0.9,
+                    opacity=opacity,  # <-- using slider value
                     lighting=dict(
                         ambient=0.8,
                         diffuse=0.8,
@@ -2229,7 +2239,7 @@ fea_solutions/
                         size=4,
                         color=values,
                         colorscale=colormap,
-                        opacity=0.8,
+                        opacity=opacity,  # <-- using slider value
                         colorbar=dict(
                             title=dict(text=label, font=dict(size=14)),
                             thickness=20,
@@ -2251,7 +2261,7 @@ fea_solutions/
                     size=4,
                     color=values,
                     colorscale=colormap,
-                    opacity=0.8,
+                    opacity=opacity,  # <-- using slider value
                     colorbar=dict(
                         title=dict(text=label, font=dict(size=14)),
                         thickness=20,
@@ -2317,7 +2327,7 @@ fea_solutions/
         with col5:
             st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
     
-    # Field evolution over time
+    # Field evolution over time (unchanged)
     st.markdown('<h3 class="sub-header">📈 Field Evolution Over Time</h3>', unsafe_allow_html=True)
     
     # Find corresponding summary
