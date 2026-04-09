@@ -3686,10 +3686,10 @@ def compute_interpolated_field_cached(_extrapolator, field_name, attention_weigh
     return _extrapolator.interpolate_full_field(
         field_name, attention_weights, source_metadata, simulations
     )
-
+#
 def render_3d_interpolation(results, time_points, energy_query, duration_query, 
                            enable_3d=True, optimize_performance=False, top_k=10):
-    """Render 3D interpolation visualization with enhanced caching"""
+    """Render 3D field interpolation visualization with adjustable opacity"""
     st.markdown('<h4 class="sub-header">🖼️ 3D Field Interpolation with ST-DGPA</h4>', unsafe_allow_html=True)
     
     if not st.session_state.get('simulations'):
@@ -3731,7 +3731,8 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
         st.warning("No field predictions available for 3D visualization.")
         return
     
-    col1, col2 = st.columns(2)
+    # --- NEW: Add opacity slider in the selection row ---
+    col1, col2, col3 = st.columns(3)
     with col1:
         # Use session state to remember last selected field
         if 'current_3d_field' not in st.session_state or st.session_state.current_3d_field not in available_fields:
@@ -3767,6 +3768,18 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
         
         # Update session state
         st.session_state.current_3d_timestep = timestep_idx_3d
+    
+    with col3:
+        # NEW: Opacity slider for 3D visualization
+        opacity_3d = st.slider(
+            "Opacity",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.9,
+            step=0.05,
+            key="interp_3d_opacity",
+            help="Adjust transparency of the 3D plot (0 = invisible, 1 = fully opaque)"
+        )
     
     selected_time_3d = time_points[timestep_idx_3d]
     attention_weights_3d = results['attention_maps'][timestep_idx_3d]
@@ -3885,6 +3898,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
         if recent_fields:
             st.caption(f"**Recently viewed:** {', '.join([f.split('_')[0] for f in recent_fields])}")
     
+    # --- Build the 3D plot with adjustable opacity ---
     if triangles is not None and len(triangles) > 0 and pts.shape[0] < 50000:
         # Validate triangles after possible subsampling
         if optimize_performance and subsample_factor > 1:
@@ -3896,7 +3910,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                     size=4,
                     color=values,
                     colorscale=st.session_state.selected_colormap,
-                    opacity=0.8,
+                    opacity=opacity_3d,  # <-- applied
                     colorbar=dict(
                         title=dict(text=label, font=dict(size=12)),
                         thickness=20,
@@ -3924,7 +3938,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                         thickness=20,
                         len=0.6
                     ),
-                    opacity=0.9,
+                    opacity=opacity_3d,  # <-- applied
                     lighting=dict(
                         ambient=0.8,
                         diffuse=0.8,
@@ -3946,7 +3960,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                         size=4,
                         color=values,
                         colorscale=st.session_state.selected_colormap,
-                        opacity=0.8,
+                        opacity=opacity_3d,  # <-- applied
                         colorbar=dict(title=label),
                         showscale=True
                     ),
@@ -3964,7 +3978,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                 size=4,
                 color=values,
                 colorscale=st.session_state.selected_colormap,
-                opacity=0.8,
+                opacity=opacity_3d,  # <-- applied
                 colorbar=dict(
                     title=dict(text=label, font=dict(size=12)),
                     thickness=20,
