@@ -3377,7 +3377,7 @@ def render_3d_analysis(results, time_points, energy_query, duration_query):
             )
             
             st.plotly_chart(fig_evolution, use_container_width=True)
-
+#
 def render_detailed_results(results, time_points, energy_query, duration_query):
     """Render detailed prediction results"""
     st.markdown('<h4 class="sub-header">📊 Detailed Prediction Results</h4>', unsafe_allow_html=True)
@@ -3428,7 +3428,7 @@ def render_detailed_results(results, time_points, energy_query, duration_query):
         
         styled_df = df_results.style.format(format_dict)
         
-        # Add conditional formatting for confidence
+        # Conditional formatting for confidence
         def highlight_confidence(val):
             if isinstance(val, (int, float)):
                 if val < 0.3:
@@ -3439,12 +3439,12 @@ def render_detailed_results(results, time_points, energy_query, duration_query):
                     return 'background-color: #ccffcc'
             return ''
         
-        # Apply formatting to confidence columns
+        # Apply confidence highlighting (fixed: .map() instead of .applymap())
         confidence_cols = [col for col in df_results.columns if 'confidence' in col]
         for col in confidence_cols:
-            styled_df = styled_df.applymap(highlight_confidence, subset=[col])
+            styled_df = styled_df.map(highlight_confidence, subset=[col])
         
-        # Color phases
+        # Phase colors
         phase_colors = {
             'Early Heating': '#FF6B6B',
             'Heating': '#4ECDC4',
@@ -3458,7 +3458,7 @@ def render_detailed_results(results, time_points, energy_query, duration_query):
             return ''
         
         if 'phase' in df_results.columns:
-            styled_df = styled_df.applymap(color_phase, subset=['phase'])
+            styled_df = styled_df.map(color_phase, subset=['phase'])
         
         st.dataframe(styled_df, use_container_width=True, height=400)
         
