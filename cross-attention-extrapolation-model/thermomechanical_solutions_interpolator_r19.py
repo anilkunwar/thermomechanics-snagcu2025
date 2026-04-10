@@ -2741,12 +2741,13 @@ def render_interpolation_extrapolation():
             CacheManager.clear_3d_cache()
             
             results = st.session_state.extrapolator.predict_time_series(
-                energy_query=7.5, duration_query=6.0, time_points
+                energy_query, duration_query, time_points
             )
             
             if results and 'field_predictions' in results and results['field_predictions']:
                 st.session_state.interpolation_results = results
                 st.session_state.interpolation_params = {
+                    #'energy_query': energy_query,
                     'energy_query': energy_query,
                     'duration_query': duration_query,
                     'time_points': time_points,
