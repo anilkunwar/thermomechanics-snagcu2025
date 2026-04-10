@@ -2499,8 +2499,7 @@ def render_interpolation_extrapolation():
             "Energy (mJ)",
             min_value=float(min_energy * 0.5),
             max_value=float(max_energy * 2.0),
-            #value=float((min_energy + max_energy) / 2),
-            value=7.5,
+            value=float((min_energy + max_energy) / 2),
             step=0.1,
             key="interp_energy",
             help=f"Training range: {min_energy:.1f} - {max_energy:.1f} mJ"
@@ -2517,8 +2516,7 @@ def render_interpolation_extrapolation():
             "Pulse Duration (ns)",
             min_value=float(min_duration * 0.5),
             max_value=float(max_duration * 2.0),
-            #value=float((min_duration + max_duration) / 2),
-            value=6.0,
+            value=float((min_duration + max_duration) / 2),
             step=0.1,
             key="interp_duration",
             help=f"Training range: {min_duration:.1f} - {max_duration:.1f} ns"
@@ -2747,7 +2745,6 @@ def render_interpolation_extrapolation():
             if results and 'field_predictions' in results and results['field_predictions']:
                 st.session_state.interpolation_results = results
                 st.session_state.interpolation_params = {
-                    #'energy_query': energy_query,
                     'energy_query': energy_query,
                     'duration_query': duration_query,
                     'time_points': time_points,
