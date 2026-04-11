@@ -2787,7 +2787,7 @@ def render_interpolation_extrapolation():
                     render_prediction_results(results, time_points, energy_query, duration_query)
                 
                 with tab2:
-                    render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points)
+                    _visualization(results, energy_query, duration_query, time_points)
                 
                 with tab3:
                     render_temporal_analysis(results, time_points, energy_query, duration_query)
@@ -2836,7 +2836,7 @@ def render_interpolation_extrapolation():
             render_prediction_results(results, time_points, energy_query, duration_query)
         
         with tab2:
-            render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points)
+            _visualization(results, energy_query, duration_query, time_points)
         
         with tab3:
             render_temporal_analysis(results, time_points, energy_query, duration_query)
@@ -2857,13 +2857,13 @@ def render_interpolation_extrapolation():
         
         with tab7:
             render_parameter_analysis(results, energy_query, duration_query, time_points)
-
+#
 def render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points):
-    """Render ST-DGPA-specific attention visualizations"""
+    """Render ST-DGPA-specific attention visualizations with fixed typography and colorscales"""
     if not results.get('physics_attention_maps') or len(results['physics_attention_maps'][0]) == 0:
         st.info("No ST-DGPA attention data available.")
         return
-    
+        
     st.markdown('<h4 class="sub-header">🧠 ST-DGPA Attention Analysis</h4>', unsafe_allow_html=True)
     
     # Select timestep for ST-DGPA visualization
@@ -2878,19 +2878,209 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
     ett_gating = results['ett_gating_maps'][selected_timestep_idx]
     selected_time = time_points[selected_timestep_idx]
     
-    # Create comprehensive ST-DGPA analysis plot
-    fig = st.session_state.visualizer.create_stdgpa_analysis(
-        results, energy_query, duration_query, time_points
+    # =========================================================
+    # 🎨 ENHANCED PLOTLY FIGURE WITH FIXED TYPOGRAPHY & COLORSCALES
+    # =========================================================
+    fig = make_subplots(
+        rows=3, cols=3,
+        subplot_titles=[
+            "ST-DGPA Final Weights", "Physics Attention Only",
+            "(E, τ, t) Gating Only", "ST-DGPA vs Physics Attention",
+            "Temporal Coherence Analysis", "Heat Transfer Phase",
+            "Parameter Space 3D", "Attention Network", "Weight Evolution"
+        ],
+        vertical_spacing=0.09,
+        horizontal_spacing=0.09,
+        specs=[
+            [{'type': 'xy'}, {'type': 'xy'}, {'type': 'xy'}],
+            [{'type': 'xy'}, {'type': 'xy'}, {'type': 'polar'}],
+            [{'type': 'scene'}, {'type': 'xy'}, {'type': 'xy'}]
+        ]
     )
     
-    if fig:
-        st.plotly_chart(fig, use_container_width=True)
+    # 1. Final ST-DGPA weights
+    fig.add_trace(go.Bar(
+        x=list(range(len(final_weights))), y=final_weights, name='ST-DGPA Weights',
+        marker=dict(color='rgba(52, 152, 219, 0.85)', line=dict(color='rgba(41, 128, 185, 1.0)', width=1.2)),
+        showlegend=False
+    ), row=1, col=1)
+    fig.update_xaxes(title_text="Source Index", row=1, col=1, title_font=dict(size=13), tickfont=dict(size=11))
+    fig.update_yaxes(title_text="Weight", row=1, col=1, title_font=dict(size=13), tickfont=dict(size=11))
     
-    # Detailed ST-DGPA analysis
+    # 2. Physics attention only
+    fig.add_trace(go.Bar(
+        x=list(range(len(physics_attention))), y=physics_attention, name='Physics Attention',
+        marker=dict(color='rgba(46, 204, 113, 0.85)', line=dict(color='rgba(39, 174, 96, 1.0)', width=1.2)),
+        showlegend=False
+    ), row=1, col=2)
+    fig.update_xaxes(title_text="Source Index", row=1, col=2, title_font=dict(size=13), tickfont=dict(size=11))
+    fig.update_yaxes(title_text="Weight", row=1, col=2, title_font=dict(size=13), tickfont=dict(size=11))
+    
+    # 3. (E, τ, t) gating only
+    fig.add_trace(go.Bar(
+        x=list(range(len(ett_gating))), y=ett_gating, name='(E, τ, t) Gating',
+        marker=dict(color='rgba(231, 76, 60, 0.85)', line=dict(color='rgba(192, 57, 43, 1.0)', width=1.2)),
+        showlegend=False
+    ), row=1, col=3)
+    fig.update_xaxes(title_text="Source Index", row=1, col=3, title_font=dict(size=13), tickfont=dict(size=11))
+    fig.update_yaxes(title_text="Weight", row=1, col=3, title_font=dict(size=13), tickfont=dict(size=11))
+    
+    # 4. Comparison: ST-DGPA vs Physics Attention
+    fig.add_trace(go.Scatter(
+        x=list(range(len(final_weights))), y=final_weights, mode='lines+markers',
+        name='ST-DGPA Weights', line=dict(color='#3498db', width=3), marker=dict(size=5),
+        hovertemplate='ST-DGPA<br>Source: %{x}<br>Weight: %{y:.4f}<extra></extra>'
+    ), row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=list(range(len(physics_attention))), y=physics_attention, mode='lines+markers',
+        name='Physics Attention', line=dict(color='#2ecc71', width=2, dash='dash'), marker=dict(size=4),
+        hovertemplate='Physics<br>Source: %{x}<br>Weight: %{y:.4f}<extra></extra>'
+    ), row=2, col=1)
+    fig.update_xaxes(title_text="Source Index", row=2, col=1, title_font=dict(size=13), tickfont=dict(size=11))
+    fig.update_yaxes(title_text="Weight", row=2, col=1, title_font=dict(size=13), tickfont=dict(size=11))
+    
+    # 5. Temporal coherence analysis
+    if st.session_state.get('summaries') and hasattr(st.session_state.extrapolator, 'source_metadata'):
+        times, weights = [], []
+        for i, weight in enumerate(final_weights):
+            if weight > 0.01 and i < len(st.session_state.extrapolator.source_metadata):
+                times.append(st.session_state.extrapolator.source_metadata[i]['time'])
+                weights.append(weight)
+        if times and weights:
+            fig.add_trace(go.Scatter(
+                x=times, y=weights, mode='markers',
+                marker=dict(size=np.array(weights)*60, color=weights, colorscale='Viridis', showscale=False),
+                hovertemplate='Time: %{x:.1f} ns<br>Weight: %{y:.4f}<extra></extra>'
+            ), row=2, col=2)
+            fig.add_vline(x=selected_time, line_dash="dash", line_color="#e74c3c", line_width=2, row=2, col=2)
+    fig.update_xaxes(title_text="Time (ns)", row=2, col=2, title_font=dict(size=13), tickfont=dict(size=11))
+    fig.update_yaxes(title_text="Weight", row=2, col=2, title_font=dict(size=13), tickfont=dict(size=11))
+    
+    # 6. Heat transfer phase indicator (Polar)
+    if 'heat_transfer_indicators' in results and results['heat_transfer_indicators']:
+        indicators = results['heat_transfer_indicators'][selected_timestep_idx]
+        if indicators:
+            phase = indicators.get('phase', 'Unknown')
+            val_map = {'Early Heating': [0.9, 0.3, 0.2, 0.1], 'Heating': [0.9, 0.3, 0.2, 0.1],
+                       'Early Cooling': [0.4, 0.8, 0.3, 0.1], 'Diffusion Cooling': [0.2, 0.5, 0.9, 0.2]}
+            values = val_map.get(phase, [0.7, 0.5, 0.3, 0.2])
+            values_closed = values + [values[0]]
+            cats = ['Heating', 'Cooling', 'Diffusion', 'Adiabatic']
+            cats_closed = cats + [cats[0]]
+            fig.add_trace(go.Scatterpolar(
+                r=values_closed, theta=cats_closed, fill='toself',
+                fillcolor='rgba(243, 156, 18, 0.35)', line=dict(color='#f39c12', width=3), showlegend=False
+            ), row=2, col=3)
+    fig.update_polars(
+        radialaxis=dict(visible=True, range=[0, 1.1], tickfont=dict(size=12), color='black', gridcolor='lightgray'),
+        angularaxis=dict(direction="clockwise", tickfont=dict(size=13, color='#2c3e50'), color='black'),
+        bgcolor='white', row=2, col=3
+    )
+    
+    # 7. Parameter space 3D visualization
+    if st.session_state.get('summaries'):
+        energies, durations, times_3d, weights_3d = [], [], [], []
+        for summary in st.session_state.summaries[:10]:
+            for t in summary['timesteps'][:5]:
+                energies.append(summary['energy'])
+                durations.append(summary['duration'])
+                times_3d.append(t)
+                weights_3d.append(np.mean(final_weights) if len(final_weights) > 0 else 0.1)
+                
+        fig.add_trace(go.Scatter3d(
+            x=energies, y=durations, z=times_3d, mode='markers',
+            marker=dict(
+                size=np.array(weights_3d)*25, color=weights_3d, colorscale='Viridis',
+                colorbar=dict(
+                    title="Weight", title_font=dict(size=12), tickfont=dict(size=11),
+                    thickness=15, len=0.6, outlinewidth=1, outlinecolor='#2c3e50',
+                    xpad=10
+                ),
+                showscale=True, line=dict(width=0.5, color='white')
+            ),
+            hovertemplate='Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Time: %{z:.1f} ns<extra></extra>',
+            showlegend=False
+        ), row=3, col=1)
+        
+        fig.add_trace(go.Scatter3d(
+            x=[energy_query], y=[duration_query], z=[selected_time], mode='markers',
+            marker=dict(size=14, color='red', symbol='diamond', line=dict(width=2, color='black')),
+            showlegend=False
+        ), row=3, col=1)
+        
+    fig.update_scenes(
+        xaxis_title="Energy (mJ)", yaxis_title="Duration (ns)", zaxis_title="Time (ns)",
+        camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)),
+        xaxis=dict(title_font=dict(size=12), tickfont=dict(size=10), gridcolor='lightgray'),
+        yaxis=dict(title_font=dict(size=12), tickfont=dict(size=10), gridcolor='lightgray'),
+        zaxis=dict(title_font=dict(size=12), tickfont=dict(size=10), gridcolor='lightgray'),
+        row=3, col=1
+    )
+    
+    # 8. Attention network
+    if len(final_weights) > 5:
+        top_indices = np.argsort(final_weights)[-5:]
+        top_weights = final_weights[top_indices]
+        fig.add_trace(go.Scatter(
+            x=[0] + list(range(1, 6)), y=[0]*6, mode='markers+text',
+            text=['Query'] + [f'S{i+1}' for i in top_indices], textposition="top center",
+            marker=dict(size=[26]+list(top_weights*45), color=['#e74c3c']+['#3498db']*5,
+                       line=dict(width=2, color='white')),
+            hovertemplate='Node: %{text}<br>Weight: %{marker.size:.1f}<extra></extra>',
+            showlegend=False
+        ), row=3, col=2)
+        for i in range(1, 6):
+            fig.add_trace(go.Scatter(x=[0, i], y=[0, 0], mode='lines',
+                                     line=dict(width=top_weights[i-1]*12, color='#95a5a6'), showlegend=False), row=3, col=2)
+    fig.update_xaxes(title_text="Node", row=3, col=2, title_font=dict(size=13), tickfont=dict(size=11), showticklabels=False, showgrid=False)
+    fig.update_yaxes(title_text="", row=3, col=2, showticklabels=False, showgrid=False)
+    
+    # 9. Weight evolution over time
+    if len(results['attention_maps']) > 1:
+        top_idx = np.argmax(final_weights)
+        weight_evolution = []
+        for t_idx in range(len(results['attention_maps'])):
+            if top_idx < len(results['attention_maps'][t_idx]):
+                weight_evolution.append(results['attention_maps'][t_idx][top_idx])
+        if weight_evolution:
+            fig.add_trace(go.Scatter(
+                x=time_points[:len(weight_evolution)], y=weight_evolution,
+                mode='lines+markers', line=dict(color='#8e44ad', width=3), marker=dict(size=5),
+                hovertemplate='Time: %{x:.1f} ns<br>Weight: %{y:.4f}<extra></extra>',
+                showlegend=False
+            ), row=3, col=3)
+    fig.update_xaxes(title_text="Time (ns)", row=3, col=3, title_font=dict(size=13), tickfont=dict(size=11))
+    fig.update_yaxes(title_text="Weight", row=3, col=3, title_font=dict(size=13), tickfont=dict(size=11))
+    
+    # Global Layout Fixes
+    fig.update_layout(
+        height=1150, width=1250,
+        title=dict(
+            text=f"ST-DGPA Analysis at t={selected_time} ns (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
+            font=dict(size=18, color='#2c3e50', family="Arial, sans-serif"),
+            x=0.5, xanchor='center', pad=dict(b=10)
+        ),
+        plot_bgcolor='white', paper_bgcolor='white',
+        font=dict(family="Arial, sans-serif", size=13, color="#2c3e50"),
+        margin=dict(l=80, r=40, t=80, b=60),
+        showlegend=True,
+        legend=dict(
+            yanchor="top", y=1.06, xanchor="center", x=0.5,
+            orientation="h", bgcolor='rgba(255,255,255,0.9)',
+            bordercolor='#2c3e50', borderwidth=1,
+            font=dict(size=12)
+        ),
+        barmode='group',
+        bargap=0.15
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # =========================================================
+    # 📊 DETAILED ST-DGPA ANALYSIS (DataFrames & Metrics)
+    # =========================================================
     st.markdown("##### 📊 ST-DGPA Weight Analysis")
-    
     if len(final_weights) > 0:
-        # Create comparison dataframe
         comparison_data = []
         for i in range(min(15, len(final_weights))):
             comparison_data.append({
@@ -2900,10 +3090,8 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                 'ST-DGPA Final Weight': final_weights[i],
                 'Weight Change (%)': ((final_weights[i] - physics_attention[i]) / physics_attention[i] * 100) if physics_attention[i] > 0 else 0
             })
-        
         df_comparison = pd.DataFrame(comparison_data)
         
-        # Display with highlighting
         styled_df = df_comparison.style.format({
             'Physics Attention': '{:.4f}',
             '(E, τ, t) Gating': '{:.4f}',
@@ -2911,66 +3099,56 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             'Weight Change (%)': '{:.1f}%'
         })
         
-        # Highlight significant changes
         if 'Weight Change (%)' in df_comparison.columns:
             styled_df = styled_df.background_gradient(
-                subset=['Weight Change (%)'], 
-                cmap='RdYlGn', 
-                vmin=-100, 
+                subset=['Weight Change (%)'],
+                cmap='RdYlGn',
+                vmin=-100,
                 vmax=100
             )
-        
         st.dataframe(styled_df, use_container_width=True)
+
+    st.markdown("##### 📈 ST-DGPA Statistics")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        max_physics = np.max(physics_attention) if len(physics_attention) > 0 else 0
+        st.metric("Max Physics Attention", f"{max_physics:.4f}")
+    with col2:
+        max_gating = np.max(ett_gating) if len(ett_gating) > 0 else 0
+        st.metric("Max (E, τ, t) Gating", f"{max_gating:.4f}")
+    with col3:
+        max_stdgpa = np.max(final_weights) if len(final_weights) > 0 else 0
+        st.metric("Max ST-DGPA Weight", f"{max_stdgpa:.4f}")
+    with col4:
+        weight_change_avg = np.mean(np.abs(np.array(final_weights) - np.array(physics_attention))) if len(final_weights) > 0 else 0
+        st.metric("Avg Weight Change", f"{weight_change_avg:.4f}")
+
+    st.markdown("##### 🔍 ST-DGPA Effect Analysis")
+    if len(physics_attention) > 0 and len(final_weights) > 0:
+        weight_diffs = final_weights - physics_attention
+        boosted_indices = np.where(weight_diffs > 0)[0]
+        suppressed_indices = np.where(weight_diffs < 0)[0]
         
-        # ST-DGPA statistics
-        st.markdown("##### 📈 ST-DGPA Statistics")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            max_physics = np.max(physics_attention) if len(physics_attention) > 0 else 0
-            st.metric("Max Physics Attention", f"{max_physics:.4f}")
-        with col2:
-            max_gating = np.max(ett_gating) if len(ett_gating) > 0 else 0
-            st.metric("Max (E, τ, t) Gating", f"{max_gating:.4f}")
-        with col3:
-            max_stdgpa = np.max(final_weights) if len(final_weights) > 0 else 0
-            st.metric("Max ST-DGPA Weight", f"{max_stdgpa:.4f}")
-        with col4:
-            weight_change_avg = np.mean(np.abs(np.array(final_weights) - np.array(physics_attention))) if len(final_weights) > 0 else 0
-            st.metric("Avg Weight Change", f"{weight_change_avg:.4f}")
-        
-        # ST-DGPA effect analysis
-        st.markdown("##### 🔍 ST-DGPA Effect Analysis")
-        
-        # Calculate how much ST-DGPA changes the weights
-        if len(physics_attention) > 0 and len(final_weights) > 0:
-            # Find which sources were boosted/suppressed
-            weight_diffs = final_weights - physics_attention
-            boosted_indices = np.where(weight_diffs > 0)[0]
-            suppressed_indices = np.where(weight_diffs < 0)[0]
+        if len(boosted_indices) > 0:
+            max_boost_idx = boosted_indices[np.argmax(weight_diffs[boosted_indices])]
+            max_boost = weight_diffs[max_boost_idx]
+            st.info(f"**ST-DGPA boosted {len(boosted_indices)} sources** (max boost: +{max_boost:.3f} for source {max_boost_idx+1})")
             
-            if len(boosted_indices) > 0:
-                max_boost_idx = boosted_indices[np.argmax(weight_diffs[boosted_indices])]
-                max_boost = weight_diffs[max_boost_idx]
-                st.info(f"**ST-DGPA boosted {len(boosted_indices)} sources** (max boost: +{max_boost:.3f} for source {max_boost_idx+1})")
+        if len(suppressed_indices) > 0:
+            max_suppress_idx = suppressed_indices[np.argmin(weight_diffs[suppressed_indices])]
+            max_suppress = weight_diffs[max_suppress_idx]
+            st.info(f"**ST-DGPA suppressed {len(suppressed_indices)} sources** (max suppression: {max_suppress:.3f} for source {max_suppress_idx+1})")
             
-            if len(suppressed_indices) > 0:
-                max_suppress_idx = suppressed_indices[np.argmin(weight_diffs[suppressed_indices])]
-                max_suppress = weight_diffs[max_suppress_idx]
-                st.info(f"**ST-DGPA suppressed {len(suppressed_indices)} sources** (max suppression: {max_suppress:.3f} for source {max_suppress_idx+1})")
-            
-            # Show top 5 sources by ST-DGPA weight with temporal information
-            top_indices = np.argsort(final_weights)[-5:][::-1]
-            st.write("**Top 5 Sources by ST-DGPA Weight:**")
-            for rank, idx in enumerate(top_indices):
-                # Get temporal information
-                if hasattr(st.session_state.extrapolator, 'source_metadata') and idx < len(st.session_state.extrapolator.source_metadata):
-                    meta = st.session_state.extrapolator.source_metadata[idx]
-                    time_info = f", t={meta['time']} ns"
-                else:
-                    time_info = ""
+        top_indices = np.argsort(final_weights)[-5:][::-1]
+        st.write("**Top 5 Sources by ST-DGPA Weight:**")
+        for rank, idx in enumerate(top_indices):
+            time_info = ""
+            if hasattr(st.session_state.extrapolator, 'source_metadata') and idx < len(st.session_state.extrapolator.source_metadata):
+                meta = st.session_state.extrapolator.source_metadata[idx]
+                time_info = f", t={meta['time']:.1f} ns"
                 
-                st.write(f"{rank+1}. Source {idx+1}{time_info}: Physics={physics_attention[idx]:.4f}, Gating={ett_gating[idx]:.4f}, ST-DGPA={final_weights[idx]:.4f}")
+            st.write(f"{rank+1}. **Source {idx+1}**{time_info}: Physics=`{physics_attention[idx]:.4f}`, Gating=`{ett_gating[idx]:.4f}`, ST-DGPA=`{final_weights[idx]:.4f}`")
+
 
 def render_temporal_analysis(results, time_points, energy_query, duration_query):
     """Render temporal-specific analysis"""
