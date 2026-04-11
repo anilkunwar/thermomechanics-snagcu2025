@@ -75,6 +75,13 @@
     [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankeydemo-v1-brightgreen.svg)](https://thermomechanical-demo-data-interpolation-sankey-visualization1.streamlit.app/) (Sankey visualization for demo data)
 
     [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankeydemo-v2-brightgreen.svg)](https://thermomechanical-demo-data-interpolation-sankey-visualization2.streamlit.app/) (Sankey visualization for demo data)
+
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankey-v3-brightgreen.svg)](https://thermomechanical-solutions-interpolation-sankey-visualization3.streamlit.app/) (Sankey visualization for FEM simulations data)
+
+    [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankey-v4-brightgreen.svg)](https://thermomechanical-solutions-interpolation-sankey-visualization4.streamlit.app/) (Sankey visualization for FEM simulations data, incomplete)
+
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/polardiagram-v5-brightgreen.svg)](https://thermomechanical-solutions-interpolation-visualization5.streamlit.app/) (Sankey visualization for FEM simulations data, incomplete)
+   
    
    
    
