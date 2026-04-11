@@ -5,11 +5,10 @@ ST-DGPA Laser Soldering Interpolation & Sankey Visualizer
 ===========================================================
 Enhanced version with:
 - Robust error handling and debugging
-- Mathematical hover explanations
+- Mathematical hover explanations using customdata + hovertemplate (FIXED)
 - Full customization (colors, fonts, sizes)
 - Session state management
 - Graceful handling of missing columns
-- FIXED: Sankey function now accepts list of dicts instead of DataFrame
 """
 
 import streamlit as st
@@ -81,7 +80,7 @@ class LaserSolderingInterpolator:
 # 2. ENHANCED SANKEY VISUALIZATION ENGINE (FIXED)
 # ==========================================
 
-def create_stdgpa_sankey(sources_data: List[Dict], query: Dict, 
+def create_stdgpa_sankey(sources_ List[Dict], query: Dict, 
                         customization: Optional[Dict] = None) -> go.Figure:
     """
     Create Sankey diagram with hover math explanations and full customization.
@@ -148,7 +147,7 @@ def create_stdgpa_sankey(sources_data: List[Dict], query: Dict,
     node_colors.extend(cfg['node_colors']['components'])
     
     # Build links: Sources → Components → Target
-    s_idx, t_idx, vals, l_colors, h_texts = [], [], [], [], []
+    s_idx, t_idx, vals, l_colors, customdata_list = [], [], [], [], []
     
     # Stage 1: Sources → Components (decomposition)
     for i in range(n_sources):
@@ -170,19 +169,19 @@ def create_stdgpa_sankey(sources_data: List[Dict], query: Dict,
             vals.append(max(0.01, vals_list[c]))
             l_colors.append(cfg['node_colors']['components'][c].replace('rgb', 'rgba').replace(')', ', 0.5)'))
             
-            # Hover text with mathematical explanations
+            # Store custom data for hovertemplate (FIXED: use customdata instead of hovertext)
             if c == 0:
-                h_texts.append(f"<b>Energy Gate</b><br>S{src} | φ² = ((E*-Eᵢ)/s_E)² = {ve/10:.4f}")
+                customdata_list.append(f"E*={query['Energy']}, Eᵢ={row.get('Energy',0)}<br>φ² = ((E*-Eᵢ)/s_E)² = {ve/10:.4f}")
             elif c == 1:
-                h_texts.append(f"<b>Duration Gate</b><br>S{src} | φ² = ((τ*-τᵢ)/s_τ)² = {vτ/10:.4f}")
+                customdata_list.append(f"τ*={query['Duration']}, τᵢ={row.get('Duration',0)}<br>φ² = ((τ*-τᵢ)/s_τ)² = {vτ/10:.4f}")
             elif c == 2:
-                h_texts.append(f"<b>Time Gate</b><br>S{src} | φ² = ((t*-tᵢ)/s_t)² = {vt/10:.4f}")
+                customdata_list.append(f"t*={query['Time']}, tᵢ={row.get('Time',0)}<br>φ² = ((t*-tᵢ)/s_t)² = {vt/10:.4f}")
             elif c == 3:
-                h_texts.append(f"<b>Attention</b><br>S{src} | αᵢ = 1/(1+√φ²) = {row.get('Attention_Score',0):.4f}")
+                customdata_list.append(f"αᵢ = 1/(1+√φ²)<br>Score: {row.get('Attention_Score',0):.4f}")
             elif c == 4:
-                h_texts.append(f"<b>Refinement</b><br>S{src} | wᵢ ∝ αᵢ·gatingᵢ = {row.get('Refinement',0):.4f}")
+                customdata_list.append(f"wᵢ ∝ αᵢ·gatingᵢ<br>Ref: {row.get('Refinement',0):.4f}")
             else:
-                h_texts.append(f"<b>Combined Weight</b><br>S{src} | wᵢ = (αᵢ·gatingᵢ)/Σ(...) = {row.get('Combined_Weight',0):.4f}")
+                customdata_list.append(f"wᵢ = (αᵢ·gatingᵢ)/Σ(...)<br>Weight: {row.get('Combined_Weight',0):.4f}")
     
     # Stage 2: Components → Target (aggregation)
     for c in range(6):
@@ -192,9 +191,9 @@ def create_stdgpa_sankey(sources_data: List[Dict], query: Dict,
         flow_in = sum(v for s, t, v in zip(s_idx[:-6], t_idx[:-6], vals[:-6]) if t == comp_start + c)
         vals.append(flow_in * 0.5)  # Damping for visual balance
         l_colors.append('rgba(153,102,255,0.6)')
-        h_texts.append(f"<b>Aggregation</b><br>{comp_labels[c]} → TARGET<br>Total: {flow_in:.3f}")
+        customdata_list.append(f"Total flow into {comp_labels[c]}: {flow_in:.3f}")
     
-    # Create Sankey figure - FIXED: removed invalid top-level hoverinfo
+    # Create Sankey figure - FIXED: use customdata + hovertemplate instead of hovertext
     fig = go.Figure(go.Sankey(
         node=dict(
             pad=cfg['node_pad'],
@@ -210,8 +209,8 @@ def create_stdgpa_sankey(sources_data: List[Dict], query: Dict,
             target=t_idx,
             value=vals,
             color=l_colors,
-            hovertext=h_texts,
-            hovertemplate='%{hovertext}<extra></extra>',  # FIXED: in link dict
+            customdata=customdata_list,  # FIXED: use customdata instead of hovertext
+            hovertemplate='%{customdata}<extra></extra>',  # FIXED: reference customdata in template
             line=dict(width=0.5, color='rgba(255,255,255,0.3)')
         )
         # FIXED: removed hoverinfo='all' from top level
@@ -353,14 +352,7 @@ def main():
         
         # Show parameter summary
         if st.session_state.df_sources is not None:
-            st.markdown("---")
-            st.markdown("### 📋 Active Parameters")
-            with st.expander("Parameter Summary", expanded=False):
-                st.write(f"**σ_g**: {sigma_g:.2f} (gating sharpness)")
-                st.write(f"**s_E**: {s_E:.1f} mJ (energy scale)")
-                st.write(f"**s_τ**: {s_tau:.1f} ns (duration scale)")
-                st.write(f"**s_t**: {s_t:.1f} ns (time scale)")
-                st.write(f"**Temporal Weight**: {temporal_weight:.2f}")
+            st.info(f"✅ {len(st.session_state.df_sources)} simulations loaded")
 
     # Main area: Query and visualization
     if st.session_state.df_sources is not None:
