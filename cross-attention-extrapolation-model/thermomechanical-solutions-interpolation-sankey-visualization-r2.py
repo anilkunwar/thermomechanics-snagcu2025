@@ -9,6 +9,7 @@ Enhanced version with:
 - Full customization (colors, fonts, sizes)
 - Session state management
 - Graceful handling of missing columns
+- FIXED: Sankey function now accepts list of dicts instead of DataFrame
 """
 
 import streamlit as st
@@ -77,18 +78,18 @@ class LaserSolderingInterpolator:
             return sources
 
 # ==========================================
-# 2. ENHANCED SANKEY VISUALIZATION ENGINE
+# 2. ENHANCED SANKEY VISUALIZATION ENGINE (FIXED)
 # ==========================================
 
-def create_stdgpa_sankey(df_sources: pd.DataFrame, query: Dict, 
+def create_stdgpa_sankey(sources_data: List[Dict], query: Dict, 
                         customization: Optional[Dict] = None) -> go.Figure:
     """
     Create Sankey diagram with hover math explanations and full customization.
     
     Parameters:
     -----------
-    df_sources : pd.DataFrame
-        Sources with computed ST-DGPA weights
+    sources_data : List[Dict]  # FIXED: Changed from pd.DataFrame
+        Sources with computed ST-DGPA weights (list of dicts)
     query : Dict
         Query parameters {Energy, Duration, Time}
     customization : Dict, optional
@@ -120,7 +121,7 @@ def create_stdgpa_sankey(df_sources: pd.DataFrame, query: Dict,
             'Time Gate\nφ² = ((t*-tᵢ)/s_t)²',
             'Attention\nαᵢ = 1/(1+√φ²)',
             'Refinement\nwᵢ ∝ αᵢ×gatingᵢ',
-            'Combined\nwᵢ = (αᵢ·gatingᵢ)/Σ(...)'
+            'Combined\nwᵢ = αᵢ·gatingᵢ / Σ(...)'
         ]
     else:
         comp_labels = ['Energy Gate', 'Duration Gate', 'Time Gate', 
@@ -130,9 +131,9 @@ def create_stdgpa_sankey(df_sources: pd.DataFrame, query: Dict,
     labels = [cfg['target_label']]
     node_colors = [cfg['node_colors']['target']]
     
-    n_sources = len(df_sources)
+    n_sources = len(sources_data)
     for i in range(n_sources):
-        row = df_sources.iloc[i]
+        row = sources_data[i]  # FIXED: Changed from df_sources.iloc[i]
         w = row.get('Combined_Weight', 0)
         # Scale opacity by weight for visual emphasis
         opacity = min(0.3 + w * 0.7, 1.0)
@@ -152,7 +153,7 @@ def create_stdgpa_sankey(df_sources: pd.DataFrame, query: Dict,
     # Stage 1: Sources → Components (decomposition)
     for i in range(n_sources):
         src = i + 1  # +1 because target is index 0
-        row = df_sources.iloc[i]
+        row = sources_data[i]  # FIXED: Changed from df_sources.iloc[i]
         
         # Scaled values for visualization (not actual weights)
         ve = ((row.get('Energy', query['Energy']) - query['Energy']) / 10.0)**2 * 10
@@ -395,7 +396,7 @@ def main():
             }
         }
         
-        if st.button("🚀 Compute ST-DGPA Interpolation", type="primary", use_container_width=True):
+        if st.button("🚀 Compute ST-DGPA", type="primary", use_container_width=True):
             try:
                 with st.spinner("Computing Spatio-Temporal Gated Physics Attention weights..."):
                     # Run interpolation
@@ -429,7 +430,7 @@ def main():
                     else:
                         st.info("⚠️ `Max_Temp` column not found. Skipping temperature prediction.")
                     
-                    # Sankey Diagram
+                    # Sankey Diagram - FIXED: Convert DataFrame to list of dicts
                     st.markdown("### 🕸️ Attention Weight Flow")
                     st.markdown("""
                     **How to read this diagram:**
@@ -440,6 +441,7 @@ def main():
                     - **Hover over any element**: See mathematical formulas and detailed explanations
                     """)
                     
+                    # FIXED: Convert DataFrame to list of dicts for Sankey function
                     sources_data = results.to_dict('records')
                     fig_sankey = create_stdgpa_sankey(sources_data, query, customization)
                     st.plotly_chart(fig_sankey, use_container_width=True)
