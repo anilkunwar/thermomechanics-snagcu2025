@@ -5,7 +5,7 @@ ST-DGPA Laser Soldering Interpolation & Sankey Visualizer
 ===========================================================
 Enhanced version with:
 - Robust error handling and debugging
-- Mathematical hover explanations using customdata + hovertemplate (FIXED)
+- Mathematical hover explanations
 - Full customization (colors, fonts, sizes)
 - Session state management
 - Graceful handling of missing columns
@@ -80,14 +80,14 @@ class LaserSolderingInterpolator:
 # 2. ENHANCED SANKEY VISUALIZATION ENGINE (FIXED)
 # ==========================================
 
-def create_stdgpa_sankey(sources_ List[Dict], query: Dict, 
+def create_stdgpa_sankey(sources_: List[Dict], query: Dict, 
                         customization: Optional[Dict] = None) -> go.Figure:
     """
     Create Sankey diagram with hover math explanations and full customization.
     
     Parameters:
     -----------
-    sources_data : List[Dict]  # FIXED: Changed from pd.DataFrame
+    sources_ : List[Dict]  # FIXED: Added colon after parameter name
         Sources with computed ST-DGPA weights (list of dicts)
     query : Dict
         Query parameters {Energy, Duration, Time}
@@ -130,9 +130,9 @@ def create_stdgpa_sankey(sources_ List[Dict], query: Dict,
     labels = [cfg['target_label']]
     node_colors = [cfg['node_colors']['target']]
     
-    n_sources = len(sources_data)
+    n_sources = len(sources_)
     for i in range(n_sources):
-        row = sources_data[i]  # FIXED: Changed from df_sources.iloc[i]
+        row = sources_[i]  # FIXED: Changed from df_sources.iloc[i]
         w = row.get('Combined_Weight', 0)
         # Scale opacity by weight for visual emphasis
         opacity = min(0.3 + w * 0.7, 1.0)
@@ -152,7 +152,7 @@ def create_stdgpa_sankey(sources_ List[Dict], query: Dict,
     # Stage 1: Sources → Components (decomposition)
     for i in range(n_sources):
         src = i + 1  # +1 because target is index 0
-        row = sources_data[i]  # FIXED: Changed from df_sources.iloc[i]
+        row = sources_[i]  # FIXED: Changed from df_sources.iloc[i]
         
         # Scaled values for visualization (not actual weights)
         ve = ((row.get('Energy', query['Energy']) - query['Energy']) / 10.0)**2 * 10
