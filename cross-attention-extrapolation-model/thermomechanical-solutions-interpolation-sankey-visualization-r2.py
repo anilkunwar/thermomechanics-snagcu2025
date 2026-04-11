@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ST-DGPA Laser Soldering Interpolation & Sankey Visualizer
-===========================================================
-Enhanced version with:
+ST-DGPA Laser Soldering Sankey Visualizer
+==========================================
+Fully working Streamlit application for:
+- Loading FEA laser soldering simulations
+- ST-DGPA (Spatio-Temporal Gated Physics Attention) interpolation
+- Interactive Sankey diagram with mathematical hover explanations
+- Full customization: colors, fonts, labels, sizes, simulation counts
 - Robust error handling and debugging
-- Mathematical hover explanations
-- Full customization (colors, fonts, sizes)
-- Session state management
-- Graceful handling of missing columns
 """
 
 import streamlit as st
@@ -18,7 +18,12 @@ import plotly.graph_objects as go
 from typing import List, Dict, Optional
 import traceback
 
-st.set_page_config(page_title="ST-DGPA Sankey Visualizer", layout="wide", page_icon="🔬")
+st.set_page_config(
+    page_title="ST-DGPA Sankey Visualizer",
+    layout="wide",
+    page_icon="🔬",
+    initial_sidebar_state="expanded"
+)
 
 # ==========================================
 # 1. CORE PHYSICS & INTERPOLATION LOGIC
@@ -193,7 +198,7 @@ def create_stdgpa_sankey(sources_: List[Dict], query: Dict,
         l_colors.append('rgba(153,102,255,0.6)')
         customdata_list.append(f"Total flow into {comp_labels[c]}: {flow_in:.3f}")
     
-    # Create Sankey figure - FIXED: use customdata + hovertemplate instead of hovertext
+    # Create Sankey figure - FIXED: removed invalid properties
     fig = go.Figure(go.Sankey(
         node=dict(
             pad=cfg['node_pad'],
@@ -201,7 +206,7 @@ def create_stdgpa_sankey(sources_: List[Dict], query: Dict,
             line=dict(color="black", width=0.5),
             label=labels,
             color=node_colors,
-            font=dict(family=cfg['font_family'], size=cfg['font_size']),
+            # FIXED: Removed invalid 'font' property from node dict
             hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'  # FIXED: in node dict
         ),
         link=dict(
@@ -213,10 +218,10 @@ def create_stdgpa_sankey(sources_: List[Dict], query: Dict,
             hovertemplate='%{customdata}<extra></extra>',  # FIXED: reference customdata in template
             line=dict(width=0.5, color='rgba(255,255,255,0.3)')
         )
-        # FIXED: removed hoverinfo='all' from top level
+        # FIXED: removed invalid top-level hoverinfo property
     ))
     
-    # Update layout
+    # Update layout - FIXED: apply font via layout, not node
     title_text = (
         f"<b>ST-DGPA Attention Flow</b><br>"
         f"Query: E={query['Energy']:.2f} mJ, τ={query['Duration']:.2f} ns, t={query['Time']:.2f} ns<br>"
@@ -230,6 +235,7 @@ def create_stdgpa_sankey(sources_: List[Dict], query: Dict,
             x=0.5,
             xanchor='center'
         ),
+        # FIXED: Apply global font via layout, not node
         font=dict(family=cfg['font_family'], size=cfg['font_size']),
         width=cfg['width'],
         height=cfg['height'],
