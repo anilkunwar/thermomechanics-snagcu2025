@@ -4482,11 +4482,10 @@ def render_comparative_analysis():
                                    f"Energy diff: {energy_diff:.1%}, "
                                    f"Duration diff: {duration_diff:.1%}, "
                                    f"Field diff: {field_diff:.1%}")
-
+#
 def render_stdgpa_analysis():
     """Render comprehensive ST-DGPA analysis interface"""
     st.markdown('<h2 class="sub-header">🔬 Spatio-Temporal Gated Physics Attention (ST-DGPA) Analysis</h2>', unsafe_allow_html=True)
-    
     if not st.session_state.data_loaded:
         st.markdown("""
         <div class="warning-box">
@@ -4495,106 +4494,67 @@ def render_stdgpa_analysis():
         </div>
         """, unsafe_allow_html=True)
         return
-    
+
     st.markdown("""
     <div class="stdgpa-box">
     <h3>📚 ST-DGPA Theory & Implementation</h3>
-    
     **Spatio-Temporal Gated Physics Attention (ST-DGPA)** is an advanced interpolation method for laser FEA simulations that explicitly incorporates energy (E), pulse duration (τ), and time (t) similarity with heat transfer characterization.
-    
     ### Core ST-DGPA Formula
-    
     For any field **F** (temperature, stress, displacement, etc.):
-    
     $$
     \\boxed{\\mathbf{F}(\\boldsymbol{\\theta}^*) = \\sum_{i=1}^{N} w_i(\\boldsymbol{\\theta}^*) \\cdot \\mathbf{F}^{(i)}}
     $$
-    
     where $w_i(\\boldsymbol{\\theta}^*)$ are ST-DGPA weights computed as:
-    
     $$
-    w_i(\\boldsymbol{\\theta}^*) = \\frac{ 
-    \\bar{\\alpha}_i(\\boldsymbol{\\theta}^*) \\cdot 
+    w_i(\\boldsymbol{\\theta}^*) = \\frac{
+    \\bar{\\alpha}_i(\\boldsymbol{\\theta}^*) \\cdot
     \\exp\\left( -\\frac{\\phi_i^2}{2\\sigma_g^2} \\right)
     }{
-    \\sum_{k=1}^{N} \\bar{\\alpha}_k(\\boldsymbol{\\theta}^*) \\cdot 
+    \\sum_{k=1}^{N} \\bar{\\alpha}_k(\\boldsymbol{\\theta}^*) \\cdot
     \\exp\\left( -\\frac{\\phi_k^2}{2\\sigma_g^2} \\right)
     }
     $$
-    
     with the (E, τ, t) proximity kernel:
-    
     $$
-    \\phi_i = \\sqrt{ 
-    \\left( \\frac{E^* - E_i}{s_E} \\right)^2 + 
-    \\left( \\frac{\\tau^* - \\tau_i}{s_\\tau} \\right)^2 + 
-    \\left( \\frac{t^* - t_i}{s_t} \\right)^2 
+    \\phi_i = \\sqrt{
+    \\left( \\frac{E^* - E_i}{s_E} \\right)^2 +
+    \\left( \\frac{\\tau^* - \\tau_i}{s_\\tau} \\right)^2 +
+    \\left( \\frac{t^* - t_i}{s_t} \\right)^2
     }
     $$
-    
     ### Key Components
-    
     1. **Physics Attention** ($\\bar{\\alpha}_i$): Multi-head transformer-inspired attention with enhanced physics-aware embeddings including heat transfer features
     2. **(E, τ, t) Gating**: Gaussian kernel that ensures physically meaningful interpolation across time
     3. **Heat Transfer Characterization**: Incorporates Fourier number ($Fo = \\alpha t / L^2$) and thermal penetration depth ($\\delta \\sim \\sqrt{\\alpha t}$)
     4. **Temporal Weighting**: Explicit control over temporal similarity importance
     </div>
     """, unsafe_allow_html=True)
-    
+
     # ST-DGPA parameter exploration
     st.markdown('<h3 class="sub-header">🔍 ST-DGPA Parameter Explorer</h3>', unsafe_allow_html=True)
-    
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         explore_sigma_g = st.slider(
-            "Explore σ_g",
-            min_value=0.05,
-            max_value=1.0,
-            value=0.20,
-            step=0.05,
-            key="explore_sigma_g"
+            "Explore σ_g", min_value=0.05, max_value=1.0, value=0.20, step=0.05, key="explore_sigma_g"
         )
     with col2:
         explore_s_E = st.slider(
-            "Explore s_E",
-            min_value=0.1,
-            max_value=50.0,
-            value=10.0,
-            step=0.5,
-            key="explore_s_E"
+            "Explore s_E", min_value=0.1, max_value=50.0, value=10.0, step=0.5, key="explore_s_E"
         )
     with col3:
         explore_s_tau = st.slider(
-            "Explore s_τ",
-            min_value=0.1,
-            max_value=20.0,
-            value=5.0,
-            step=0.5,
-            key="explore_s_tau"
+            "Explore s_τ", min_value=0.1, max_value=20.0, value=5.0, step=0.5, key="explore_s_tau"
         )
     with col4:
         explore_s_t = st.slider(
-            "Explore s_t",
-            min_value=1.0,
-            max_value=50.0,
-            value=20.0,
-            step=1.0,
-            key="explore_s_t"
+            "Explore s_t", min_value=1.0, max_value=50.0, value=20.0, step=1.0, key="explore_s_t"
         )
-    
     explore_temporal_weight = st.slider(
-        "Explore Temporal Weight",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.3,
-        step=0.05,
-        key="explore_temporal_weight"
+        "Explore Temporal Weight", min_value=0.0, max_value=1.0, value=0.3, step=0.05, key="explore_temporal_weight"
     )
-    
+
     # Create visualization of ST-DGPA kernel
     st.markdown("##### 📊 (E, τ, t) Gating Kernel Visualization")
-    
-    # Generate sample data
     if st.session_state.summaries:
         energies = [s['energy'] for s in st.session_state.summaries]
         durations = [s['duration'] for s in st.session_state.summaries]
@@ -4602,97 +4562,83 @@ def render_stdgpa_analysis():
         # Create grid for visualization (E-τ plane)
         e_min, e_max = min(energies), max(energies)
         d_min, d_max = min(durations), max(durations)
-        
         e_grid = np.linspace(e_min, e_max, 50)
         d_grid = np.linspace(d_min, d_max, 50)
         E_grid, D_grid = np.meshgrid(e_grid, d_grid)
         
-        # Query point (center of grid)
-        query_e = (e_min + e_max) / 2
-        query_d = (d_min + d_max) / 2
-        query_t = 10.0  # Example time
+        # ✅ MODIFIED: Dynamically fetch query point from Interpolation/Extrapolation tab
+        interp_params = st.session_state.get('interpolation_params', {})
+        if interp_params.get('energy_query') is not None and interp_params.get('duration_query') is not None:
+            query_e = interp_params['energy_query']
+            query_d = interp_params['duration_query']
+            st.caption(f"🔍 Using target from Interpolation/Extrapolation: E = {query_e:.1f} mJ, τ = {query_d:.1f} ns")
+        else:
+            query_e = (e_min + e_max) / 2
+            query_d = (d_min + d_max) / 2
+            st.caption(f"ℹ️ No active target – using training data center: E = {query_e:.1f} mJ, τ = {query_d:.1f} ns")
+            
+        # Use midpoint of prediction time points if available, else fallback
+        time_points = interp_params.get('time_points', [])
+        query_t = time_points[len(time_points)//2] if len(time_points) > 0 else 10.0
         
-        # Compute gating kernel at fixed time
+        # Display target metrics
+        col_met1, col_met2 = st.columns(2)
+        with col_met1:
+            st.metric("🎯 Target Energy", f"{query_e:.2f} mJ")
+        with col_met2:
+            st.metric("🎯 Target Duration", f"{query_d:.2f} ns")
+
+        # Compute gating kernel at selected time
         phi_squared = ((E_grid - query_e) / explore_s_E)**2 + ((D_grid - query_d) / explore_s_tau)**2
         gating = np.exp(-phi_squared / (2 * explore_sigma_g**2))
         
         # Create heatmap
         fig_kernel = go.Figure(data=go.Heatmap(
-            z=gating,
-            x=e_grid,
-            y=d_grid,
-            colorscale='Viridis',
-            colorbar=dict(title="Gating Weight")
+            z=gating, x=e_grid, y=d_grid, colorscale='Viridis', colorbar=dict(title="Gating Weight")
         ))
-        
         # Add training points
         fig_kernel.add_trace(go.Scatter(
-            x=energies,
-            y=durations,
-            mode='markers',
-            marker=dict(
-                size=8,
-                color='red',
-                symbol='circle',
-                line=dict(width=2, color='white')
-            ),
+            x=energies, y=durations, mode='markers',
+            marker=dict(size=8, color='red', symbol='circle', line=dict(width=2, color='white')),
             name='Training Simulations'
         ))
-        
         # Add query point
         fig_kernel.add_trace(go.Scatter(
-            x=[query_e],
-            y=[query_d],
-            mode='markers',
-            marker=dict(
-                size=15,
-                color='yellow',
-                symbol='star'
-            ),
+            x=[query_e], y=[query_d], mode='markers',
+            marker=dict(size=15, color='yellow', symbol='star'),
             name='Query Point'
         ))
-        
         fig_kernel.update_layout(
-            title=f"(E, τ) Gating Kernel at t={query_t} ns (σ_g={explore_sigma_g:.2f}, s_E={explore_s_E:.1f}, s_τ={explore_s_tau:.1f}, s_t={explore_s_t:.1f})",
-            xaxis_title="Energy (mJ)",
-            yaxis_title="Duration (ns)",
-            height=500
+            title=f"(E, τ) Gating Kernel at t={query_t:.1f} ns (σ_g={explore_sigma_g:.2f}, s_E={explore_s_E:.1f}, s_τ={explore_s_tau:.1f}, s_t={explore_s_t:.1f})",
+            xaxis_title="Energy (mJ)", yaxis_title="Duration (ns)", height=500
         )
-        
         st.plotly_chart(fig_kernel, use_container_width=True)
-        
+
         # Kernel statistics
         st.markdown("##### 📈 Kernel Statistics")
-        
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("Max Gating", f"{np.max(gating):.3f}")
         with col2:
             st.metric("Min Gating", f"{np.min(gating):.3f}")
         with col3:
-            # Effective radius (where gating > 0.5)
             effective_mask = gating > 0.5
             effective_area = np.sum(effective_mask) / gating.size * 100
             st.metric("Effective Area", f"{effective_area:.1f}%")
         with col4:
-            # Number of training points in effective area
             effective_points = 0
             for e, d in zip(energies, durations):
                 phi = np.sqrt(((e - query_e)/explore_s_E)**2 + ((d - query_d)/explore_s_tau)**2)
                 if np.exp(-phi**2/(2*explore_sigma_g**2)) > 0.5:
                     effective_points += 1
             st.metric("Effective Points", f"{effective_points}/{len(energies)}")
-    
+
     # ST-DGPA vs baseline comparison
     st.markdown('<h3 class="sub-header">⚖️ ST-DGPA vs DGPA Comparison</h3>', unsafe_allow_html=True)
-    
-    # Simulate comparison scenario
     if st.button("🧪 Run ST-DGPA vs DGPA Comparison", use_container_width=True):
         with st.spinner("Running comparison analysis..."):
-            
             st.markdown("""
             ### Conceptual Comparison
-            
             | Aspect | ST-DGPA (Extended) | DGPA (Original) |
             |--------|-------------------|----------------|
             | **Temporal sensitivity** | Explicit time gating | Implicit via embeddings |
@@ -4701,117 +4647,72 @@ def render_stdgpa_analysis():
             | **Temporal confidence** | Physics-based confidence scoring | Single confidence score |
             | **Parameter tuning** | Time-specific scaling (s_t) | No time-specific scaling |
             | **Computational cost** | Slightly higher (enhanced features) | Standard DGPA |
-            
             ### Key Advantages of ST-DGPA
-            
             1. **Temporal interpretability**: Clear separation of temporal phases (heating vs cooling)
             2. **Heat transfer awareness**: Incorporates diffusion physics via Fourier number
             3. **Phase-appropriate gating**: Tighter temporal matching during heating, looser during cooling
             4. **Enhanced embeddings**: Physics-aware temporal features improve attention quality
             5. **Temporal confidence**: Separate confidence metric for time interpolation reliability
             """)
-            
             # Create comparison visualization
             fig_compare = go.Figure()
-            
-            # Simulated weights for comparison
             n_sources = 20
             physics_weights = np.random.dirichlet(np.ones(n_sources))
             et_distances = np.abs(np.random.randn(n_sources))
             time_distances = np.abs(np.random.randn(n_sources)) * 0.5
             
-            # DGPA weights (E, τ only)
             sigma_g_dgpa = 0.2
             dgpa_gating = np.exp(-et_distances**2 / (2 * sigma_g_dgpa**2))
             dgpa_weights = (physics_weights * dgpa_gating)
             dgpa_weights = dgpa_weights / np.sum(dgpa_weights)
             
-            # ST-DGPA weights (E, τ, t)
             sigma_g_stdgpa = 0.2
             stdgpa_distances = np.sqrt(et_distances**2 + (time_distances/explore_s_t)**2)
             stdgpa_gating = np.exp(-stdgpa_distances**2 / (2 * sigma_g_stdgpa**2))
             stdgpa_weights = (physics_weights * stdgpa_gating)
             stdgpa_weights = stdgpa_weights / np.sum(stdgpa_weights)
             
-            fig_compare.add_trace(go.Scatter(
-                x=list(range(n_sources)),
-                y=physics_weights,
-                mode='lines+markers',
-                name='Physics Attention Only',
-                line=dict(color='green', width=2)
-            ))
-            
-            fig_compare.add_trace(go.Scatter(
-                x=list(range(n_sources)),
-                y=dgpa_weights,
-                mode='lines+markers',
-                name='DGPA (E, τ only)',
-                line=dict(color='blue', width=2, dash='dash')
-            ))
-            
-            fig_compare.add_trace(go.Scatter(
-                x=list(range(n_sources)),
-                y=stdgpa_weights,
-                mode='lines+markers',
-                name='ST-DGPA (E, τ, t)',
-                line=dict(color='red', width=3)
-            ))
-            
-            fig_compare.update_layout(
-                title="ST-DGPA vs DGPA Weight Distribution",
-                xaxis_title="Source Index",
-                yaxis_title="Weight",
-                height=400,
-                showlegend=True
-            )
-            
+            fig_compare.add_trace(go.Scatter(x=list(range(n_sources)), y=physics_weights, mode='lines+markers', name='Physics Attention Only', line=dict(color='green', width=2)))
+            fig_compare.add_trace(go.Scatter(x=list(range(n_sources)), y=dgpa_weights, mode='lines+markers', name='DGPA (E, τ only)', line=dict(color='blue', width=2, dash='dash')))
+            fig_compare.add_trace(go.Scatter(x=list(range(n_sources)), y=stdgpa_weights, mode='lines+markers', name='ST-DGPA (E, τ, t)', line=dict(color='red', width=3)))
+            fig_compare.update_layout(title="ST-DGPA vs DGPA Weight Distribution", xaxis_title="Source Index", yaxis_title="Weight", height=400, showlegend=True)
             st.plotly_chart(fig_compare, use_container_width=True)
             
-            # Calculate differences
             dgpa_change = dgpa_weights - physics_weights
             stdgpa_change = stdgpa_weights - physics_weights
-            
             st.info(f"**DGPA changes weights by ±{np.max(np.abs(dgpa_change)):.3f} (avg: {np.mean(np.abs(dgpa_change)):.3f})**")
             st.info(f"**ST-DGPA changes weights by ±{np.max(np.abs(stdgpa_change)):.3f} (avg: {np.mean(np.abs(stdgpa_change)):.3f})**")
-    
+
     # ST-DGPA applications guide
     with st.expander("📖 ST-DGPA Applications & Best Practices", expanded=True):
         st.markdown("""
         ### 🎯 When to Use ST-DGPA
-        
         **Highly recommended for:**
         - Laser processing with strong time-dependent effects
         - Heat transfer-dominated simulations
         - Interpolation across different temporal phases
         - Conservative temporal extrapolation needs
-        
         **Recommended for:**
         - General laser FEA interpolation with time dependence
         - Multi-phase physical processes
         - Uncertainty quantification in time domain
-        
         **Less suitable for:**
         - Steady-state simulations (use DGPA)
         - Very sparse temporal data (< 3 timesteps per simulation)
         - Real-time applications requiring maximum speed
-        
         ### ⚙️ Parameter Selection Guide
-        
         **Default values (laser FEA with heat transfer):**
         - σ_g = 0.20 (moderate gating)
         - s_E = 10.0 mJ (based on typical energy range)
         - s_τ = 5.0 ns (based on typical duration range)
         - s_t = 20.0 ns (balanced temporal matching)
         - temporal_weight = 0.3 (moderate temporal emphasis)
-        
         **Heat transfer-specific tuning:**
         - **For conductive materials** (high α): Use smaller s_t (10-15 ns)
         - **For diffusive regimes** (long times): Use larger s_t (25-40 ns)
         - **For heating phase focus**: Increase temporal_weight (0.4-0.6)
         - **For cooling phase focus**: Decrease temporal_weight (0.2-0.4)
-        
         ### 🔬 Advanced Features
-        
         **Adaptive temporal scaling:**
         ```python
         # Auto-adjust s_t based on time relative to pulse duration
@@ -4820,22 +4721,19 @@ def render_stdgpa_analysis():
         else:  # Cooling phase
             s_t_effective = s_t * 1.3  # Looser matching
         ```
-        
         **Phase-aware gating:**
         - Early heating (t < 0.3τ): Very tight gating (σ_g ≈ 0.15)
         - Heating phase (0.3τ < t < τ): Moderate gating (σ_g ≈ 0.20)
         - Cooling phase (τ < t < 2τ): Standard gating (σ_g ≈ 0.25)
         - Diffusion phase (t > 2τ): Loose gating (σ_g ≈ 0.30)
-        
         ### 📊 Validation Metrics for Temporal Interpolation
-        
         Monitor:
         1. **Temporal confidence**: Should be > 0.7 for reliable interpolation
         2. **Phase consistency**: Sources should be in similar temporal phases
         3. **Fourier number spread**: Sources should have similar Fo (ΔFo < 0.5)
         4. **Weight temporal coherence**: High weights should cluster in time
         """)
-    
+
     # ST-DGPA code example
     with st.expander("💻 ST-DGPA Implementation Code", expanded=False):
         st.code("""
@@ -4847,7 +4745,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         self.s_tau = s_tau
         self.s_t = s_t  # NEW: Time scaling factor
         self.temporal_weight = temporal_weight  # NEW: Temporal weight
-    
+        
     def _compute_ett_gating(self, energy_query, duration_query, time_query):
         \"\"\"Compute the (E, τ, t) gating kernel for ST-DGPA\"\"\"
         phi = []
@@ -4856,55 +4754,35 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             dt = (duration_query - meta['duration']) / self.s_tau
             dtime = (time_query - meta['time']) / self.s_t  # NEW: Time difference
             phi.append(np.sqrt(de**2 + dt**2 + dtime**2))
-        
         phi = np.array(phi)
         gating = np.exp(-phi**2 / (2 * self.sigma_g**2))
         return gating / (gating.sum() + 1e-12)
-    
+        
     def _compute_temporal_similarity(self, query_meta, source_metas):
         \"\"\"Compute temporal similarity with physics-aware weighting\"\"\"
         similarities = []
         for meta in source_metas:
             time_diff = abs(query_meta['time'] - meta['time'])
-            
-            # Physics-aware temporal similarity
             if query_meta['time'] < query_meta['duration'] * 1.5:
                 temporal_tolerance = max(query_meta['duration'] * 0.1, 1.0)
             else:
                 temporal_tolerance = max(query_meta['duration'] * 0.3, 3.0)
-            
-            # Fourier number similarity
             fourier_diff = abs(query_meta['fourier_number'] - meta['fourier_number'])
             fourier_similarity = np.exp(-fourier_diff / 0.1)
-            
-            # Combine
             time_similarity = np.exp(-time_diff / temporal_tolerance)
-            combined = (1 - self.temporal_weight) * time_similarity + 
-                      self.temporal_weight * fourier_similarity
-            
+            combined = (1 - self.temporal_weight) * time_similarity + self.temporal_weight * fourier_similarity
             similarities.append(combined)
         return np.array(similarities)
-    
+        
     def _multi_head_attention_with_gating(self, query_embedding, query_meta):
         \"\"\"ST-DGPA: Combine physics attention with (E, τ, t) gating\"\"\"
-        # 1. Compute physics attention
         physics_attention = self._compute_physics_attention(query_embedding, query_meta)
-        
-        # 2. Apply temporal regulation
         if self.temporal_weight > 0:
             temporal_sim = self._compute_temporal_similarity(query_meta, self.source_metadata)
-            physics_attention = (1 - self.temporal_weight) * physics_attention + 
-                               self.temporal_weight * temporal_sim
-        
-        # 3. Compute (E, τ, t) gating
-        ett_gating = self._compute_ett_gating(query_meta['energy'], 
-                                             query_meta['duration'], 
-                                             query_meta['time'])
-        
-        # 4. ST-DGPA combination
+            physics_attention = (1 - self.temporal_weight) * physics_attention + self.temporal_weight * temporal_sim
+        ett_gating = self._compute_ett_gating(query_meta['energy'], query_meta['duration'], query_meta['time'])
         combined_weights = physics_attention * ett_gating
         final_weights = combined_weights / (combined_weights.sum() + 1e-12)
-        
         return final_weights, physics_attention, ett_gating
         """, language="python")
 
