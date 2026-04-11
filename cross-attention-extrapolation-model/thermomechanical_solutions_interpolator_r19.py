@@ -2836,7 +2836,7 @@ def render_interpolation_extrapolation():
             render_prediction_results(results, time_points, energy_query, duration_query)
         
         with tab2:
-            _visualization(results, energy_query, duration_query, time_points)
+            render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points)
         
         with tab3:
             render_temporal_analysis(results, time_points, energy_query, duration_query)
