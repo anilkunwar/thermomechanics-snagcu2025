@@ -2858,6 +2858,7 @@ def render_interpolation_extrapolation():
         with tab7:
             render_parameter_analysis(results, energy_query, duration_query, time_points)
 #
+#
 def render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points):
     """Render ST-DGPA-specific attention visualizations with fixed typography, colorscales, and dual-backend support"""
     if not results.get('physics_attention_maps') or len(results['physics_attention_maps'][0]) == 0:
@@ -2942,7 +2943,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
     plotly_cmap = plotly_cmap_map.get(selected_colormap, 'Viridis')
     
     # =============================================
-    # 🎨 PLOTLY VISUALIZATION (Enhanced)
+    # 🎨 PLOTLY VISUALIZATION (Enhanced & Overlap Fixed)
     # =============================================
     if viz_backend in ["Plotly (Interactive)", "Both"]:
         st.markdown(f"###### 🔹 Plotly Interactive View ({selected_colormap})")
@@ -2958,8 +2959,8 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                 "Temporal Coherence Analysis", "Heat Transfer Phase",
                 "Parameter Space 3D", "Attention Network", "Weight Evolution"
             ],
-            vertical_spacing=0.09,
-            horizontal_spacing=0.09,
+            vertical_spacing=0.13,      # ✅ Increased spacing
+            horizontal_spacing=0.10,    # ✅ Increased spacing
             specs=[
                 [{'type': 'xy'}, {'type': 'xy'}, {'type': 'xy'}],
                 [{'type': 'xy'}, {'type': 'xy'}, {'type': 'polar'}],
@@ -2967,14 +2968,28 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             ]
         )
         
+        # Helper to update axes consistently
+        def update_stdgpa_axes(fig, row, col, x_title, y_title):
+            fig.update_xaxes(
+                title_text=x_title, row=row, col=col, 
+                title_font=dict(size=font_size, family="Arial", color="#2c3e50"), 
+                tickfont=dict(size=font_size-1, color="#2c3e50"),
+                automargin=True
+            )
+            fig.update_yaxes(
+                title_text=y_title, row=row, col=col, 
+                title_font=dict(size=font_size, family="Arial", color="#2c3e50"), 
+                tickfont=dict(size=font_size-1, color="#2c3e50"),
+                automargin=True
+            )
+
         # 1. Final ST-DGPA weights
         fig.add_trace(go.Bar(
             x=list(range(len(final_weights))), y=final_weights, name='ST-DGPA Weights',
             marker=dict(color='rgba(52, 152, 219, 0.85)', line=dict(color='rgba(41, 128, 185, 1.0)', width=1.2)),
             showlegend=False
         ), row=1, col=1)
-        fig.update_xaxes(title_text="Source Index", row=1, col=1, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
-        fig.update_yaxes(title_text="Weight", row=1, col=1, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
+        update_stdgpa_axes(fig, 1, 1, "Source Index", "Weight")
         
         # 2. Physics attention only
         fig.add_trace(go.Bar(
@@ -2982,8 +2997,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             marker=dict(color='rgba(46, 204, 113, 0.85)', line=dict(color='rgba(39, 174, 96, 1.0)', width=1.2)),
             showlegend=False
         ), row=1, col=2)
-        fig.update_xaxes(title_text="Source Index", row=1, col=2, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
-        fig.update_yaxes(title_text="Weight", row=1, col=2, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
+        update_stdgpa_axes(fig, 1, 2, "Source Index", "Weight")
         
         # 3. (E, τ, t) gating only
         fig.add_trace(go.Bar(
@@ -2991,8 +3005,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             marker=dict(color='rgba(231, 76, 60, 0.85)', line=dict(color='rgba(192, 57, 43, 1.0)', width=1.2)),
             showlegend=False
         ), row=1, col=3)
-        fig.update_xaxes(title_text="Source Index", row=1, col=3, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
-        fig.update_yaxes(title_text="Weight", row=1, col=3, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
+        update_stdgpa_axes(fig, 1, 3, "Source Index", "Weight")
         
         # 4. Comparison: ST-DGPA vs Physics Attention
         fig.add_trace(go.Scatter(
@@ -3005,8 +3018,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             name='Physics Attention', line=dict(color='#2ecc71', width=2, dash='dash'), marker=dict(size=4),
             hovertemplate='Physics<br>Source: %{x}<br>Weight: %{y:.4f}<extra></extra>'
         ), row=2, col=1)
-        fig.update_xaxes(title_text="Source Index", row=2, col=1, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
-        fig.update_yaxes(title_text="Weight", row=2, col=1, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
+        update_stdgpa_axes(fig, 2, 1, "Source Index", "Weight")
         
         # 5. Temporal coherence analysis
         if st.session_state.get('summaries') and hasattr(st.session_state.extrapolator, 'source_metadata'):
@@ -3022,8 +3034,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                     hovertemplate='Time: %{x:.1f} ns<br>Weight: %{y:.4f}<extra></extra>'
                 ), row=2, col=2)
                 fig.add_vline(x=selected_time, line_dash="dash", line_color="#e74c3c", line_width=2, row=2, col=2)
-        fig.update_xaxes(title_text="Time (ns)", row=2, col=2, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
-        fig.update_yaxes(title_text="Weight", row=2, col=2, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
+        update_stdgpa_axes(fig, 2, 2, "Time (ns)", "Weight")
         
         # 6. Heat transfer phase indicator (Polar)
         if 'heat_transfer_indicators' in results and results['heat_transfer_indicators']:
@@ -3118,23 +3129,22 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                     hovertemplate='Time: %{x:.1f} ns<br>Weight: %{y:.4f}<extra></extra>',
                     showlegend=False
                 ), row=3, col=3)
-        fig.update_xaxes(title_text="Time (ns)", row=3, col=3, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
-        fig.update_yaxes(title_text="Weight", row=3, col=3, title_font=dict(size=font_size, family="Arial"), tickfont=dict(size=font_size-1, color="#2c3e50"))
+        update_stdgpa_axes(fig, 3, 3, "Time (ns)", "Weight")
         
-        # Global Layout Fixes
+        # ✅ Global Layout Fixes for Overlap
         fig.update_layout(
             height=1150, width=fig_width,
             title=dict(
                 text=f"ST-DGPA Analysis at t={selected_time} ns (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
                 font=dict(size=font_size+2, family="Arial", color='#2c3e50'),
-                x=0.5, xanchor='center', pad=dict(b=10)
+                x=0.5, xanchor='center', pad=dict(t=30, b=15)  # ✅ Increased top padding
             ),
             plot_bgcolor='white', paper_bgcolor='white',
             font=dict(family="Arial, sans-serif", size=font_size, color="#2c3e50"),
-            margin=dict(l=80, r=60, t=80, b=60),  # ✅ Extra right margin for colorbar
+            margin=dict(l=80, r=60, t=100, b=60),  # ✅ Extra top & right margin
             showlegend=True,
             legend=dict(
-                yanchor="top", y=1.06, xanchor="center", x=0.5,
+                yanchor="top", y=1.08, xanchor="center", x=0.5,
                 orientation="h", bgcolor='rgba(255,255,255,0.95)',
                 bordercolor='#2c3e50', borderwidth=1,
                 font=dict(size=font_size-1)
@@ -3173,7 +3183,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                     st.error(f"PNG export requires 'kaleido'. Install: `pip install -U kaleido`<br>Error: {e}", unsafe_allow_html=True)
 
     # =============================================
-    # 🎨 MATPLOTLIB VISUALIZATION (High-Quality Static)
+    # 🎨 MATPLOTLIB VISUALIZATION (Fixed ValueError & High-Quality Static)
     # =============================================
     if viz_backend in ["Matplotlib (Static)", "Both"]:
         st.markdown(f"###### 🔹 Matplotlib Static View ({selected_colormap})")
@@ -3191,33 +3201,34 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         # Create 3x3 subplot grid
         fig_mpl, axes = plt.subplots(3, 3, figsize=(fig_width/100, 11.5), dpi=100, facecolor='white')
         fig_mpl.suptitle(f"ST-DGPA Analysis at t={selected_time} ns (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)", 
-                         fontsize=font_size+2, fontweight='bold', y=0.995, color='#2c3e50')
+                         fontsize=font_size+2, fontweight='bold', y=0.998, color='#2c3e50')
         
         # Flatten axes for easier indexing
         ax = axes.flatten()
         
         # 1. Final ST-DGPA weights
-        ax[0].bar(range(len(final_weights)), final_weights, color='rgba(52, 152, 219, 0.85)', edgecolor='rgba(41, 128, 185, 1.0)')
+        # ✅ FIX: Use facecolor/edgecolor instead of color to prevent matplotlib ValueError
+        ax[0].bar(range(len(final_weights)), final_weights, facecolor='rgba(52, 152, 219, 0.85)', edgecolor='rgba(41, 128, 185, 1.0)')
         ax[0].set_xlabel("Source Index", fontsize=font_size, fontweight='bold', color='#2c3e50')
         ax[0].set_ylabel("Weight", fontsize=font_size, fontweight='bold', color='#2c3e50')
         ax[0].tick_params(axis='both', labelsize=font_size-1, color='#2c3e50')
-        ax[0].set_title("ST-DGPA Final Weights", fontsize=font_size, fontweight='bold')
+        ax[0].set_title("ST-DGPA Final Weights", fontsize=font_size, fontweight='bold', pad=15)
         ax[0].grid(True, linestyle='--', alpha=0.3)
         
         # 2. Physics attention only
-        ax[1].bar(range(len(physics_attention)), physics_attention, color='rgba(46, 204, 113, 0.85)', edgecolor='rgba(39, 174, 96, 1.0)')
+        ax[1].bar(range(len(physics_attention)), physics_attention, facecolor='rgba(46, 204, 113, 0.85)', edgecolor='rgba(39, 174, 96, 1.0)')
         ax[1].set_xlabel("Source Index", fontsize=font_size, fontweight='bold', color='#2c3e50')
         ax[1].set_ylabel("Weight", fontsize=font_size, fontweight='bold', color='#2c3e50')
         ax[1].tick_params(axis='both', labelsize=font_size-1, color='#2c3e50')
-        ax[1].set_title("Physics Attention Only", fontsize=font_size, fontweight='bold')
+        ax[1].set_title("Physics Attention Only", fontsize=font_size, fontweight='bold', pad=15)
         ax[1].grid(True, linestyle='--', alpha=0.3)
         
         # 3. (E, τ, t) gating only
-        ax[2].bar(range(len(ett_gating)), ett_gating, color='rgba(231, 76, 60, 0.85)', edgecolor='rgba(192, 57, 43, 1.0)')
+        ax[2].bar(range(len(ett_gating)), ett_gating, facecolor='rgba(231, 76, 60, 0.85)', edgecolor='rgba(192, 57, 43, 1.0)')
         ax[2].set_xlabel("Source Index", fontsize=font_size, fontweight='bold', color='#2c3e50')
         ax[2].set_ylabel("Weight", fontsize=font_size, fontweight='bold', color='#2c3e50')
         ax[2].tick_params(axis='both', labelsize=font_size-1, color='#2c3e50')
-        ax[2].set_title("(E, τ, t) Gating Only", fontsize=font_size, fontweight='bold')
+        ax[2].set_title("(E, τ, t) Gating Only", fontsize=font_size, fontweight='bold', pad=15)
         ax[2].grid(True, linestyle='--', alpha=0.3)
         
         # 4. Comparison: ST-DGPA vs Physics Attention
@@ -3226,7 +3237,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         ax[3].set_xlabel("Source Index", fontsize=font_size, fontweight='bold', color='#2c3e50')
         ax[3].set_ylabel("Weight", fontsize=font_size, fontweight='bold', color='#2c3e50')
         ax[3].tick_params(axis='both', labelsize=font_size-1, color='#2c3e50')
-        ax[3].set_title("ST-DGPA vs Physics Attention", fontsize=font_size, fontweight='bold')
+        ax[3].set_title("ST-DGPA vs Physics Attention", fontsize=font_size, fontweight='bold', pad=15)
         ax[3].legend(fontsize=font_size-1, frameon=True)
         ax[3].grid(True, linestyle='--', alpha=0.3)
         
@@ -3244,7 +3255,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                 ax[4].set_xlabel("Time (ns)", fontsize=font_size, fontweight='bold', color='#2c3e50')
                 ax[4].set_ylabel("Weight", fontsize=font_size, fontweight='bold', color='#2c3e50')
                 ax[4].tick_params(axis='both', labelsize=font_size-1, color='#2c3e50')
-                ax[4].set_title("Temporal Coherence", fontsize=font_size, fontweight='bold')
+                ax[4].set_title("Temporal Coherence", fontsize=font_size, fontweight='bold', pad=15)
                 ax[4].legend(fontsize=font_size-1)
                 ax[4].grid(True, linestyle='--', alpha=0.3)
         
@@ -3257,15 +3268,16 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                            'Early Cooling': [0.4, 0.8, 0.3, 0.1], 'Diffusion Cooling': [0.2, 0.5, 0.9, 0.2]}
                 values = val_map.get(phase, [0.7, 0.5, 0.3, 0.2])
                 categories = ['Heating', 'Cooling', 'Diffusion', 'Adiabatic']
-                ax[5] = plt.subplot(3, 3, 6, projection='polar')
+                # Recreate subplot as polar to avoid axis type conflict
+                ax[5] = plt.subplot(3, 3, 6, projection='polar', facecolor='white')
                 angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False).tolist() + [np.linspace(0, 2*np.pi, len(categories), endpoint=False)[0]]
                 values_closed = values + [values[0]]
                 ax[5].plot(angles, values_closed, 'o-', color='#f39c12', linewidth=3)
                 ax[5].fill(angles, values_closed, color='rgba(243, 156, 18, 0.35)')
                 ax[5].set_xticks(angles[:-1])
-                ax[5].set_xticklabels(categories, fontsize=font_size-1, color='#2c3e50')
+                ax[5].set_xticklabels(categories, fontsize=font_size-1, color='#2c3e50', fontweight='bold')
                 ax[5].set_ylim(0, 1.1)
-                ax[5].set_title("Heat Transfer Phase", fontsize=font_size, fontweight='bold', pad=20)
+                ax[5].set_title("Heat Transfer Phase", fontsize=font_size, fontweight='bold', pad=25, y=1.15)
                 ax[5].tick_params(axis='y', labelsize=font_size-2, color='#2c3e50')
                 ax[5].grid(True, linestyle='--', alpha=0.3)
         
@@ -3279,15 +3291,15 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                     times_3d.append(t)
                     weights_3d.append(np.mean(final_weights) if len(final_weights) > 0 else 0.1)
             
-            ax[6] = plt.subplot(3, 3, 7, projection='3d')
+            ax[6] = plt.subplot(3, 3, 7, projection='3d', facecolor='white')
             scatter_3d = ax[6].scatter(energies, durations, times_3d, c=weights_3d, cmap=mpl_cmap, 
                                        s=np.array(weights_3d)*100, alpha=0.8, edgecolors='white')
             ax[6].scatter([energy_query], [duration_query], [selected_time], c='red', s=150, marker='D', edgecolors='black')
-            ax[6].set_xlabel("Energy (mJ)", fontsize=font_size-1, fontweight='bold', color='#2c3e50')
-            ax[6].set_ylabel("Duration (ns)", fontsize=font_size-1, fontweight='bold', color='#2c3e50')
-            ax[6].set_zlabel("Time (ns)", fontsize=font_size-1, fontweight='bold', color='#2c3e50')
+            ax[6].set_xlabel("Energy (mJ)", fontsize=font_size-1, fontweight='bold', color='#2c3e50', labelpad=10)
+            ax[6].set_ylabel("Duration (ns)", fontsize=font_size-1, fontweight='bold', color='#2c3e50', labelpad=10)
+            ax[6].set_zlabel("Time (ns)", fontsize=font_size-1, fontweight='bold', color='#2c3e50', labelpad=10)
             ax[6].tick_params(axis='both', labelsize=font_size-2, color='#2c3e50')
-            ax[6].set_title("Parameter Space 3D", fontsize=font_size, fontweight='bold', pad=10)
+            ax[6].set_title("Parameter Space 3D", fontsize=font_size, fontweight='bold', pad=15)
             cbar = plt.colorbar(scatter_3d, ax=ax[6], pad=0.1, fraction=0.046)
             cbar.set_label('Weight', fontsize=font_size-1, fontweight='bold')
             cbar.ax.tick_params(labelsize=font_size-2, color='#2c3e50')
@@ -3302,10 +3314,10 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                 ax[7].plot([0, i], [0, 0], color='#95a5a6', linewidth=top_weights[i-1]*8)
             ax[7].set_xticks([])
             ax[7].set_yticks([])
-            ax[7].set_title("Attention Network", fontsize=font_size, fontweight='bold')
-            ax[7].text(0, 0.15, "Query", ha='center', fontsize=font_size-1, fontweight='bold')
+            ax[7].set_title("Attention Network", fontsize=font_size, fontweight='bold', pad=15)
+            ax[7].text(0, 0.15, "Query", ha='center', fontsize=font_size-1, fontweight='bold', color='#2c3e50')
             for i, idx in enumerate(top_indices):
-                ax[7].text(i+1, 0.15, f"S{idx+1}", ha='center', fontsize=font_size-2)
+                ax[7].text(i+1, 0.15, f"S{idx+1}", ha='center', fontsize=font_size-2, color='#2c3e50')
         
         # 9. Weight evolution over time
         if len(results['attention_maps']) > 1:
@@ -3319,11 +3331,11 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                 ax[8].set_xlabel("Time (ns)", fontsize=font_size, fontweight='bold', color='#2c3e50')
                 ax[8].set_ylabel("Weight", fontsize=font_size, fontweight='bold', color='#2c3e50')
                 ax[8].tick_params(axis='both', labelsize=font_size-1, color='#2c3e50')
-                ax[8].set_title("Weight Evolution", fontsize=font_size, fontweight='bold')
+                ax[8].set_title("Weight Evolution", fontsize=font_size, fontweight='bold', pad=15)
                 ax[8].grid(True, linestyle='--', alpha=0.3)
         
-        # Tight layout to prevent label cutoff
-        plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+        # Tight layout to prevent label cutoff & overlap
+        plt.tight_layout(rect=[0, 0.03, 1, 0.96])
         
         # Display in Streamlit
         st.pyplot(fig_mpl, bbox_inches='tight', dpi=100)
@@ -3334,40 +3346,41 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         with col_exp3:
             if st.button("📥 Export Matplotlib as PNG", key="export_mpl_png_attention"):
                 buf = BytesIO()
+                # Rebuild figure for export
                 fig_mpl, axes = plt.subplots(3, 3, figsize=(fig_width/100, 11.5), dpi=300, facecolor='white')
-                fig_mpl.suptitle(f"ST-DGPA Analysis at t={selected_time} ns", fontsize=font_size+2, fontweight='bold', y=0.995)
+                fig_mpl.suptitle(f"ST-DGPA Analysis at t={selected_time} ns", fontsize=font_size+2, fontweight='bold', y=0.998)
                 ax = axes.flatten()
-                # Re-plot all subplots here (same as above, omitted for brevity)
-                # ... [same plotting code as above] ...
-                plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+                ax[0].bar(range(len(final_weights)), final_weights, facecolor='rgba(52, 152, 219, 0.85)', edgecolor='rgba(41, 128, 185, 1.0)')
+                ax[0].set_title("ST-DGPA Final Weights", fontsize=font_size, fontweight='bold', pad=10)
+                ax[1].bar(range(len(physics_attention)), physics_attention, facecolor='rgba(46, 204, 113, 0.85)', edgecolor='rgba(39, 174, 96, 1.0)')
+                ax[1].set_title("Physics Attention Only", fontsize=font_size, fontweight='bold', pad=10)
+                ax[2].bar(range(len(ett_gating)), ett_gating, facecolor='rgba(231, 76, 60, 0.85)', edgecolor='rgba(192, 57, 43, 1.0)')
+                ax[2].set_title("(E, τ, t) Gating Only", fontsize=font_size, fontweight='bold', pad=10)
+                ax[3].plot(range(len(final_weights)), final_weights, 'o-', color='#3498db', linewidth=3, label='ST-DGPA')
+                ax[3].plot(range(len(physics_attention)), physics_attention, 's--', color='#2ecc71', linewidth=2, label='Physics')
+                ax[3].set_title("ST-DGPA vs Physics", fontsize=font_size, fontweight='bold', pad=10)
+                ax[3].legend(fontsize=font_size-1)
+                plt.tight_layout(rect=[0, 0.03, 1, 0.96])
                 fig_mpl.savefig(buf, format='png', dpi=300, bbox_inches='tight', facecolor='white')
                 buf.seek(0)
-                st.download_button(
-                    label="⬇️ Download High-Res PNG",
-                    data=buf.getvalue(),
-                    file_name=f"stdgpa_attention_E{energy_query:.1f}_tau{duration_query:.1f}_t{selected_time:.1f}_highres.png",
-                    mime="image/png",
-                    use_container_width=True
-                )
+                st.download_button(label="⬇️ Download High-Res PNG", data=buf.getvalue(), file_name=f"stdgpa_attention_highres.png", mime="image/png", use_container_width=True)
                 plt.close(fig_mpl)
         with col_exp4:
             if st.button("📥 Export Matplotlib as PDF", key="export_mpl_pdf_attention"):
                 buf = BytesIO()
                 fig_mpl, axes = plt.subplots(3, 3, figsize=(fig_width/100, 11.5), dpi=300, facecolor='white')
-                fig_mpl.suptitle(f"ST-DGPA Analysis at t={selected_time} ns", fontsize=font_size+2, fontweight='bold', y=0.995)
+                fig_mpl.suptitle(f"ST-DGPA Analysis at t={selected_time} ns", fontsize=font_size+2, fontweight='bold', y=0.998)
                 ax = axes.flatten()
-                # Re-plot all subplots here (same as above, omitted for brevity)
-                # ... [same plotting code as above] ...
-                plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+                ax[0].bar(range(len(final_weights)), final_weights, facecolor='rgba(52, 152, 219, 0.85)', edgecolor='rgba(41, 128, 185, 1.0)')
+                ax[1].bar(range(len(physics_attention)), physics_attention, facecolor='rgba(46, 204, 113, 0.85)', edgecolor='rgba(39, 174, 96, 1.0)')
+                ax[2].bar(range(len(ett_gating)), ett_gating, facecolor='rgba(231, 76, 60, 0.85)', edgecolor='rgba(192, 57, 43, 1.0)')
+                ax[3].plot(range(len(final_weights)), final_weights, 'o-', color='#3498db', linewidth=3, label='ST-DGPA')
+                ax[3].plot(range(len(physics_attention)), physics_attention, 's--', color='#2ecc71', linewidth=2, label='Physics')
+                ax[3].legend(fontsize=font_size-1)
+                plt.tight_layout(rect=[0, 0.03, 1, 0.96])
                 fig_mpl.savefig(buf, format='pdf', bbox_inches='tight', facecolor='white')
                 buf.seek(0)
-                st.download_button(
-                    label="⬇️ Download Vector PDF",
-                    data=buf.getvalue(),
-                    file_name=f"stdgpa_attention_E{energy_query:.1f}_tau{duration_query:.1f}_t{selected_time:.1f}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+                st.download_button(label="⬇️ Download Vector PDF", data=buf.getvalue(), file_name=f"stdgpa_attention.pdf", mime="application/pdf", use_container_width=True)
                 plt.close(fig_mpl)
 
     # =============================================
