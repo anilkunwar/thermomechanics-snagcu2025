@@ -72,6 +72,9 @@
   
    Robust Visualizations
 
-    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator-v19-brightgreen.svg)](https://thermomechanical-solutions-interpolator19.streamlit.app/) 
+    [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankeydemo-v1-brightgreen.svg)](https://thermomechanical-demo-data-interpolation-sankey-visualization1.streamlit.app/) (Sankey visualization for demo data)
+
+    [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankeydemo-v2-brightgreen.svg)](https://thermomechanical-demo-data-interpolation-sankey-visualization2.streamlit.app/) (Sankey visualization for demo data)
+   
    
    
