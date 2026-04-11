@@ -173,12 +173,20 @@ def main():
         st.markdown("---")
         
         # Generate Mock Data or Load CSV
+        #if st.button("Generate Demo Data"):
+            #data = {
+               # 'Energy': np.random.uniform(0.5, 8.0, 20),
+               # 'Duration': np.random.uniform(2.0, 7.0, 20),
+               # 'Time': np.random.uniform(1.0, 10.0, 20),
+               # 'Max_Temp': np.random.uniform(500, 1500, 20)
+            #}
+            #st.session_state.df_sources = pd.DataFrame(data)
         if st.button("Generate Demo Data"):
             data = {
-                'Energy': np.random.uniform(0.5, 8.0, 20),
-                'Duration': np.random.uniform(2.0, 7.0, 20),
-                'Time': np.random.uniform(1.0, 10.0, 20),
-                'Max_Temp': np.random.uniform(500, 1500, 20)
+                'Energy': np.random.uniform(0.5, 8.0, 4),
+                'Duration': np.random.uniform(2.0, 7.0, 4),
+                'Time': np.random.uniform(1.0, 10.0, 4),
+                'Max_Temp': np.random.uniform(500, 1500, 4)
             }
             st.session_state.df_sources = pd.DataFrame(data)
             
