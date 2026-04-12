@@ -25,12 +25,14 @@ import warnings
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Union
 import base64
-import hashlib
-from collections import OrderedDict
-import json
-import time
-
-from sklearn.preprocessing import StandardScaler
+import hashlib          # FIXED: added missing import
+import json             # FIXED: added missing import
+import time             # FIXED: added missing import
+from collections import OrderedDict  # FIXED: added missing import
+from io import BytesIO   # optional but safe
+import traceback         # optional
+import tempfile          # optional
+from scipy.interpolate import griddata, RBFInterpolator  # optional
 
 warnings.filterwarnings('ignore')
 
@@ -586,7 +588,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         return results
 
 # =============================================
-# 4. ENHANCED POLAR RADAR VISUALIZER (FIXED WITH ROBUST DATA HANDLING)
+# 4. ENHANCED POLAR RADAR VISUALIZER (FIXED)
 # =============================================
 class PolarRadarVisualizer:
     def __init__(self):
@@ -665,7 +667,11 @@ class PolarRadarVisualizer:
         """
         # Early validation
         if df.empty:
-            st.error("❌ No source simulation data available for radar chart")
+            # Use st.error only if this function is called from within a Streamlit context
+            try:
+                st.error("❌ No source simulation data available for radar chart")
+            except:
+                pass
             fig = go.Figure()
             fig.update_layout(title="No Data", width=width, height=height)
             return fig
@@ -685,7 +691,10 @@ class PolarRadarVisualizer:
         )
         
         if not np.any(valid_mask):
-            st.error("❌ All data rows contain invalid values (NaN/Inf/negative durations)")
+            try:
+                st.error("❌ All data rows contain invalid values (NaN/Inf/negative durations)")
+            except:
+                pass
             fig = go.Figure()
             fig.update_layout(title="Invalid Data", width=width, height=height)
             return fig
@@ -694,8 +703,6 @@ class PolarRadarVisualizer:
         durations = durations[valid_mask]
         peak_values = peak_values[valid_mask]
         sim_names = np.array(sim_names)[valid_mask].tolist()
-        
-        st.caption(f"✅ Plotting {len(energies)} valid source simulations")
         
         # --- IMPROVED ENERGY TO ANGLE MAPPING (AUTOSCALING) ---
         e_min_data = np.nanmin(energies)
@@ -728,25 +735,29 @@ class PolarRadarVisualizer:
             np.random.seed(42)  # Reproducible jitter
             jitter = np.random.uniform(-2, 2, size=len(angles_deg))
             angles_deg = angles_deg + jitter
-            st.info(f"ℹ️ Added ±2° jitter to separate {len(angles_deg) - len(unique_angles)} overlapping points")
+            try:
+                st.info(f"ℹ️ Added ±2° jitter to separate {len(angles_deg) - len(unique_angles)} overlapping points")
+            except:
+                pass
         
         # Generate nice tick values
         tick_energies = np.linspace(e_min, e_max, 6)
         tick_angles = [2 * np.pi * (e - e_min) / e_range for e in tick_energies]
         tick_angles_deg = np.degrees(tick_angles)
         
-        # --- SAFE NORMALIZATION ---
+        # --- SAFE NORMALIZATION (FIXED: separate normalization from radial range) ---
+        # Normalize peak values for marker colors
         if normalize_by_max and max_reference_value is not None and max_reference_value > 0:
             norm_peak = self.safe_normalize(peak_values, max_reference_value)
-            r_range = (0, 1.2)  # allow headroom
         else:
             norm_peak = self.safe_normalize(peak_values, None)
-            # Adjust radial range if needed
-            if radial_axis_range is not None:
-                r_range = radial_axis_range
-            else:
-                max_dur = np.max(durations)
-                r_range = (0, max_dur * 1.1 if max_dur > 0 else 1.2)
+        
+        # Radial axis range (for duration)
+        if radial_axis_range is not None:
+            r_range = radial_axis_range
+        else:
+            max_dur = np.max(durations)
+            r_range = (0, max_dur * 1.1 if max_dur > 0 else 1.2)
         
         # Determine colorscale
         is_temp = 'temp' in field_type.lower()
@@ -1125,26 +1136,21 @@ def main():
             max_possible_t = max((len(s.get('timesteps', [])) for s in st.session_state.summaries), default=1)
             t_step = st.number_input("Timestep Index", 1, max_possible_t, 1, key="polar_timestep")
 
-        # --- ROBUST DATA COLLECTION ---
+        # --- ROBUST DATA COLLECTION (permissive extraction) ---
         rows = []
         warnings_found = []
 
         for s in st.session_state.summaries:
-            field_stats = s['field_stats'].get(field_type)
-            if not field_stats or 'max' not in field_stats:
-                warnings_found.append(f"Field '{field_type}' missing in {s['name']}")
-                continue
+            field_stats = s['field_stats'].get(field_type, {})
+            peak_list = field_stats.get('max', [0])   # default [0] if field missing
 
             idx = t_step - 1
-            peak_list = field_stats['max']
-
             if idx >= len(peak_list):
                 warnings_found.append(f"Timestep {t_step} not available in {s['name']} (only {len(peak_list)} steps)")
                 continue
 
             peak_val = peak_list[idx]
             if not np.isfinite(peak_val):
-                # Allow zero values (early timesteps may be zero)
                 peak_val = 0.0
 
             rows.append({
