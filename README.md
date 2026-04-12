@@ -82,9 +82,11 @@
 
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/polardiagram-v5-brightgreen.svg)](https://thermomechanical-solutions-interpolation-visualization-r5.streamlit.app/) (Radar chart visualization for FEM simulations data)
 
-   [![continuummodellaserprocessing3d](https://img.shields.io/badge/polardiagram-v6-brightgreen.svg)](https://thermomechanical-solutions-interpolation-visualization-r6.streamlit.app/) (Radar chart visualization for FEM simulations data, enahnced and robust visualization)
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/polardiagram-v6-brightgreen.svg)](https://thermomechanical-solutions-interpolation-visualization-r6.streamlit.app/) (Radar chart visualization for FEM simulations data, enhanced and robust visualization)
 
-   [![continuummodellaserprocessing3d](https://img.shields.io/badge/polardiagram-v7-brightgreen.svg)](https://thermomechanical-solutions-interpolation-visualization-r7.streamlit.app/) (Radar chart visualization for FEM simulations data, enahnced and robust visualization)
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/polardiagram-v7-brightgreen.svg)](https://thermomechanical-solutions-interpolation-visualization-r7.streamlit.app/) (Radar chart visualization for FEM simulations data,st-dgpa visualization is enhanced, radar chart is empty )
+
+    [![continuummodellaserprocessing3d](https://img.shields.io/badge/polardiagram-v8-brightgreen.svg)](https://thermomechanical-solutions-interpolation-visualization-r8.streamlit.app/) (Radar chart visualization for FEM simulations data,st-dgpa visualization is enhanced, radar chart is complete )
    
    
    
