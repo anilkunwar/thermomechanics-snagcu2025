@@ -3,13 +3,9 @@
 """
 ENHANCED FEA LASER SIMULATION PLATFORM WITH ST-DGPA & CUSTOMIZABLE SANKEY DIAGRAM
 ====================================================================
-- Full ST-DGPA interpolation/extrapolation
-- Advanced 3D field rendering with caching
-- 🔥 NEW: Fully customizable Sankey diagram with editable labels, fonts, colors
-- 🔥 ENHANCED: Dynamic source simulation visualization with global IDs
-- 🔥 ENHANCED: Robust data loading pipeline with metadata preservation
-- 🔥 NEW: Comprehensive data visualization dashboard (time series, box plots, animations, slices)
-- Robust error handling & UI improvements
+🔧 FIXED: Streamlit color_picker now uses hex codes only
+🔧 ENHANCED: Hex-to-rgba converter for Plotly Sankey compatibility
+🔧 ENHANCED: Alpha/opacity slider for link transparency control
 """
 import streamlit as st
 import os
@@ -22,7 +18,7 @@ import matplotlib.pyplot as plt
 import meshio
 import warnings
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 from io import BytesIO
 import pandas as pd
 import traceback
@@ -37,6 +33,7 @@ import hashlib
 import pickle
 from functools import lru_cache
 from collections import OrderedDict
+import re as regex  # Avoid conflict with 're' module
 warnings.filterwarnings('ignore')
 
 # =============================================
@@ -46,8 +43,58 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FEA_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "fea_solutions")
 os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 
-# 🔥 ENHANCED: Global registry for source simulation tracking (enables Sankey global IDs)
 SOURCE_REGISTRY = {}
+
+# =============================================
+# 🔧 NEW: COLOR UTILITIES FOR SANKEY COMPATIBILITY
+# =============================================
+class ColorUtils:
+    """Utility functions for color format conversion between Streamlit and Plotly."""
+    
+    @staticmethod
+    def hex_to_rgba(hex_color: str, alpha: float = 1.0) -> str:
+        """
+        Convert hex color code to rgba string for Plotly.
+        
+        Args:
+            hex_color: Hex color string (e.g., "#2ecc71" or "2ecc71")
+            alpha: Opacity value 0.0-1.0
+            
+        Returns:
+            rgba string: "rgba(r, g, b, alpha)"
+        """
+        # Remove # if present and ensure 6-char hex
+        hex_color = hex_color.lstrip('#')
+        if len(hex_color) == 3:  # Expand shorthand #RGB to #RRGGBB
+            hex_color = ''.join([c*2 for c in hex_color])
+        if len(hex_color) != 6:
+            # Fallback to default green if invalid
+            hex_color = "2ecc71"
+        
+        try:
+            r = int(hex_color[0:2], 16)
+            g = int(hex_color[2:4], 16)
+            b = int(hex_color[4:6], 16)
+            # Clamp alpha to valid range
+            alpha = max(0.0, min(1.0, alpha))
+            return f"rgba({r}, {g}, {b}, {alpha:.2f})"
+        except (ValueError, IndexError):
+            # Return safe fallback
+            return f"rgba(46, 204, 113, {alpha:.2f})"
+    
+    @staticmethod
+    def validate_hex_color(hex_color: str) -> bool:
+        """Validate if string is a proper hex color code."""
+        hex_color = hex_color.lstrip('#')
+        return bool(regex.fullmatch(r'[0-9a-fA-F]{6}', hex_color)) or \
+               bool(regex.fullmatch(r'[0-9a-fA-F]{3}', hex_color))
+    
+    @staticmethod
+    def get_safe_color(user_input: str, default: str = "#2ecc71") -> str:
+        """Return validated hex color or fallback to default."""
+        if ColorUtils.validate_hex_color(user_input):
+            return '#' + user_input.lstrip('#')
+        return default
 
 # =============================================
 # CACHE MANAGEMENT UTILITIES
@@ -115,7 +162,7 @@ class CacheManager:
         if len(st.session_state.interpolation_field_history) > 10: st.session_state.interpolation_field_history.popitem(last=False)
 
 # =============================================
-# UNIFIED DATA LOADER - 🔥 ENHANCED FOR SANKEY SUPPORT & BUG FIXED
+# UNIFIED DATA LOADER
 # =============================================
 class UnifiedFEADataLoader:
     def __init__(self):
@@ -123,9 +170,8 @@ class UnifiedFEADataLoader:
         self.summaries = []
         self.field_statistics = {}
         self.available_fields = set()
-        # 🔥 ENHANCED: Track global source IDs for Sankey visualization
         self.source_id_counter = 0
-        self.global_source_map = {}  # Maps (sim_name, timestep_idx) → global_source_id
+        self.global_source_map = {}
     
     def parse_folder_name(self, folder: str):
         name = os.path.basename(folder)
@@ -714,19 +760,12 @@ class EnhancedVisualizer:
     def create_stdgpa_sankey(self, results, energy_query, duration_query, selected_time,
                             source_metadata, attention_weights, physics_attention,
                             ett_gating, temporal_sim=None, top_k=12,
-                            # 🔥 NEW: Customization parameters
                             custom_labels=None, font_size=12, font_family="Arial",
-                            node_colors=None, link_colors=None, node_pad=20, node_thickness=30,
-                            show_values=True, orientation='h', hover_template=None):
+                            node_colors=None, link_colors_hex=None, link_alphas=None,
+                            node_pad=20, node_thickness=30, show_values=True, 
+                            orientation='h', hover_template=None):
         """
-        🔥 ENHANCED: Creates a customizable Sankey diagram showing ST-DGPA weight decomposition.
-        
-        Features:
-        - Editable node labels via custom_labels dict
-        - Font size, family, colors customization
-        - Node padding, thickness controls
-        - Custom hover templates
-        - Orientation control (horizontal/vertical)
+        🔧 FIXED: Uses hex colors for Streamlit compatibility, converts to rgba for Plotly
         """
         if len(attention_weights) == 0:
             return go.Figure()
@@ -741,22 +780,19 @@ class EnhancedVisualizer:
         top_gating = ett_gating[top_indices]
         top_temporal = temporal_sim[top_indices] if temporal_sim is not None else np.ones_like(top_weights) * 0.5
         
-        # 🔥 NEW: Build labels with customization support
+        # Build labels
         labels = []
-        # Target query node
         if custom_labels and 'target' in custom_labels:
             labels.append(custom_labels['target'])
         else:
             labels.append("🔮 Target Query")
         
-        # Source nodes with editable labels
         for i, idx in enumerate(top_indices):
             meta = source_metadata[idx]
             sim_name = meta['name']
             if custom_labels and f'source_{i}' in custom_labels:
                 label = custom_labels[f'source_{i}']
             else:
-                # Default label format
                 if len(sim_name) > 25:
                     sim_name = sim_name[:22] + "..."
                 label = f"<b>{sim_name}</b><br>E={meta['energy']:.1f}mJ, τ={meta['duration']:.1f}ns<br>t={meta['time']:.1f}ns"
@@ -772,13 +808,39 @@ class EnhancedVisualizer:
         
         source_idx, target_idx, values, link_colors_list = [], [], [], []
         
-        # Connect source nodes to component nodes
+        # 🔧 FIXED: Default hex colors with alpha values for conversion
+        default_link_hex = ["#2ecc71", "#e74c3c", "#3498db", "#9b59b6"]  # Green, Red, Blue, Purple
+        default_link_alpha = [0.85, 0.85, 0.85, 0.90]
+        
+        # Use user-provided or defaults
+        link_hex = link_colors_hex if link_colors_hex else default_link_hex
+        link_alpha = link_alphas if link_alphas else default_link_alpha
+        
+        # Ensure lists are properly sized
+        while len(link_hex) < 4:
+            link_hex.append(default_link_hex[len(link_hex) % len(default_link_hex)])
+        while len(link_alpha) < 4:
+            link_alpha.append(default_link_alpha[len(link_alpha) % len(default_link_alpha)])
+        
+        # Connect source nodes to component nodes with rgba conversion
         for i, src_idx in enumerate(top_indices):
             s_node = i + 1
-            source_idx.append(s_node); target_idx.append(component_start); values.append(top_physics[i] * 100); link_colors_list.append(link_colors[0] if link_colors and len(link_colors) > 0 else "rgba(46, 204, 113, 0.85)")
-            source_idx.append(s_node); target_idx.append(component_start + 1); values.append(top_gating[i] * 100); link_colors_list.append(link_colors[1] if link_colors and len(link_colors) > 1 else "rgba(231, 76, 60, 0.85)")
-            source_idx.append(s_node); target_idx.append(component_start + 2); values.append(top_temporal[i] * 100); link_colors_list.append(link_colors[2] if link_colors and len(link_colors) > 2 else "rgba(52, 152, 219, 0.85)")
-            source_idx.append(s_node); target_idx.append(component_start + 3); values.append(top_weights[i] * 100); link_colors_list.append(link_colors[3] if link_colors and len(link_colors) > 3 else "rgba(155, 89, 182, 0.9)")
+            # Physics attention flow
+            source_idx.append(s_node); target_idx.append(component_start)
+            values.append(top_physics[i] * 100)
+            link_colors_list.append(ColorUtils.hex_to_rgba(link_hex[0], link_alpha[0]))
+            # Gating flow
+            source_idx.append(s_node); target_idx.append(component_start + 1)
+            values.append(top_gating[i] * 100)
+            link_colors_list.append(ColorUtils.hex_to_rgba(link_hex[1], link_alpha[1]))
+            # Temporal similarity flow
+            source_idx.append(s_node); target_idx.append(component_start + 2)
+            values.append(top_temporal[i] * 100)
+            link_colors_list.append(ColorUtils.hex_to_rgba(link_hex[2], link_alpha[2]))
+            # Final ST-DGPA weight flow
+            source_idx.append(s_node); target_idx.append(component_start + 3)
+            values.append(top_weights[i] * 100)
+            link_colors_list.append(ColorUtils.hex_to_rgba(link_hex[3], link_alpha[3]))
 
         # Connect component nodes to target
         for c in range(4):
@@ -786,18 +848,18 @@ class EnhancedVisualizer:
             agg_value = sum(v for s, t, v in zip(source_idx, target_idx, values) if t == comp_node)
             if agg_value > 0:
                 source_idx.append(comp_node); target_idx.append(0)
-                values.append(agg_value * 0.6); link_colors_list.append("rgba(149, 165, 166, 0.7)")
+                values.append(agg_value * 0.6)
+                link_colors_list.append("rgba(149, 165, 166, 0.7)")
 
-        # 🔥 NEW: Node colors with customization
-        default_node_colors = ["#FF6B6B"] + ["rgba(155, 89, 182, 0.9)"] * len(top_indices) + ["#2ecc71", "#e74c3c", "#3498db", "#9b59b6"]
+        # Node colors (these can stay as hex - Plotly Sankey accepts hex for nodes)
+        default_node_colors = ["#FF6B6B"] + ["#9b59b6"] * len(top_indices) + ["#2ecc71", "#e74c3c", "#3498db", "#9b59b6"]
         if node_colors and isinstance(node_colors, list):
-            node_colors_final = node_colors[:len(labels)]
+            node_colors_final = [ColorUtils.get_safe_color(c) for c in node_colors[:len(labels)]]
             if len(node_colors_final) < len(labels):
                 node_colors_final.extend(default_node_colors[len(node_colors_final):])
         else:
             node_colors_final = default_node_colors
         
-        # 🔥 NEW: Hover template customization
         if hover_template is None:
             hover_template = '<b>%{label}</b><br>Total weight: %{value:.2f}<extra></extra>'
         
@@ -1165,7 +1227,7 @@ def render_prediction_results(results, time_points, energy_query, duration_query
         st.plotly_chart(fig_conf, use_container_width=True)
 
 def render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points):
-    """🔥 ENHANCED: Render ST-DGPA analysis with FULLY CUSTOMIZABLE Sankey diagram."""
+    """🔧 FIXED: Sankey customization with hex colors only for Streamlit compatibility."""
     if not results.get('physics_attention_maps') or len(results['physics_attention_maps'][0]) == 0:
         st.info("No ST-DGPA attention data available.")
         return
@@ -1205,15 +1267,15 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             query_meta, st.session_state.extrapolator.source_metadata
         )
 
-    # 🔥 NEW: Sankey Customization Panel
+    # 🔧 FIXED: Sankey Customization Panel with HEX COLORS ONLY
     with st.expander("🎨 Customize Sankey Diagram", expanded=False):
+        st.info("💡 **Note**: Color pickers use hex codes (#RRGGBB). Opacity is controlled separately.")
+        
         st.markdown("##### ✏️ Edit Node Labels")
         
-        # Initialize customization in session state if not exists
         if 'sankey_custom_labels' not in st.session_state:
             st.session_state.sankey_custom_labels = {}
         
-        # Target label editor
         target_label = st.text_input(
             "Target Query Label", 
             value=st.session_state.sankey_custom_labels.get('target', "🔮 Target Query"),
@@ -1221,7 +1283,6 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         )
         st.session_state.sankey_custom_labels['target'] = target_label
         
-        # Source labels editor (editable table)
         st.markdown("**Source Node Labels** (edit individual entries):")
         top_indices = np.argsort(final_weights)[-top_k:][::-1]
         
@@ -1233,7 +1294,6 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             new_val = st.text_input(f"Source {i+1} Label", value=current_val, key=f"custom_source_{i}_label")
             st.session_state.sankey_custom_labels[custom_key] = new_val
         
-        # Component labels
         st.markdown("**Component Node Labels**:")
         comp_cols = st.columns(2)
         comp_keys = ['physics', 'gating', 'temporal', 'final']
@@ -1252,7 +1312,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                                    index=0, key="sankey_font_family")
         font_size = st.slider("Font Size", 8, 24, 12, key="sankey_font_size")
         
-        st.markdown("##### 🎨 Colors")
+        st.markdown("##### 🎨 Node Colors (Hex)")
         node_color_1 = st.color_picker("Target Node Color", "#FF6B6B", key="sankey_node_target")
         node_color_2 = st.color_picker("Source Nodes Color", "#9b59b6", key="sankey_node_source")
         comp_colors = st.columns(4)
@@ -1264,11 +1324,23 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                 cval = st.color_picker(f"{ckey.title()}", cdefault, key=f"sankey_comp_{ckey}")
                 node_colors_list.append(cval)
         
-        link_col_1 = st.color_picker("Physics Link Color", "rgba(46, 204, 113, 0.85)", key="sankey_link_physics")
-        link_col_2 = st.color_picker("Gating Link Color", "rgba(231, 76, 60, 0.85)", key="sankey_link_gating")
-        link_col_3 = st.color_picker("Temporal Link Color", "rgba(52, 152, 219, 0.85)", key="sankey_link_temporal")
-        link_col_4 = st.color_picker("Final Link Color", "rgba(155, 89, 182, 0.9)", key="sankey_link_final")
-        link_colors_list = [link_col_1, link_col_2, link_col_3, link_col_4]
+        st.markdown("##### 🔗 Link Colors & Opacity (Hex + Alpha)")
+        st.caption("Select base color with picker, then adjust transparency with slider")
+        
+        link_cols = st.columns(4)
+        link_keys = ['physics', 'gating', 'temporal', 'final']
+        link_hex_defaults = ["#2ecc71", "#e74c3c", "#3498db", "#9b59b6"]
+        link_alpha_defaults = [0.85, 0.85, 0.85, 0.90]
+        
+        link_hex_list = []
+        link_alpha_list = []
+        
+        for j, (lkey, lhex_default, lalpha_default) in enumerate(zip(link_keys, link_hex_defaults, link_alpha_defaults)):
+            with link_cols[j]:
+                lhex = st.color_picker(f"{lkey.title()} Color", lhex_default, key=f"sankey_link_hex_{lkey}")
+                lalpha = st.slider(f"{lkey.title()} Opacity", 0.0, 1.0, lalpha_default, 0.05, key=f"sankey_link_alpha_{lkey}")
+                link_hex_list.append(lhex)
+                link_alpha_list.append(lalpha)
         
         st.markdown("##### 📐 Layout & Display")
         node_pad = st.slider("Node Padding", 5, 50, 20, key="sankey_node_pad")
@@ -1293,7 +1365,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
     # Build customization dict for Sankey creation
     custom_labels = st.session_state.sankey_custom_labels.copy()
     
-    # Create Sankey with all customizations
+    # 🔧 FIXED: Create Sankey with hex colors + alpha conversion
     sankey_fig = st.session_state.visualizer.create_stdgpa_sankey(
         results=results, 
         energy_query=energy_query, 
@@ -1305,12 +1377,13 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         ett_gating=ett_gating, 
         temporal_sim=temporal_sim, 
         top_k=top_k,
-        # 🔥 NEW: Pass customization parameters
+        # Customization parameters
         custom_labels=custom_labels,
         font_size=font_size,
         font_family=font_family,
         node_colors=node_colors_list,
-        link_colors=link_colors_list,
+        link_colors_hex=link_hex_list,  # 🔧 Hex colors for Streamlit
+        link_alphas=link_alpha_list,     # 🔧 Separate alpha values
         node_pad=node_pad,
         node_thickness=node_thickness,
         show_values=show_values,
@@ -1391,6 +1464,7 @@ def main():
     .sub-header { font-size: 1.8rem; color: #2c3e50; margin-top: 1.5rem; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 3px solid #3498db; font-weight: 600; }
     .warning-box { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; padding: 1.5rem; border-radius: 10px; margin: 1.5rem 0; box-shadow: 0 10px 20px rgba(0,0,0,0.1); }
     .success-box { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white; padding: 1.5rem; border-radius: 10px; margin: 1.5rem 0; box-shadow: 0 10px 20px rgba(0,0,0,0.1); }
+    .info-note { background: #e8f4fd; border-left: 4px solid #3498db; padding: 1rem; margin: 1rem 0; border-radius: 0 8px 8px 0; }
     </style>
     """, unsafe_allow_html=True)
     
@@ -1411,7 +1485,6 @@ def main():
         st.session_state.interpolation_3d_cache = {}
     if 'selected_colormap' not in st.session_state: 
         st.session_state.selected_colormap = 'Viridis'
-    # 🔥 NEW: Sankey customization state
     if 'sankey_custom_labels' not in st.session_state:
         st.session_state.sankey_custom_labels = {}
     if 'sankey_hover_template' not in st.session_state:
@@ -1438,7 +1511,6 @@ def main():
         st.markdown("### 🎨 Visualization Settings")
         st.session_state.selected_colormap = st.selectbox("Colormap", EnhancedVisualizer.EXTENDED_COLORMAPS, index=0)
         
-        # 🔥 NEW: Quick Sankey style presets
         st.markdown("### 🎯 Sankey Style Presets")
         if st.button("🌈 Colorful", key="preset_colorful"):
             st.session_state.sankey_custom_labels = {}
