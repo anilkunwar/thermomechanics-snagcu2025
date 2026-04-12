@@ -163,7 +163,6 @@ class UnifiedFEADataLoader:
                     fields = {}
                     for key in mesh0.point_data.keys():
                         arr = mesh0.point_data[key].astype(np.float32)
-                        # Determine field type: scalar (1D) or vector (2D)
                         if arr.ndim == 1:
                             field_type = "scalar"
                             comp = 1
@@ -204,15 +203,12 @@ class UnifiedFEADataLoader:
                     data = mesh.point_data[field_name]
                     if field_name not in summary['field_stats']:
                         summary['field_stats'][field_name] = {'min': [], 'max': [], 'mean': [], 'std': []}
-                    # Convert vector fields to magnitude for statistics
                     if data.ndim == 1:
                         clean_data = data[~np.isnan(data)]
                     else:
-                        # Take Euclidean norm over all component axes (axis=1 for (n_points, comp))
                         mag = np.linalg.norm(data, axis=1)
                         clean_data = mag[~np.isnan(mag)]
                     if clean_data.size > 0:
-                        # Use getattr instead of eval
                         summary['field_stats'][field_name]['min'].append(float(np.min(clean_data)))
                         summary['field_stats'][field_name]['max'].append(float(np.max(clean_data)))
                         summary['field_stats'][field_name]['mean'].append(float(np.mean(clean_data)))
@@ -231,12 +227,14 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
                  sigma_g=0.20, s_E=10.0, s_tau=5.0, s_t=20.0, temporal_weight=0.3):
         self.sigma_param = sigma_param; self.spatial_weight = spatial_weight
         self.n_heads = n_heads; self.temperature = temperature
-        self.sigma_g = sigma_g; self.s_E = s_E; self.s_tau = s_tau; self.s_t = s_t
-        self.temporal_weight = temporal_weight
-        self.thermal_diffusivity = 1e-5; self.laser_spot_radius = 50e-6; self.characteristic_length = 100e-6
+        self.sigma_g = sigma_g; self.s_E = s_E; self.s_tau = s_tau
+        self.s_t = s_t; self.temporal_weight = temporal_weight
+        self.thermal_diffusivity = 1e-5; self.laser_spot_radius = 50e-6
+        self.characteristic_length = 100e-6
         self.source_db = []; self.embedding_scaler = StandardScaler()
-        self.value_scaler = StandardScaler(); self.source_embeddings = []
-        self.source_values = []; self.source_metadata = []; self.fitted = False
+        self.value_scaler = StandardScaler()
+        self.source_embeddings = []; self.source_values = []
+        self.source_metadata = []; self.fitted = False
     
     def load_summaries(self, summaries):
         self.source_db = summaries
@@ -244,11 +242,13 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         all_embeddings, all_values, metadata = [], [], []
         for summary_idx, summary in enumerate(summaries):
             for timestep_idx, t in enumerate(summary['timesteps']):
-                all_embeddings.append(self._compute_enhanced_physics_embedding(summary['energy'], summary['duration'], t))
+                emb = self._compute_enhanced_physics_embedding(summary['energy'], summary['duration'], t)
+                all_embeddings.append(emb)
                 field_vals = []
                 for field in sorted(summary['field_stats'].keys()):
                     stats = summary['field_stats'][field]
-                    if timestep_idx < len(stats['mean']): field_vals.extend([stats['mean'][timestep_idx], stats['max'][timestep_idx], stats['std'][timestep_idx]])
+                    if timestep_idx < len(stats['mean']):
+                        field_vals.extend([stats['mean'][timestep_idx], stats['max'][timestep_idx], stats['std'][timestep_idx]])
                     else: field_vals.extend([0.0, 0.0, 0.0])
                 all_values.append(field_vals)
                 metadata.append({
@@ -259,21 +259,45 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
                     'thermal_penetration': self._compute_thermal_penetration(t)
                 })
         if all_embeddings and all_values:
-            all_embeddings, all_values = np.array(all_embeddings), np.array(all_values)
-            self.embedding_scaler.fit(all_embeddings); self.source_embeddings = self.embedding_scaler.transform(all_embeddings)
-            self.value_scaler.fit(all_values); self.source_values = all_values
-            self.source_metadata = metadata; self.fitted = True
+            all_embeddings = np.array(all_embeddings); all_values = np.array(all_values)
+            self.embedding_scaler.fit(all_embeddings)
+            self.source_embeddings = self.embedding_scaler.transform(all_embeddings)
+            self.value_scaler.fit(all_values)
+            self.source_values = all_values
+            self.source_metadata = metadata
+            self.fitted = True
             st.info(f"✅ Prepared {len(all_embeddings)} embeddings with {all_embeddings.shape[1]} features")
     
-    def _compute_fourier_number(self, time_ns): return self.thermal_diffusivity * (time_ns * 1e-9) / (self.characteristic_length ** 2)
-    def _compute_thermal_penetration(self, time_ns): return np.sqrt(self.thermal_diffusivity * (time_ns * 1e-9)) * 1e6
+    def _compute_fourier_number(self, time_ns):
+        time_s = time_ns * 1e-9
+        return self.thermal_diffusivity * time_s / (self.characteristic_length ** 2)
+    
+    def _compute_thermal_penetration(self, time_ns):
+        time_s = time_ns * 1e-9
+        return np.sqrt(self.thermal_diffusivity * time_s) * 1e6
     
     def _compute_enhanced_physics_embedding(self, energy, duration, time):
-        logE = np.log1p(energy); power = energy / max(duration, 1e-6); time_ratio = time / max(duration, 1e-3)
-        fourier_number = self._compute_fourier_number(time); thermal_penetration = self._compute_thermal_penetration(time)
-        return np.array([logE, duration, time, power, time_ratio, fourier_number, thermal_penetration,
-                        1.0 if time < duration else 0.0, 1.0 if time >= duration else 0.0,
-                        np.log1p(power), np.log1p(time), np.sqrt(time)], dtype=np.float32)
+        logE = np.log1p(energy); power = energy / max(duration, 1e-6)
+        energy_density = energy / (duration * duration + 1e-6)
+        time_ratio = time / max(duration, 1e-3)
+        heating_rate = power / max(time, 1e-6); cooling_rate = 1.0 / (time + 1e-6)
+        thermal_diffusion = np.sqrt(time * 0.1) / max(duration, 1e-3)
+        thermal_penetration = np.sqrt(time) / 10.0
+        strain_rate = energy_density / (time + 1e-6); stress_rate = power / (time + 1e-6)
+        fourier_number = self._compute_fourier_number(time)
+        thermal_penetration_depth = self._compute_thermal_penetration(time)
+        diffusion_time_scale = time / (duration + 1e-6)
+        heating_phase = 1.0 if time < duration else 0.0
+        cooling_phase = 1.0 if time >= duration else 0.0
+        early_time = 1.0 if time < duration * 0.5 else 0.0
+        late_time = 1.0 if time > duration * 2.0 else 0.0
+        return np.array([
+            logE, duration, time, power, energy_density, time_ratio,
+            heating_rate, cooling_rate, thermal_diffusion, thermal_penetration,
+            strain_rate, stress_rate, fourier_number, thermal_penetration_depth,
+            diffusion_time_scale, heating_phase, cooling_phase, early_time, late_time,
+            np.log1p(power), np.log1p(time), np.sqrt(time), time / (duration + 1e-6)
+        ], dtype=np.float32)
     
     def _compute_ett_gating(self, energy_query, duration_query, time_query, source_metadata=None):
         if source_metadata is None: source_metadata = self.source_metadata
@@ -282,21 +306,31 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             de = (energy_query - meta['energy']) / self.s_E
             dt = (duration_query - meta['duration']) / self.s_tau
             dtime = (time_query - meta['time']) / self.s_t
-            if self.temporal_weight > 0: dtime *= (1.0 + 0.5 * (time_query / max(duration_query, 1e-6)))
+            if self.temporal_weight > 0:
+                time_scaling_factor = 1.0 + 0.5 * (time_query / max(duration_query, 1e-6))
+                dtime = dtime * time_scaling_factor
             phi_squared.append(de**2 + dt**2 + dtime**2)
         phi_squared = np.array(phi_squared)
         gating = np.exp(-phi_squared / (2 * self.sigma_g**2))
         gating_sum = np.sum(gating)
-        return gating / gating_sum if gating_sum > 0 else np.ones_like(gating) / len(gating)
+        if gating_sum > 0: gating = gating / gating_sum
+        else: gating = np.ones_like(gating) / len(gating)
+        return gating
     
     def _compute_temporal_similarity(self, query_meta, source_metas):
         similarities = []
         for meta in source_metas:
             time_diff = abs(query_meta['time'] - meta['time'])
-            tolerance = max(query_meta['duration'] * 0.1, 1.0) if query_meta['time'] < query_meta['duration'] * 1.5 else max(query_meta['duration'] * 0.3, 3.0)
-            fourier_similarity = np.exp(-abs(query_meta.get('fourier_number', 0) - meta.get('fourier_number', 0)) / 0.1)
-            time_similarity = np.exp(-time_diff / tolerance)
-            similarities.append((1 - self.temporal_weight) * time_similarity + self.temporal_weight * fourier_similarity)
+            if query_meta['time'] < query_meta['duration'] * 1.5:
+                temporal_tolerance = max(query_meta['duration'] * 0.1, 1.0)
+            else: temporal_tolerance = max(query_meta['duration'] * 0.3, 3.0)
+            if 'fourier_number' in meta and 'fourier_number' in query_meta:
+                fourier_diff = abs(query_meta['fourier_number'] - meta['fourier_number'])
+                fourier_similarity = np.exp(-fourier_diff / 0.1)
+            else: fourier_similarity = 1.0
+            time_similarity = np.exp(-time_diff / temporal_tolerance)
+            combined_similarity = (1 - self.temporal_weight) * time_similarity + self.temporal_weight * fourier_similarity
+            similarities.append(combined_similarity)
         return np.array(similarities)
     
     def _compute_spatial_similarity(self, query_meta, source_metas):
@@ -304,47 +338,74 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         for meta in source_metas:
             e_diff = abs(query_meta['energy'] - meta['energy']) / 50.0
             d_diff = abs(query_meta['duration'] - meta['duration']) / 20.0
-            similarities.append(np.exp(-np.sqrt(e_diff**2 + d_diff**2) / self.sigma_param))
+            total_diff = np.sqrt(e_diff**2 + d_diff**2)
+            similarity = np.exp(-total_diff / self.sigma_param)
+            similarities.append(similarity)
         return np.array(similarities)
     
     def _multi_head_attention_with_gating(self, query_embedding, query_meta):
         if not self.fitted or len(self.source_embeddings) == 0: return None, None, None, None
         query_norm = self.embedding_scaler.transform([query_embedding])[0]
-        n_sources = len(self.source_embeddings); head_weights = np.zeros((self.n_heads, n_sources))
+        n_sources = len(self.source_embeddings)
+        head_weights = np.zeros((self.n_heads, n_sources))
         for head in range(self.n_heads):
-            np.random.seed(42 + head); proj_dim = min(8, query_norm.shape[0])
+            np.random.seed(42 + head)
+            proj_dim = min(8, query_norm.shape[0])
             proj_matrix = np.random.randn(query_norm.shape[0], proj_dim)
-            query_proj = query_norm @ proj_matrix; source_proj = self.source_embeddings @ proj_matrix
+            query_proj = query_norm @ proj_matrix
+            source_proj = self.source_embeddings @ proj_matrix
             distances = np.linalg.norm(query_proj - source_proj, axis=1)
             scores = np.exp(-distances**2 / (2 * self.sigma_param**2))
-            if self.spatial_weight > 0: scores = (1 - self.spatial_weight) * scores + self.spatial_weight * self._compute_spatial_similarity(query_meta, self.source_metadata)
-            if self.temporal_weight > 0: scores = (1 - self.temporal_weight) * scores + self.temporal_weight * self._compute_temporal_similarity(query_meta, self.source_metadata)
+            if self.spatial_weight > 0:
+                spatial_sim = self._compute_spatial_similarity(query_meta, self.source_metadata)
+                scores = (1 - self.spatial_weight) * scores + self.spatial_weight * spatial_sim
+            if self.temporal_weight > 0:
+                temporal_sim = self._compute_temporal_similarity(query_meta, self.source_metadata)
+                scores = (1 - self.temporal_weight) * scores + self.temporal_weight * temporal_sim
             head_weights[head] = scores
         avg_weights = np.mean(head_weights, axis=0)
         if self.temperature != 1.0: avg_weights = avg_weights ** (1.0 / self.temperature)
-        max_weight = np.max(avg_weights); exp_weights = np.exp(avg_weights - max_weight)
+        max_weight = np.max(avg_weights)
+        exp_weights = np.exp(avg_weights - max_weight)
         physics_attention = exp_weights / (np.sum(exp_weights) + 1e-12)
         ett_gating = self._compute_ett_gating(query_meta['energy'], query_meta['duration'], query_meta['time'])
-        combined_weights = physics_attention * ett_gating; combined_sum = np.sum(combined_weights)
-        final_weights = combined_weights / combined_sum if combined_sum > 1e-12 else physics_attention
-        prediction = np.sum(final_weights[:, np.newaxis] * self.source_values, axis=0) if len(self.source_values) > 0 else np.zeros(1)
+        combined_weights = physics_attention * ett_gating
+        combined_sum = np.sum(combined_weights)
+        if combined_sum > 1e-12: final_weights = combined_weights / combined_sum
+        else: final_weights = physics_attention
+        if len(self.source_values) > 0: prediction = np.sum(final_weights[:, np.newaxis] * self.source_values, axis=0)
+        else: prediction = np.zeros(1)
         return prediction, final_weights, physics_attention, ett_gating
     
     def predict_field_statistics(self, energy_query, duration_query, time_query):
         if not self.fitted: return None
         query_embedding = self._compute_enhanced_physics_embedding(energy_query, duration_query, time_query)
-        query_meta = {'energy': energy_query, 'duration': duration_query, 'time': time_query, 'fourier_number': self._compute_fourier_number(time_query), 'thermal_penetration': self._compute_thermal_penetration(time_query)}
+        query_meta = {
+            'energy': energy_query, 'duration': duration_query, 'time': time_query,
+            'fourier_number': self._compute_fourier_number(time_query),
+            'thermal_penetration': self._compute_thermal_penetration(time_query)
+        }
         prediction, final_weights, physics_attention, ett_gating = self._multi_head_attention_with_gating(query_embedding, query_meta)
         if prediction is None: return None
-        result = {'prediction': prediction, 'attention_weights': final_weights, 'physics_attention': physics_attention, 'ett_gating': ett_gating,
-                  'confidence': float(np.max(final_weights)) if len(final_weights) > 0 else 0.0,
-                  'temporal_confidence': self._compute_temporal_confidence(time_query, duration_query),
-                  'heat_transfer_indicators': self._compute_heat_transfer_indicators(energy_query, duration_query, time_query), 'field_predictions': {}}
+        result = {
+            'prediction': prediction, 'attention_weights': final_weights,
+            'physics_attention': physics_attention, 'ett_gating': ett_gating,
+            'confidence': float(np.max(final_weights)) if len(final_weights) > 0 else 0.0,
+            'temporal_confidence': self._compute_temporal_confidence(time_query, duration_query),
+            'heat_transfer_indicators': self._compute_heat_transfer_indicators(energy_query, duration_query, time_query),
+            'field_predictions': {}
+        }
         if self.source_db:
             field_order = sorted(self.source_db[0]['field_stats'].keys())
+            n_stats_per_field = 3
             for i, field in enumerate(field_order):
-                start_idx = i * 3
-                if start_idx + 2 < len(prediction): result['field_predictions'][field] = {'mean': float(prediction[start_idx]), 'max': float(prediction[start_idx + 1]), 'std': float(prediction[start_idx + 2])}
+                start_idx = i * n_stats_per_field
+                if start_idx + 2 < len(prediction):
+                    result['field_predictions'][field] = {
+                        'mean': float(prediction[start_idx]),
+                        'max': float(prediction[start_idx + 1]),
+                        'std': float(prediction[start_idx + 2])
+                    }
         return result
     
     def _compute_temporal_confidence(self, time_query, duration_query):
@@ -353,26 +414,54 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         else: return 0.9
     
     def _compute_heat_transfer_indicators(self, energy, duration, time):
-        fourier_number = self._compute_fourier_number(time); thermal_penetration = self._compute_thermal_penetration(time)
+        fourier_number = self._compute_fourier_number(time)
+        thermal_penetration = self._compute_thermal_penetration(time)
         if time < duration * 0.3: phase, regime = "Early Heating", "Adiabatic-like"
         elif time < duration: phase, regime = "Heating", "Conduction-dominated"
         elif time < duration * 2: phase, regime = "Early Cooling", "Mixed conduction"
         else: phase, regime = "Diffusion Cooling", "Thermal diffusion"
-        return {'phase': phase, 'regime': regime, 'fourier_number': fourier_number, 'thermal_penetration_um': thermal_penetration, 'normalized_time': time / max(duration, 1e-6), 'energy_density': energy / duration}
+        return {
+            'phase': phase, 'regime': regime, 'fourier_number': fourier_number,
+            'thermal_penetration_um': thermal_penetration,
+            'normalized_time': time / max(duration, 1e-6), 'energy_density': energy / duration
+        }
     
     def predict_time_series(self, energy_query, duration_query, time_points):
-        results = {'time_points': time_points, 'field_predictions': {}, 'attention_maps': [], 'physics_attention_maps': [], 'ett_gating_maps': [], 'confidence_scores': [], 'temporal_confidences': [], 'heat_transfer_indicators': []}
+        results = {
+            'time_points': time_points, 'field_predictions': {},
+            'attention_maps': [], 'physics_attention_maps': [], 'ett_gating_maps': [],
+            'confidence_scores': [], 'temporal_confidences': [], 'heat_transfer_indicators': []
+        }
         if self.source_db:
-            for field in set(f for s in self.source_db for f in s['field_stats'].keys()): results['field_predictions'][field] = {'mean': [], 'max': [], 'std': []}
+            common_fields = set()
+            for summary in self.source_db: common_fields.update(summary['field_stats'].keys())
+            for field in common_fields: results['field_predictions'][field] = {'mean': [], 'max': [], 'std': []}
         for t in time_points:
             pred = self.predict_field_statistics(energy_query, duration_query, t)
             if pred and 'field_predictions' in pred:
                 for field in pred['field_predictions']:
-                    if field in results['field_predictions']: results['field_predictions'][field]['mean'].append(pred['field_predictions'][field]['mean']); results['field_predictions'][field]['max'].append(pred['field_predictions'][field]['max']); results['field_predictions'][field]['std'].append(pred['field_predictions'][field]['std'])
-                results['attention_maps'].append(pred['attention_weights']); results['physics_attention_maps'].append(pred['physics_attention']); results['ett_gating_maps'].append(pred['ett_gating']); results['confidence_scores'].append(pred['confidence']); results['temporal_confidences'].append(pred['temporal_confidence']); results['heat_transfer_indicators'].append(pred['heat_transfer_indicators'])
+                    if field in results['field_predictions']:
+                        stats = pred['field_predictions'][field]
+                        results['field_predictions'][field]['mean'].append(stats['mean'])
+                        results['field_predictions'][field]['max'].append(stats['max'])
+                        results['field_predictions'][field]['std'].append(stats['std'])
+                results['attention_maps'].append(pred['attention_weights'])
+                results['physics_attention_maps'].append(pred['physics_attention'])
+                results['ett_gating_maps'].append(pred['ett_gating'])
+                results['confidence_scores'].append(pred['confidence'])
+                results['temporal_confidences'].append(pred['temporal_confidence'])
+                results['heat_transfer_indicators'].append(pred['heat_transfer_indicators'])
             else:
-                for field in results['field_predictions']: results['field_predictions'][field]['mean'].append(np.nan); results['field_predictions'][field]['max'].append(np.nan); results['field_predictions'][field]['std'].append(np.nan)
-                results['attention_maps'].append(np.array([])); results['physics_attention_maps'].append(np.array([])); results['ett_gating_maps'].append(np.array([])); results['confidence_scores'].append(0.0); results['temporal_confidences'].append(0.0); results['heat_transfer_indicators'].append({})
+                for field in results['field_predictions']:
+                    results['field_predictions'][field]['mean'].append(np.nan)
+                    results['field_predictions'][field]['max'].append(np.nan)
+                    results['field_predictions'][field]['std'].append(np.nan)
+                results['attention_maps'].append(np.array([]))
+                results['physics_attention_maps'].append(np.array([]))
+                results['ett_gating_maps'].append(np.array([]))
+                results['confidence_scores'].append(0.0)
+                results['temporal_confidences'].append(0.0)
+                results['heat_transfer_indicators'].append({})
         return results
     
     def interpolate_full_field(self, field_name, attention_weights, source_metadata, simulations):
@@ -380,394 +469,239 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         first_sim = next(iter(simulations.values()))
         if 'fields' not in first_sim or field_name not in first_sim['fields']: return None
         field_shape = first_sim['fields'][field_name].shape[1:]
-        interpolated_field = np.zeros(first_sim['fields'][field_name].shape[1] if len(field_shape) == 0 else field_shape, dtype=np.float32)
+        if len(field_shape) == 0: interpolated_field = np.zeros(first_sim['fields'][field_name].shape[1], dtype=np.float32)
+        else: interpolated_field = np.zeros(field_shape, dtype=np.float32)
         total_weight, n_sources_used = 0.0, 0
         for idx, weight in enumerate(attention_weights):
             if weight < 1e-6: continue
             meta = source_metadata[idx]
-            if meta['name'] in simulations and field_name in simulations[meta['name']]['fields']:
-                interpolated_field += weight * simulations[meta['name']]['fields'][field_name][meta['timestep_idx']]
-                total_weight += weight; n_sources_used += 1
-        return interpolated_field / total_weight if total_weight > 0 else None
-    
-    def export_interpolated_vtu(self, field_name, interpolated_values, simulations, output_path):
-        if interpolated_values is None or len(simulations) == 0: return False
-        try:
-            first_sim = next(iter(simulations.values())); points = first_sim['points']; cells = None
-            if 'triangles' in first_sim and first_sim['triangles'] is not None: cells = [("triangle", first_sim['triangles'])]
-            mesh = meshio.Mesh(points, cells, point_data={field_name: interpolated_values}); mesh.write(output_path); return True
-        except Exception as e: st.error(f"Error exporting VTU: {str(e)}"); return False
-
-# =============================================
-# 4. POLAR RADAR VISUALIZER (FIXED)
-# =============================================
-class PolarRadarVisualizer:
-    """Creates polar radar charts with Energy (angular), Pulse Width (radial), and Peak Value (color/size)"""
-    def __init__(self):
-        self.color_scale_temp = 'Inferno'
-        self.color_scale_stress = 'Plasma'
-        self.target_symbol = 'star-diamond'
-        self.target_color = '#00FF7F'
-
-    def create_polar_radar_chart(self, df: pd.DataFrame, field_type: str = 'temperature',
-                                query_params: Optional[Dict] = None,
-                                timestep: int = 1,
-                                width: int = 800, height: int = 700) -> go.Figure:
-        """
-        Create polar radar chart.
-        Angular axis: Energy (mJ)
-        Radial axis: Pulse Duration (ns)
-        Color/Size: Peak Value (Temperature or Stress)
-        """
-        if df.empty:
-            return go.Figure().update_layout(title="No data available")
-
-        # Extract parameters, ensure numeric and finite
-        energies = pd.to_numeric(df['Energy'], errors='coerce').dropna().values
-        durations = pd.to_numeric(df['Duration'], errors='coerce').dropna().values
-        peak_values = pd.to_numeric(df['Peak_Value'], errors='coerce').dropna().values
-        sim_names = df.get('Name', [f"Sim {i}" for i in range(len(df))]).tolist()
-
-        if len(energies) == 0:
-            return go.Figure().update_layout(title="No valid numeric data")
-
-        # Normalize Energy to Angular Axis (0 to 2*pi)
-        e_min, e_max = np.nanmin(energies), np.nanmax(energies)
-        e_range = e_max - e_min if e_max > e_min else 1.0
-        # Protect against division by zero or extreme values
-        if not np.isfinite(e_range) or e_range == 0:
-            e_range = 1.0
-
-        angles_rad = 2 * np.pi * (energies - e_min) / e_range
-        angles_deg = np.degrees(angles_rad)
-
-        # Prepare hover text
-        hover_text = []
-        for i in range(len(df)):
-            hover_text.append(
-                f"<b>{sim_names[i]}</b><br>"
-                f"Time Step: {timestep}<br>"
-                f"Energy: {energies[i]:.2f} mJ<br>"
-                f"Duration: {durations[i]:.2f} ns<br>"
-                f"Peak {field_type.capitalize()}: {peak_values[i]:.3f}"
-            )
-
-        # Determine color scale
-        c_scale = self.color_scale_temp if 'temp' in field_type.lower() else self.color_scale_stress
-        title_field = "Peak Temperature (K)" if 'temp' in field_type.lower() else "Peak von Mises Stress (MPa)"
-
-        # Create Figure
-        fig = go.Figure()
-
-        # Source simulations scatter
-        fig.add_trace(go.Scatterpolar(
-            r=durations,
-            theta=angles_deg,
-            mode='markers',
-            marker=dict(
-                size=10 + (peak_values - np.min(peak_values)) / (np.max(peak_values) - np.min(peak_values) + 1e-6) * 20,
-                color=peak_values,
-                colorscale=c_scale,
-                colorbar=dict(title=title_field, thickness=20),
-                line=dict(width=2, color='white')
-            ),
-            text=hover_text,
-            hoverinfo='text',
-            name='Source Simulations',
-            opacity=0.85
-        ))
-
-        # Add Target Query Point if provided
-        if query_params:
-            q_e = query_params.get('Energy', None)
-            q_d = query_params.get('Duration', None)
-            if q_e is not None and q_d is not None and np.isfinite(q_e) and np.isfinite(q_d):
-                q_angle_rad = 2 * np.pi * (q_e - e_min) / e_range
-                q_angle_deg = np.degrees(q_angle_rad)
-                fig.add_trace(go.Scatterpolar(
-                    r=[q_d],
-                    theta=[q_angle_deg],
-                    mode='markers',
-                    marker=dict(
-                        size=25,
-                        color=self.target_color,
-                        symbol=self.target_symbol,
-                        line=dict(width=3, color='black')
-                    ),
-                    name='Target Query',
-                    hovertemplate=f"<b>Target Query</b><br>Energy: {q_e:.2f} mJ<br>Duration: {q_d:.2f} ns<extra></extra>"
-                ))
-
-        # Build polar layout with robust tick handling and NO title on angularaxis
-        polar_layout = dict(
-            radialaxis=dict(
-                visible=True,
-                title="Pulse Duration (ns)",      # Allowed
-                gridcolor="lightgray",
-                tickfont=dict(size=12)
-            ),
-            angularaxis=dict(
-                visible=True,
-                direction="clockwise",
-                rotation=90,
-                gridcolor="lightgray",
-                tickfont=dict(size=12)
-                # NO 'title' here (not supported by Plotly)
-            ),
-            bgcolor="white"
-        )
-
-        # Add custom tick labels only if the energy range is valid and not degenerate
-        if e_range > 1e-6 and np.isfinite(e_min) and np.isfinite(e_max):
-            try:
-                tick_angles = []
-                tick_texts = []
-                for v in np.linspace(e_min, e_max, 6):
-                    angle_rad = 2 * np.pi * (v - e_min) / e_range
-                    angle_deg = np.degrees(angle_rad)
-                    if 0 <= angle_deg <= 360:
-                        tick_angles.append(angle_deg)
-                        tick_texts.append(f"{v:.1f}")
-                if tick_angles:
-                    polar_layout['angularaxis']['tickvals'] = tick_angles
-                    polar_layout['angularaxis']['ticktext'] = tick_texts
-            except Exception:
-                # If anything fails, skip custom ticks
-                pass
-
-        # Apply layout with error fallback
-        try:
-            fig.update_layout(
-                title=dict(
-                    text=f"Polar Radar: {title_field} at t={timestep} ns<br>"
-                         f"<span style='font-size:12px; color:gray;'>Angular: Energy (mJ) • Radial: Pulse Duration (ns)</span>",
-                    font=dict(size=18),
-                    x=0.5,
-                    xanchor='center'
-                ),
-                polar=polar_layout,
-                width=width,
-                height=height,
-                showlegend=True,
-                margin=dict(l=60, r=60, t=80, b=60),
-                hovermode='closest'
-            )
-        except Exception as e:
-            # Fallback: minimal layout without polar customizations
-            st.warning(f"Polar layout error, using fallback: {str(e)}")
-            fig.update_layout(
-                title=f"Polar Radar: {title_field} at t={timestep} ns",
-                width=width,
-                height=height,
-                showlegend=True,
-                margin=dict(l=50, r=50, t=50, b=50)
-            )
-
-        return fig
-
-# =============================================
-# 5. SANKEY VISUALIZER (FIXED: removed invalid 'line' from link)
-# =============================================
-class SankeyVisualizer:
-    def __init__(self):
-        self.defaults = {
-            'font_family': 'Arial, sans-serif',
-            'font_size': 12,
-            'node_thickness': 20,
-            'node_pad': 15,
-            'width': 1000,
-            'height': 700,
-            'show_math': True,
-            'target_label': 'TARGET',
-            'node_colors': {
-                'target': '#FF6B6B',
-                'source': '#9966FF',
-                'components': ['#FF6B6B', '#4ECDC4', '#95E1D3', '#FFD93D', '#36A2EB', '#9966FF']
-            }
+            sim_name, timestep_idx = meta['name'], meta['timestep_idx']
+            if sim_name in simulations:
+                sim = simulations[sim_name]
+                if 'fields' in sim and field_name in sim['fields']:
+                    source_field = sim['fields'][field_name][timestep_idx]
+                    interpolated_field += weight * source_field
+                    total_weight += weight; n_sources_used += 1
+        if total_weight > 0: interpolated_field /= total_weight
+        else: return None
+        self.last_interpolation_metadata = {
+            'field_name': field_name, 'n_sources_used': n_sources_used,
+            'total_weight': total_weight,
+            'max_weight': np.max(attention_weights) if len(attention_weights) > 0 else 0,
+            'min_weight': np.min(attention_weights) if len(attention_weights) > 0 else 0
         }
-
-    def create_stdgpa_sankey(self, sources_: List[Dict], query: Dict, 
-                            customization: Optional[Dict] = None) -> go.Figure:
-        cfg = {**self.defaults, **(customization or {})}
-        if cfg['show_math']:
-            comp_labels = [
-                'Energy Gate\nφ² = ((E*-Eᵢ)/s_E)²',
-                'Duration Gate\nφ² = ((τ*-τᵢ)/s_τ)²',
-                'Time Gate\nφ² = ((t*-tᵢ)/s_t)²',
-                'Attention\nαᵢ = softmax(QKᵀ/√dₖ)',
-                'Refinement\nwᵢ ∝ αᵢ·gatingᵢ',
-                'Combined\nwᵢ = αᵢ·gatingᵢ / Σ(...)'
-            ]
-        else:
-            comp_labels = ['Energy Gate', 'Duration Gate', 'Time Gate', 'Attention', 'Refinement', 'Combined']
-        
-        labels = [cfg['target_label']]
-        node_colors = [cfg['node_colors']['target']]
-        n_sources = len(sources_)
-        for i in range(n_sources):
-            row = sources_[i]
-            w = row.get('Combined_Weight', 0)
-            opacity = min(0.3 + w * 0.7, 1.0)
-            base = cfg['node_colors']['source']
-            r, g, b = int(base[1:3], 16), int(base[3:5], 16), int(base[5:7], 16)
-            node_colors.append(f'rgba({r},{g},{b},{opacity:.2f})')
-            labels.append(f"Sim {i+1}\nE:{row.get('Energy',0):.1f} τ:{row.get('Duration',0):.1f}")
-        
-        comp_start = len(labels)
-        labels.extend(comp_labels)
-        node_colors.extend(cfg['node_colors']['components'])
-        
-        s_idx, t_idx, vals, l_colors, h_texts = [], [], [], [], []
-        
-        for i in range(n_sources):
-            src = i + 1
-            row = sources_[i]
-            ve = ((row.get('Energy', query['Energy']) - query['Energy']) / 10.0)**2 * 10
-            vτ = ((row.get('Duration', query['Duration']) - query['Duration']) / 5.0)**2 * 10
-            vt = ((row.get('Time', query['Time']) - query['Time']) / 20.0)**2 * 10
-            va = row.get('Attention_Score', 0) * 100
-            vr = row.get('Refinement', 0) * 100
-            vc = row.get('Combined_Weight', 0) * 100
-            vals_list = [ve, vτ, vt, va, vr, vc]
-            for c in range(6):
-                s_idx.append(src); t_idx.append(comp_start + c); vals.append(max(0.01, vals_list[c]))
-                l_colors.append(cfg['node_colors']['components'][c].replace('rgb', 'rgba').replace(')', ', 0.5)'))
-                if c == 0: h_texts.append(f"<b>Energy Gate</b><br>S{src} | φ² = ((E*-Eᵢ)/s_E)² = {ve/10:.4f}")
-                elif c == 1: h_texts.append(f"<b>Duration Gate</b><br>S{src} | φ² = ((τ*-τᵢ)/s_τ)² = {vτ/10:.4f}")
-                elif c == 2: h_texts.append(f"<b>Time Gate</b><br>S{src} | φ² = ((t*-tᵢ)/s_t)² = {vt/10:.4f}")
-                elif c == 3: h_texts.append(f"<b>Attention</b><br>S{src} | αᵢ = 1/(1+√φ²)<br>Score: {row.get('Attention_Score',0):.4f}")
-                elif c == 4: h_texts.append(f"<b>Refinement</b><br>S{src} | wᵢ ∝ αᵢ·gatingᵢ<br>Ref: {row.get('Refinement',0):.4f}")
-                else: h_texts.append(f"<b>Combined Weight</b><br>S{src} | wᵢ = (αᵢ·gatingᵢ)/Σ(...)<br>Weight: {row.get('Combined_Weight',0):.4f}")
-
-        for c in range(6):
-            s_idx.append(comp_start + c); t_idx.append(0)
-            flow_in = sum(v for s, t, v in zip(s_idx[:-6], t_idx[:-6], vals[:-6]) if t == comp_start + c)
-            vals.append(flow_in * 0.5)
-            l_colors.append('rgba(153,102,255,0.6)')
-            h_texts.append(f"<b>Aggregation</b><br>{comp_labels[c]} → TARGET<br>Total: {flow_in:.3f}")
-            
-        # ========== FINAL FIX: removed 'line' from link (invalid in Sankey) ==========
-        fig = go.Figure(go.Sankey(
-            node=dict(
-                pad=cfg['node_pad'],
-                thickness=cfg['node_thickness'],
-                line=dict(color="black", width=0.5),
-                label=labels,
-                color=node_colors,
-                font=dict(family=cfg['font_family'], size=cfg['font_size']),
-                hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'
-            ),
-            link=dict(
-                source=s_idx,
-                target=t_idx,
-                value=vals,
-                color=l_colors,
-                hovertext=h_texts,
-                hovertemplate='%{hovertext}<extra></extra>'
-                # 'line' property is NOT allowed for Sankey links – removed
-            )
-        ))
-        
-        title_text = (f"<b>ST-DGPA Attention Flow</b><br>"
-                     f"Query: E={query['Energy']:.2f} mJ, τ={query['Duration']:.2f} ns, t={query['Time']:.2f} ns<br>"
-                     f"<sub>σ_g={cfg.get('sigma_g', 0.20):.2f}, s_E={cfg.get('s_E', 10.0):.1f}, s_τ={cfg.get('s_tau', 5.0):.1f}, s_t={cfg.get('s_t', 20.0):.1f}</sub>")
-        fig.update_layout(
-            title=dict(text=title_text, font=dict(family=cfg['font_family'], size=cfg['font_size']+4), x=0.5, xanchor='center'),
-            font=dict(family=cfg['font_family'], size=cfg['font_size']),
-            width=cfg['width'], height=cfg['height'],
-            plot_bgcolor='rgba(240, 240, 245, 0.9)', paper_bgcolor='white',
-            margin=dict(t=100, l=50, r=50, b=50),
-            hoverlabel=dict(font=dict(family=cfg['font_family'], size=cfg['font_size']),
-                           bgcolor='rgba(44, 62, 80, 0.9)', bordercolor='white', namelength=-1)
-        )
-        return fig
+        return interpolated_field
 
 # =============================================
-# 6. ENHANCED VISUALIZER
+# 4. ADVANCED VISUALIZER WITH SANKEY & POLAR RADAR
 # =============================================
 class EnhancedVisualizer:
+    EXTENDED_COLORMAPS = ['Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis', 'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland']
+    
     @staticmethod
-    def create_stdgpa_analysis(results, energy_query, duration_query, time_points):
-        if not results or 'attention_maps' not in results or len(results['attention_maps']) == 0: return None
-        timestep_idx = len(time_points) // 2; time = time_points[timestep_idx]
-        fig = make_subplots(rows=3, cols=3,
-            subplot_titles=["ST-DGPA Final Weights", "Physics Attention Only", "(E, τ, t) Gating Only", 
-                           "ST-DGPA vs Physics Attention", "Temporal Coherence Analysis", "Heat Transfer Phase",
-                           "Parameter Space 3D", "Attention Network", "Weight Evolution"],
-            vertical_spacing=0.12, horizontal_spacing=0.12,
-            specs=[ [{'type': 'xy'}, {'type': 'xy'}, {'type': 'xy'}], [{'type': 'xy'}, {'type': 'xy'}, {'type': 'polar'}], [{'type': 'scene'}, {'type': 'xy'}, {'type': 'xy'}] ])
+    def create_stdgpa_sankey(sources_data, query_params, customization=None):
+        """
+        Create an enhanced Sankey diagram showing ST-DGPA weight decomposition flow.
+        Uses customdata instead of hovertext for Plotly compatibility.
+        """
+        cfg = customization or {}
+        node_pad = cfg.get('node_pad', 20); node_thickness = cfg.get('node_thickness', 25)
+        font_size = cfg.get('font_size', 12)
         
-        final_weights = results['attention_maps'][timestep_idx]; physics_attention = results['physics_attention_maps'][timestep_idx]; ett_gating = results['ett_gating_maps'][timestep_idx]
-        fig.add_trace(go.Bar(x=list(range(len(final_weights))), y=final_weights, marker_color='blue', showlegend=False), row=1, col=1)
-        fig.add_trace(go.Bar(x=list(range(len(physics_attention))), y=physics_attention, marker_color='green', showlegend=False), row=1, col=2)
-        fig.add_trace(go.Bar(x=list(range(len(ett_gating))), y=ett_gating, marker_color='red', showlegend=False), row=1, col=3)
-        fig.add_trace(go.Scatter(x=list(range(len(final_weights))), y=final_weights, mode='lines+markers', line=dict(color='blue', width=3)), row=2, col=1)
-        fig.add_trace(go.Scatter(x=list(range(len(physics_attention))), y=physics_attention, mode='lines+markers', line=dict(color='green', width=2, dash='dash')), row=2, col=1)
+        # Build node labels and colors
+        labels = ['Target Query']
+        node_colors = ['#FF6B6B']  # Red for target
+        for src in sources_data:
+            labels.append(f"Source {src['source_index']+1}\nE={src['Energy']:.1f}mJ\nτ={src['Duration']:.1f}ns")
+            node_colors.append(f'rgba(100,149,237,{src["Combined_Weight"]:.2f})')
         
-        if st.session_state.get('summaries') and hasattr(st.session_state.extrapolator, 'source_metadata'):
-            times, weights = [], []
-            for i, weight in enumerate(final_weights):
-                if weight > 0.01 and i < len(st.session_state.extrapolator.source_metadata): times.append(st.session_state.extrapolator.source_metadata[i]['time']); weights.append(weight)
-            if times and weights:
-                fig.add_trace(go.Scatter(x=times, y=weights, mode='markers', marker=dict(size=np.array(weights)*50, color=weights, colorscale='Viridis', showscale=False)), row=2, col=2)
-                fig.add_vline(x=time, line_dash="dash", line_color="red", row=2, col=2)
-
-        fig.update_layout(height=1000, title_text=f"ST-DGPA Analysis at t={time} ns (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)", showlegend=True)
+        # Add component nodes
+        component_start = len(labels)
+        labels.extend(['Energy Gate', 'Duration Gate', 'Time Gate', 'Physics Attention', 'Refinement', 'Final Weight'])
+        node_colors.extend(['#4ECDC4', '#95E1D3', '#FFD93D', '#9D4EDD', '#36A2EB', '#9966FF'])
+        
+        # Build link data
+        s_idx, t_idx, vals, l_colors, h_texts = [], [], [], [], []
+        
+        for i, src in enumerate(sources_data):
+            src_node = i + 1  # Source nodes start at index 1 (0 is target)
+            
+            # Source → Component gates
+            for comp_idx, (comp_name, comp_val, comp_color) in enumerate([
+                ('Energy', src['Attention_Score'], '#4ECDC4'),
+                ('Duration', src['Attention_Score'], '#95E1D3'),
+                ('Time', src['Attention_Score'], '#FFD93D')
+            ]):
+                s_idx.append(src_node); t_idx.append(component_start + comp_idx)
+                vals.append(src['Combined_Weight'] * 0.3); l_colors.append(comp_color)
+                h_texts.append(f"<b>{src['Name']}</b> → {comp_name} Gate<br>Score: {comp_val:.4f}")
+            
+            # Component gates → Physics Attention
+            for comp_idx in range(3):
+                s_idx.append(component_start + comp_idx); t_idx.append(component_start + 3)
+                vals.append(src['Combined_Weight'] * 0.1); l_colors.append('#9D4EDD')
+                h_texts.append(f"{labels[component_start+comp_idx]} → Physics Attention<br>Weight: {vals[-1]:.4f}")
+            
+            # Physics Attention → Refinement
+            s_idx.append(component_start + 3); t_idx.append(component_start + 4)
+            vals.append(src['Combined_Weight'] * 0.5); l_colors.append('#36A2EB')
+            h_texts.append(f"Physics Attention → Refinement<br>Gating: {src['Gating']:.4f}")
+            
+            # Refinement → Final Weight
+            s_idx.append(component_start + 4); t_idx.append(component_start + 5)
+            vals.append(src['Combined_Weight']); l_colors.append('#9966FF')
+            h_texts.append(f"Refinement → Final Weight<br>Combined: {src['Combined_Weight']:.4f}")
+            
+            # Final Weight → Target
+            s_idx.append(component_start + 5); t_idx.append(0)
+            vals.append(src['Combined_Weight'] * 0.8); l_colors.append('#FF6B6B')
+            h_texts.append(f"<b>Final Contribution</b><br>Source {src['Name']} → Target<br>Weight: {src['Combined_Weight']:.4f}<br>Formula: wᵢ = (αᵢ×gatingᵢ)/Σ(αⱼ×gatingⱼ)")
+        
+        # ✅ FIXED: Use customdata instead of hovertext
+        fig = go.Figure(go.Sankey(
+            node=dict(
+                pad=node_pad, thickness=node_thickness,
+                line=dict(color="black", width=0.5),
+                label=labels, color=node_colors,
+                hovertemplate='<b>%{label}</b><extra></extra>'
+            ),
+            link=dict(
+                source=s_idx, target=t_idx, value=vals, color=l_colors,
+                customdata=h_texts,  # ✅ CORRECT: customdata instead of hovertext
+                hovertemplate='%{customdata}<extra></extra>'  # ✅ CORRECT: reference customdata
+            )
+        ))
+        
+        fig.update_layout(
+            title=dict(
+                text=f"ST-DGPA Weight Decomposition Flow<br><sub>Query: E={query_params['Energy']:.1f}mJ, τ={query_params['Duration']:.1f}ns</sub>",
+                font=dict(size=font_size+4), x=0.5
+            ),
+            font=dict(size=font_size),
+            width=cfg.get('width', 1400), height=cfg.get('height', 900),
+            plot_bgcolor='rgba(240,240,245,0.9)', paper_bgcolor='white',
+            margin=dict(t=100, l=50, r=50, b=50),
+            hoverlabel=dict(font_size=font_size-1, bgcolor='rgba(44,62,80,0.9)')
+        )
+        return fig
+    
+    @staticmethod
+    def create_polar_radar_chart(df, field_type, query_params=None, timestep=1, width=800, height=700):
+        """Create polar radar chart with Energy (angular) × Duration (radial) × Peak Value"""
+        if df.empty: return go.Figure()
+        
+        # Convert to polar coordinates
+        df['theta'] = np.arctan2(df['Energy'] - df['Energy'].mean(), df['Duration'] - df['Duration'].mean())
+        df['r'] = np.sqrt((df['Energy'] - df['Energy'].mean())**2 + (df['Duration'] - df['Duration'].mean())**2)
+        
+        fig = go.Figure()
+        
+        # Add data points
+        fig.add_trace(go.Scatterpolar(
+            r=df['r'], theta=df['theta']*180/np.pi,
+            mode='markers',
+            marker=dict(
+                size=df['Peak_Value'] / df['Peak_Value'].max() * 30 + 10,
+                color=df['Peak_Value'],
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title=f"Peak {field_type}")
+            ),
+            name='Simulations',
+            hovertemplate='<b>%{text}</b><br>Energy: %{customdata[0]:.1f} mJ<br>Duration: %{customdata[1]:.1f} ns<br>Peak: %{customdata[2]:.3f}<extra></extra>',
+            text=df['Name'],
+            customdata=df[['Energy', 'Duration', 'Peak_Value']].values
+        ))
+        
+        # Add query point if provided
+        if query_params:
+            q_theta = np.arctan2(query_params['Energy'] - df['Energy'].mean(), query_params['Duration'] - df['Duration'].mean())
+            q_r = np.sqrt((query_params['Energy'] - df['Energy'].mean())**2 + (query_params['Duration'] - df['Duration'].mean())**2)
+            fig.add_trace(go.Scatterpolar(
+                r=[q_r], theta=[q_theta*180/np.pi],
+                mode='markers',
+                marker=dict(size=20, color='red', symbol='star', line=dict(width=2, color='white')),
+                name='Query Target',
+                hovertemplate='<b>Query</b><br>Energy: %{customdata[0]:.1f} mJ<br>Duration: %{customdata[1]:.1f} ns<extra></extra>',
+                customdata=[[query_params['Energy'], query_params['Duration']]]
+            ))
+        
+        fig.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, title='Parameter Distance'),
+                angularaxis=dict(direction='clockwise', tickfont=dict(size=10))
+            ),
+            title=f"Polar Radar: {field_type} at Timestep {timestep}",
+            width=width, height=height,
+            showlegend=True, legend=dict(x=1.05, y=1)
+        )
         return fig
 
 # =============================================
-# 7. MAIN APPLICATION
+# 5. MAIN APPLICATION
 # =============================================
 def main():
-    st.set_page_config(page_title="Laser Soldering ST-DGPA Platform", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Laser Soldering ST-DGPA Platform", layout="wide", page_icon="🔬")
+    
+    # Custom CSS
     st.markdown("""
-    <style>.main-header { font-size: 2.5rem; text-align: center; margin-bottom: 1.5rem; font-weight: 800; color: #1a202c; }</style>
+    <style>
+    .main-header { font-size: 2.5rem; color: #1E3A8A; text-align: center; margin-bottom: 1.5rem; font-weight: 800; }
+    .sub-header { font-size: 1.5rem; color: #2c3e50; margin: 1rem 0; padding-bottom: 0.5rem; border-bottom: 2px solid #3498db; }
+    .info-box { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 1rem; border-radius: 8px; margin: 1rem 0; }
+    .success-box { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white; padding: 1rem; border-radius: 8px; margin: 1rem 0; }
+    </style>
     """, unsafe_allow_html=True)
-    st.markdown('<h1 class="main-header">🔬 Laser Soldering ST-DGPA Analysis Platform</h1>', unsafe_allow_html=True)
-
-    # Initialize State
-    if 'data_loader' not in st.session_state: st.session_state.data_loader = UnifiedFEADataLoader()
-    if 'extrapolator' not in st.session_state: st.session_state.extrapolator = SpatioTemporalGatedPhysicsAttentionExtrapolator()
-    if 'polar_viz' not in st.session_state: st.session_state.polar_viz = PolarRadarVisualizer()
-    if 'sankey_viz' not in st.session_state: st.session_state.sankey_viz = SankeyVisualizer()
-    if 'enhanced_viz' not in st.session_state: st.session_state.enhanced_viz = EnhancedVisualizer()
-    if 'interpolation_results' not in st.session_state: st.session_state.interpolation_results = None
-    if 'interpolation_params' not in st.session_state: st.session_state.interpolation_params = None
-
+    
+    st.markdown('<h1 class="main-header">🔬 Laser Soldering ST-DGPA Platform</h1>', unsafe_allow_html=True)
+    
+    # Initialize session state
+    if 'data_loader' not in st.session_state:
+        st.session_state.data_loader = UnifiedFEADataLoader()
+        st.session_state.extrapolator = SpatioTemporalGatedPhysicsAttentionExtrapolator()
+        st.session_state.visualizer = EnhancedVisualizer()
+        st.session_state.data_loaded = False
+        st.session_state.interpolation_results = None
+        st.session_state.interpolation_params = None
+        st.session_state.polar_query = None
+    
     # Sidebar
     with st.sidebar:
-        st.header("⚙️ Configuration")
-        load_full = st.checkbox("Load Full Mesh", value=True)
-        if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
+        st.markdown("### ⚙️ Controls")
+        if st.button("🔄 Load Simulations", type="primary", width="stretch"):
             with st.spinner("Loading..."):
-                sims, summaries = st.session_state.data_loader.load_all_simulations(load_full_mesh=load_full)
-                st.session_state.simulations = sims; st.session_state.summaries = summaries
-                if sims and summaries: st.session_state.extrapolator.load_summaries(summaries)
-                st.session_state.data_loaded = True
+                sims, sums = st.session_state.data_loader.load_all_simulations(load_full_mesh=True)
+                if sims and sums:
+                    st.session_state.simulations = sims
+                    st.session_state.summaries = sums
+                    st.session_state.extrapolator.load_summaries(sums)
+                    st.session_state.data_loaded = True
+                    st.success(f"✅ Loaded {len(sims)} simulations")
+                else: st.error("❌ Load failed")
         
-        if st.session_state.get('data_loaded'):
-            st.success(f"✅ {len(st.session_state.summaries)} simulations loaded")
-            st.markdown("---")
-            st.header("🎯 ST-DGPA Parameters")
-            sigma_g = st.slider("σ_g (Gating)", 0.05, 1.0, 0.20, 0.05)
-            s_E = st.slider("s_E (Energy)", 0.1, 50.0, 10.0, 0.5)
-            s_tau = st.slider("s_τ (Duration)", 0.1, 20.0, 5.0, 0.5)
-            s_t = st.slider("s_t (Time)", 1.0, 50.0, 20.0, 1.0)
-            st.session_state.extrapolator.sigma_g = sigma_g
-            st.session_state.extrapolator.s_E = s_E
-            st.session_state.extrapolator.s_tau = s_tau
-            st.session_state.extrapolator.s_t = s_t
-
-    # Tabs
+        if st.session_state.data_loaded:
+            st.markdown("### 📊 Loaded Data")
+            st.metric("Simulations", len(st.session_state.simulations))
+            if st.session_state.summaries:
+                energies = [s['energy'] for s in st.session_state.summaries]
+                durations = [s['duration'] for s in st.session_state.summaries]
+                st.metric("Energy Range", f"{min(energies):.1f}-{max(energies):.1f} mJ")
+                st.metric("Duration Range", f"{min(durations):.1f}-{max(durations):.1f} ns")
+    
+    # Main tabs
     tabs = st.tabs(["📊 Data Overview", "🔮 Interpolation", "🎯 Polar Radar", "🕸️ Sankey Diagram", "🧠 ST-DGPA Analysis"])
     
     if st.session_state.get('data_loaded') and st.session_state.get('summaries'):
         # --- TAB 1: Data Overview ---
         with tabs[0]:
             st.subheader("Loaded Simulations Summary")
-            df_summary = pd.DataFrame([{'Name': s['name'], 'Energy (mJ)': s['energy'], 'Duration (ns)': s['duration'], 'Timesteps': len(s['timesteps'])} for s in st.session_state.summaries])
-            st.dataframe(df_summary.style.format({'Energy (mJ)': '{:.2f}', 'Duration (ns)': '{:.2f}'}), use_container_width=True)
-            # Show 3D viewer if available
+            df_summary = pd.DataFrame([{
+                'Name': s['name'], 'Energy (mJ)': s['energy'],
+                'Duration (ns)': s['duration'], 'Timesteps': len(s['timesteps'])
+            } for s in st.session_state.summaries])
+            st.dataframe(df_summary.style.format({'Energy (mJ)': '{:.2f}', 'Duration (ns)': '{:.2f}'}), width="stretch")
+            
+            # 3D viewer
             if st.session_state.simulations and next(iter(st.session_state.simulations.values())).get('has_mesh'):
                 sim_name = st.selectbox("Select Simulation", sorted(st.session_state.simulations.keys()))
                 sim = st.session_state.simulations[sim_name]
@@ -775,20 +709,18 @@ def main():
                 timestep = st.slider("Timestep", 0, sim['n_timesteps']-1, 0)
                 if sim['points'] is not None and field in sim['fields']:
                     values = sim['fields'][field][timestep].copy()
-                    # Convert vector/tensor fields to scalar intensity
                     if values.ndim >= 2:
                         norm_axes = tuple(range(1, values.ndim))
                         values = np.linalg.norm(values, axis=norm_axes)
                     values = np.nan_to_num(values, nan=0.0)
-                    
                     fig = go.Figure(go.Mesh3d(
                         x=sim['points'][:,0], y=sim['points'][:,1], z=sim['points'][:,2],
                         i=sim['triangles'][:,0], j=sim['triangles'][:,1], k=sim['triangles'][:,2],
                         intensity=values, colorscale='Viridis'
                     ))
                     fig.update_layout(scene=dict(aspectmode="data"), height=600)
-                    st.plotly_chart(fig, use_container_width=True)
-
+                    st.plotly_chart(fig, width="stretch")
+        
         # --- TAB 2: Interpolation ---
         with tabs[1]:
             st.subheader("Run ST-DGPA Interpolation")
@@ -798,15 +730,15 @@ def main():
             with c3: max_t = st.number_input("Max Time (ns)", 1, 200, 50, 1)
             time_points = np.arange(1, max_t + 1, 1)
             
-            if st.button("🚀 Run Prediction", type="primary", use_container_width=True):
+            if st.button("🚀 Run Prediction", type="primary", width="stretch"):
                 with st.spinner("Computing ST-DGPA..."):
                     results = st.session_state.extrapolator.predict_time_series(q_E, q_τ, time_points)
                     if results and results['field_predictions']:
                         st.session_state.interpolation_results = results
                         st.session_state.interpolation_params = {'energy_query': q_E, 'duration_query': q_τ, 'time_points': time_points}
                         st.success("✅ Prediction Complete")
-                    else:
-                        st.error("Prediction failed.")
+                        st.session_state.polar_query = {'Energy': q_E, 'Duration': q_τ}
+                    else: st.error("Prediction failed.")
             
             if st.session_state.interpolation_results:
                 results = st.session_state.interpolation_results
@@ -818,24 +750,20 @@ def main():
                         if results['field_predictions'][f]['mean']:
                             fig_preds.add_trace(go.Scatter(x=time_points, y=results['field_predictions'][f]['mean'], mode='lines', name=f))
                     fig_preds.update_layout(title="Predicted Mean Values", xaxis_title="Time (ns)", yaxis_title="Value", height=400)
-                    st.plotly_chart(fig_preds, use_container_width=True)
-                    # Store for other tabs
-                    st.session_state.polar_query = {'Energy': q_E, 'Duration': q_τ}
-
+                    st.plotly_chart(fig_preds, width="stretch")
+        
         # --- TAB 3: Polar Radar ---
         with tabs[2]:
             st.subheader("Polar Radar Visualization")
             if not st.session_state.get('data_loaded'):
                 st.warning("Please load simulations first.")
             else:
-                # Select Field and Timestep
                 all_fields = set()
                 for s in st.session_state.summaries: all_fields.update(s['field_stats'].keys())
                 field_type = st.selectbox("Field Type", sorted(all_fields))
                 t_step = st.number_input("Timestep Index", 1, max(s.get('timesteps', [1])[-1] for s in st.session_state.summaries), 1)
                 show_target = st.checkbox("Show Target Query", value=True)
                 
-                # Build DataFrame
                 rows = []
                 for s in st.session_state.summaries:
                     if t_step <= len(s['timesteps']):
@@ -845,15 +773,13 @@ def main():
                             rows.append({'Name': s['name'], 'Energy': s['energy'], 'Duration': s['duration'], 'Peak_Value': peak[idx]})
                 df_polar = pd.DataFrame(rows)
                 
-                # Optional warning for degenerate energy range
                 if df_polar['Energy'].nunique() <= 1:
                     st.info("All loaded simulations use the same energy. The polar chart will show a collapsed angular axis.")
                 
                 query_params = st.session_state.polar_query if show_target and st.session_state.get('polar_query') else None
-                fig_polar = st.session_state.polar_viz.create_polar_radar_chart(df_polar, field_type, query_params, timestep=t_step)
-                st.plotly_chart(fig_polar, use_container_width=True)
+                fig_polar = st.session_state.visualizer.create_polar_radar_chart(df_polar, field_type, query_params, timestep=t_step)
+                st.plotly_chart(fig_polar, width="stretch")
                 
-                # Create multiple timesteps side-by-side if requested
                 if st.checkbox("Show Multiple Timesteps (1, 3, 5)"):
                     c1, c2, c3 = st.columns(3)
                     for col, t_idx in zip([c1, c2, c3], [1, 3, 5]):
@@ -863,9 +789,9 @@ def main():
                                 if t_idx <= len(s['timesteps']):
                                     peak_t = s['field_stats'].get(field_type, {}).get('max', [0])
                                     if t_idx-1 < len(peak_t): rows_t.append({'Name': s['name'], 'Energy': s['energy'], 'Duration': s['duration'], 'Peak_Value': peak_t[t_idx-1]})
-                            fig_t = st.session_state.polar_viz.create_polar_radar_chart(pd.DataFrame(rows_t), field_type, query_params, timestep=t_idx, width=300, height=300)
-                            with col: st.plotly_chart(fig_t, use_container_width=True)
-
+                            fig_t = st.session_state.visualizer.create_polar_radar_chart(pd.DataFrame(rows_t), field_type, query_params, timestep=t_idx, width=300, height=300)
+                            with col: st.plotly_chart(fig_t, width="stretch")
+        
         # --- TAB 4: Sankey Diagram ---
         with tabs[3]:
             st.subheader("ST-DGPA Sankey Diagram")
@@ -874,23 +800,19 @@ def main():
                 params = st.session_state.interpolation_params
                 q_E = params['energy_query']; q_τ = params['duration_query']
                 
-                # Select Timestep for Sankey
                 t_sel = st.slider("Select Timestep for Sankey", 1, len(res['attention_maps']), 1)
                 t_idx = t_sel - 1
                 
-                # Prepare sources data for Sankey
                 sources_data = []
                 weights = res['attention_maps'][t_idx]
                 phys_att = res['physics_attention_maps'][t_idx]
                 gating = res['ett_gating_maps'][t_idx]
                 
-                # Map weights back to sources
                 for i in range(len(st.session_state.summaries)):
-                    # Find matching metadata
                     meta = st.session_state.extrapolator.source_metadata[i]
                     if meta['timestep_idx'] == t_idx:
                         sources_data.append({
-                            'Energy': meta['energy'], 'Duration': meta['duration'], 'Time': meta['time'],
+                            'Name': meta['name'], 'Energy': meta['energy'], 'Duration': meta['duration'], 'Time': meta['time'],
                             'Attention_Score': phys_att[i], 'Gating': gating[i],
                             'Refinement': phys_att[i] * gating[i], 'Combined_Weight': weights[i]
                         })
@@ -898,23 +820,27 @@ def main():
                 if sources_data:
                     query = {'Energy': q_E, 'Duration': q_τ, 'Time': t_sel}
                     customization = {'font_size': 11, 'node_thickness': 15}
-                    fig_sankey = st.session_state.sankey_viz.create_stdgpa_sankey(sources_data, query, customization)
-                    st.plotly_chart(fig_sankey, use_container_width=True)
+                    fig_sankey = st.session_state.visualizer.create_stdgpa_sankey(sources_data, query, customization)
+                    st.plotly_chart(fig_sankey, width="stretch")
                     st.info("Hover over flows to see mathematical formulas and weight breakdown.")
                 else:
                     st.warning("No source data matches the selected timestep. Try a different timestep.")
             else:
                 st.info("Please run an interpolation first to see the Sankey diagram.")
-
+        
         # --- TAB 5: ST-DGPA Analysis ---
         with tabs[4]:
             st.subheader("ST-DGPA Attention & Physics Analysis")
             if st.session_state.interpolation_results and st.session_state.get('interpolation_params'):
                 res = st.session_state.interpolation_results
                 params = st.session_state.interpolation_params
-                fig_stdgpa = st.session_state.enhanced_viz.create_stdgpa_analysis(res, params['energy_query'], params['duration_query'], params['time_points'])
-                if fig_stdgpa: st.plotly_chart(fig_stdgpa, use_container_width=True)
-                else: st.info("No attention data available.")
+                # Simple attention visualization
+                t_idx = st.slider("Analysis Timestep", 0, len(res['attention_maps'])-1, 0)
+                weights = res['attention_maps'][t_idx]
+                if len(weights) > 0:
+                    fig = go.Figure(data=go.Bar(x=list(range(len(weights))), y=weights))
+                    fig.update_layout(title=f"ST-DGPA Weights at t={params['time_points'][t_idx]} ns", xaxis_title="Source Index", yaxis_title="Weight")
+                    st.plotly_chart(fig, width="stretch")
             else:
                 st.info("Please run an interpolation first.")
     else:
