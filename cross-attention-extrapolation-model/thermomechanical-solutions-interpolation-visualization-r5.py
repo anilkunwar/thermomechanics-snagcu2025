@@ -401,16 +401,17 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
 # =============================================
 # 4. POLAR RADAR VISUALIZER (unchanged)
 # =============================================
+#
 class PolarRadarVisualizer:
     """Creates polar radar charts with Energy (angular), Pulse Width (radial), and Peak Value (color/size)"""
     def __init__(self):
         self.color_scale_temp = 'Inferno'
         self.color_scale_stress = 'Plasma'
         self.target_symbol = 'star-diamond'
-        self.target_color = '#00FF7F' # Bright green for target
-        
-    def create_polar_radar_chart(self, df: pd.DataFrame, field_type: str = 'temperature', 
-                                query_params: Optional[Dict] = None, 
+        self.target_color = '#00FF7F'
+
+    def create_polar_radar_chart(self, df: pd.DataFrame, field_type: str = 'temperature',
+                                query_params: Optional[Dict] = None,
                                 timestep: int = 1,
                                 width: int = 800, height: int = 700) -> go.Figure:
         """
@@ -421,19 +422,26 @@ class PolarRadarVisualizer:
         """
         if df.empty:
             return go.Figure().update_layout(title="No data available")
-            
-        # Extract parameters
-        energies = df['Energy'].values
-        durations = df['Duration'].values
-        peak_values = df['Peak_Value'].values
+
+        # Extract parameters, ensure numeric and finite
+        energies = pd.to_numeric(df['Energy'], errors='coerce').dropna().values
+        durations = pd.to_numeric(df['Duration'], errors='coerce').dropna().values
+        peak_values = pd.to_numeric(df['Peak_Value'], errors='coerce').dropna().values
         sim_names = df.get('Name', [f"Sim {i}" for i in range(len(df))]).tolist()
-        
+
+        if len(energies) == 0:
+            return go.Figure().update_layout(title="No valid numeric data")
+
         # Normalize Energy to Angular Axis (0 to 2*pi)
-        e_min, e_max = energies.min(), energies.max()
+        e_min, e_max = np.nanmin(energies), np.nanmax(energies)
         e_range = e_max - e_min if e_max > e_min else 1.0
+        # Protect against division by zero or extreme values
+        if not np.isfinite(e_range) or e_range == 0:
+            e_range = 1.0
+
         angles_rad = 2 * np.pi * (energies - e_min) / e_range
         angles_deg = np.degrees(angles_rad)
-        
+
         # Prepare hover text
         hover_text = []
         for i in range(len(df)):
@@ -444,21 +452,21 @@ class PolarRadarVisualizer:
                 f"Duration: {durations[i]:.2f} ns<br>"
                 f"Peak {field_type.capitalize()}: {peak_values[i]:.3f}"
             )
-            
+
         # Determine color scale
         c_scale = self.color_scale_temp if 'temp' in field_type.lower() else self.color_scale_stress
         title_field = "Peak Temperature (K)" if 'temp' in field_type.lower() else "Peak von Mises Stress (MPa)"
-        
+
         # Create Figure
         fig = go.Figure()
-        
+
         # Source simulations scatter
         fig.add_trace(go.Scatterpolar(
             r=durations,
             theta=angles_deg,
             mode='markers',
             marker=dict(
-                size=10 + (peak_values - peak_values.min()) / (peak_values.max() - peak_values.min() + 1e-6) * 20,
+                size=10 + (peak_values - np.min(peak_values)) / (np.max(peak_values) - np.min(peak_values) + 1e-6) * 20,
                 color=peak_values,
                 colorscale=c_scale,
                 colorbar=dict(title=title_field, thickness=20),
@@ -469,16 +477,14 @@ class PolarRadarVisualizer:
             name='Source Simulations',
             opacity=0.85
         ))
-        
+
         # Add Target Query Point if provided
         if query_params:
             q_e = query_params.get('Energy', None)
             q_d = query_params.get('Duration', None)
-            if q_e is not None and q_d is not None:
-                # Interpolate angular position for query
+            if q_e is not None and q_d is not None and np.isfinite(q_e) and np.isfinite(q_d):
                 q_angle_rad = 2 * np.pi * (q_e - e_min) / e_range
                 q_angle_deg = np.degrees(q_angle_rad)
-                
                 fig.add_trace(go.Scatterpolar(
                     r=[q_d],
                     theta=[q_angle_deg],
@@ -492,41 +498,73 @@ class PolarRadarVisualizer:
                     name='Target Query',
                     hovertemplate=f"<b>Target Query</b><br>Energy: {q_e:.2f} mJ<br>Duration: {q_d:.2f} ns<extra></extra>"
                 ))
-        
-        # Layout
-        fig.update_layout(
-            title=dict(
-                text=f"Polar Radar: {title_field} at t={timestep} ns",
-                font=dict(size=18),
-                x=0.5
+
+        # Build polar layout safely
+        polar_layout = dict(
+            radialaxis=dict(
+                visible=True,
+                title="Pulse Duration (ns)",
+                gridcolor="lightgray",
+                tickfont=dict(size=12)
             ),
-            polar=dict(
-                radialaxis=dict(
-                    visible=True,
-                    title="Pulse Duration (ns)",
-                    gridcolor="lightgray",
-                    tickfont=dict(size=12)
-                ),
-                angularaxis=dict(
-                    visible=True,
-                    title="Energy (mJ)",
-                    direction="clockwise",
-                    rotation=90, # Start from top
-                    gridcolor="lightgray",
-                    tickfont=dict(size=12),
-                    # Custom tickvals to show energy labels
-                    tickvals=[np.degrees(2*np.pi * (v - e_min)/e_range) for v in np.linspace(e_min, e_max, 6)],
-                    ticktext=[f"{v:.1f}" for v in np.linspace(e_min, e_max, 6)]
-                ),
-                bgcolor="white"
+            angularaxis=dict(
+                visible=True,
+                title="Energy (mJ)",
+                direction="clockwise",
+                rotation=90,
+                gridcolor="lightgray",
+                tickfont=dict(size=12)
             ),
-            width=width,
-            height=height,
-            showlegend=True,
-            margin=dict(l=50, r=50, t=50, b=50),
-            hovermode='closest'
+            bgcolor="white"
         )
+
+        # Add custom tick labels only if the energy range is valid and not degenerate
+        if e_range > 1e-6 and np.isfinite(e_min) and np.isfinite(e_max):
+            try:
+                tick_angles = []
+                tick_texts = []
+                for v in np.linspace(e_min, e_max, 6):
+                    angle_rad = 2 * np.pi * (v - e_min) / e_range
+                    angle_deg = np.degrees(angle_rad)
+                    if 0 <= angle_deg <= 360:
+                        tick_angles.append(angle_deg)
+                        tick_texts.append(f"{v:.1f}")
+                if tick_angles:
+                    polar_layout['angularaxis']['tickvals'] = tick_angles
+                    polar_layout['angularaxis']['ticktext'] = tick_texts
+            except Exception:
+                # If anything fails, skip custom ticks
+                pass
+
+        # Apply layout with error fallback
+        try:
+            fig.update_layout(
+                title=dict(
+                    text=f"Polar Radar: {title_field} at t={timestep} ns",
+                    font=dict(size=18),
+                    x=0.5
+                ),
+                polar=polar_layout,
+                width=width,
+                height=height,
+                showlegend=True,
+                margin=dict(l=50, r=50, t=50, b=50),
+                hovermode='closest'
+            )
+        except Exception as e:
+            # Fallback: minimal layout without polar customizations
+            st.warning(f"Polar layout error, using fallback: {str(e)}")
+            fig.update_layout(
+                title=f"Polar Radar: {title_field} at t={timestep} ns",
+                width=width,
+                height=height,
+                showlegend=True,
+                margin=dict(l=50, r=50, t=50, b=50)
+            )
+
         return fig
+                                    
+
 
 # =============================================
 # 5. SANKEY VISUALIZER (unchanged)
