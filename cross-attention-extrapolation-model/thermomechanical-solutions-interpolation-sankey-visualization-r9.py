@@ -3,9 +3,10 @@
 """
 ENHANCED FEA LASER SIMULATION PLATFORM WITH ST-DGPA & CUSTOMIZABLE SANKEY DIAGRAM
 ====================================================================
-🔧 FIXED: Streamlit color_picker now uses hex codes only
+🔧 FIXED: Streamlit session state conflict resolved - no manual assignment after keyed widgets
 🔧 ENHANCED: Hex-to-rgba converter for Plotly Sankey compatibility
-🔧 ENHANCED: Alpha/opacity slider for link transparency control
+🔧 ENHANCED: Alpha slider for link transparency control
+🔧 ENHANCED: Input validation and graceful fallbacks
 """
 import streamlit as st
 import os
@@ -33,7 +34,7 @@ import hashlib
 import pickle
 from functools import lru_cache
 from collections import OrderedDict
-import re as regex  # Avoid conflict with 're' module
+import re as regex
 warnings.filterwarnings('ignore')
 
 # =============================================
@@ -46,7 +47,7 @@ os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 SOURCE_REGISTRY = {}
 
 # =============================================
-# 🔧 NEW: COLOR UTILITIES FOR SANKEY COMPATIBILITY
+# 🔧 COLOR UTILITIES FOR SANKEY COMPATIBILITY
 # =============================================
 class ColorUtils:
     """Utility functions for color format conversion between Streamlit and Plotly."""
@@ -63,23 +64,19 @@ class ColorUtils:
         Returns:
             rgba string: "rgba(r, g, b, alpha)"
         """
-        # Remove # if present and ensure 6-char hex
         hex_color = hex_color.lstrip('#')
-        if len(hex_color) == 3:  # Expand shorthand #RGB to #RRGGBB
+        if len(hex_color) == 3:
             hex_color = ''.join([c*2 for c in hex_color])
         if len(hex_color) != 6:
-            # Fallback to default green if invalid
             hex_color = "2ecc71"
         
         try:
             r = int(hex_color[0:2], 16)
             g = int(hex_color[2:4], 16)
             b = int(hex_color[4:6], 16)
-            # Clamp alpha to valid range
             alpha = max(0.0, min(1.0, alpha))
             return f"rgba({r}, {g}, {b}, {alpha:.2f})"
         except (ValueError, IndexError):
-            # Return safe fallback
             return f"rgba(46, 204, 113, {alpha:.2f})"
     
     @staticmethod
@@ -780,7 +777,6 @@ class EnhancedVisualizer:
         top_gating = ett_gating[top_indices]
         top_temporal = temporal_sim[top_indices] if temporal_sim is not None else np.ones_like(top_weights) * 0.5
         
-        # Build labels
         labels = []
         if custom_labels and 'target' in custom_labels:
             labels.append(custom_labels['target'])
@@ -808,41 +804,32 @@ class EnhancedVisualizer:
         
         source_idx, target_idx, values, link_colors_list = [], [], [], []
         
-        # 🔧 FIXED: Default hex colors with alpha values for conversion
-        default_link_hex = ["#2ecc71", "#e74c3c", "#3498db", "#9b59b6"]  # Green, Red, Blue, Purple
+        default_link_hex = ["#2ecc71", "#e74c3c", "#3498db", "#9b59b6"]
         default_link_alpha = [0.85, 0.85, 0.85, 0.90]
         
-        # Use user-provided or defaults
         link_hex = link_colors_hex if link_colors_hex else default_link_hex
         link_alpha = link_alphas if link_alphas else default_link_alpha
         
-        # Ensure lists are properly sized
         while len(link_hex) < 4:
             link_hex.append(default_link_hex[len(link_hex) % len(default_link_hex)])
         while len(link_alpha) < 4:
             link_alpha.append(default_link_alpha[len(link_alpha) % len(default_link_alpha)])
         
-        # Connect source nodes to component nodes with rgba conversion
         for i, src_idx in enumerate(top_indices):
             s_node = i + 1
-            # Physics attention flow
             source_idx.append(s_node); target_idx.append(component_start)
             values.append(top_physics[i] * 100)
             link_colors_list.append(ColorUtils.hex_to_rgba(link_hex[0], link_alpha[0]))
-            # Gating flow
             source_idx.append(s_node); target_idx.append(component_start + 1)
             values.append(top_gating[i] * 100)
             link_colors_list.append(ColorUtils.hex_to_rgba(link_hex[1], link_alpha[1]))
-            # Temporal similarity flow
             source_idx.append(s_node); target_idx.append(component_start + 2)
             values.append(top_temporal[i] * 100)
             link_colors_list.append(ColorUtils.hex_to_rgba(link_hex[2], link_alpha[2]))
-            # Final ST-DGPA weight flow
             source_idx.append(s_node); target_idx.append(component_start + 3)
             values.append(top_weights[i] * 100)
             link_colors_list.append(ColorUtils.hex_to_rgba(link_hex[3], link_alpha[3]))
 
-        # Connect component nodes to target
         for c in range(4):
             comp_node = component_start + c
             agg_value = sum(v for s, t, v in zip(source_idx, target_idx, values) if t == comp_node)
@@ -851,7 +838,6 @@ class EnhancedVisualizer:
                 values.append(agg_value * 0.6)
                 link_colors_list.append("rgba(149, 165, 166, 0.7)")
 
-        # Node colors (these can stay as hex - Plotly Sankey accepts hex for nodes)
         default_node_colors = ["#FF6B6B"] + ["#9b59b6"] * len(top_indices) + ["#2ecc71", "#e74c3c", "#3498db", "#9b59b6"]
         if node_colors and isinstance(node_colors, list):
             node_colors_final = [ColorUtils.get_safe_color(c) for c in node_colors[:len(labels)]]
@@ -1227,7 +1213,7 @@ def render_prediction_results(results, time_points, energy_query, duration_query
         st.plotly_chart(fig_conf, use_container_width=True)
 
 def render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points):
-    """🔧 FIXED: Sankey customization with hex colors only for Streamlit compatibility."""
+    """🔧 FIXED: Sankey customization with proper Streamlit session state handling."""
     if not results.get('physics_attention_maps') or len(results['physics_attention_maps'][0]) == 0:
         st.info("No ST-DGPA attention data available.")
         return
@@ -1267,21 +1253,19 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             query_meta, st.session_state.extrapolator.source_metadata
         )
 
-    # 🔧 FIXED: Sankey Customization Panel with HEX COLORS ONLY
+    # 🔧 FIXED: Sankey Customization Panel with proper session state handling
     with st.expander("🎨 Customize Sankey Diagram", expanded=False):
         st.info("💡 **Note**: Color pickers use hex codes (#RRGGBB). Opacity is controlled separately.")
         
         st.markdown("##### ✏️ Edit Node Labels")
         
-        if 'sankey_custom_labels' not in st.session_state:
-            st.session_state.sankey_custom_labels = {}
-        
+        # Access session state directly - Streamlit manages it via keys
         target_label = st.text_input(
             "Target Query Label", 
             value=st.session_state.sankey_custom_labels.get('target', "🔮 Target Query"),
             key="custom_target_label"
         )
-        st.session_state.sankey_custom_labels['target'] = target_label
+        # 🔧 FIXED: NO manual assignment - Streamlit handles via key
         
         st.markdown("**Source Node Labels** (edit individual entries):")
         top_indices = np.argsort(final_weights)[-top_k:][::-1]
@@ -1292,7 +1276,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             custom_key = f'source_{i}'
             current_val = st.session_state.sankey_custom_labels.get(custom_key, default_label)
             new_val = st.text_input(f"Source {i+1} Label", value=current_val, key=f"custom_source_{i}_label")
-            st.session_state.sankey_custom_labels[custom_key] = new_val
+            # 🔧 FIXED: NO manual assignment - Streamlit handles via key
         
         st.markdown("**Component Node Labels**:")
         comp_cols = st.columns(2)
@@ -1304,7 +1288,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                 val = st.text_input(f"{ckey.title()} Label", 
                                    value=st.session_state.sankey_custom_labels.get(ckey, cdefault),
                                    key=f"custom_comp_{ckey}")
-                st.session_state.sankey_custom_labels[ckey] = val
+                # 🔧 FIXED: NO manual assignment
         
         st.markdown("---")
         st.markdown("##### 🔤 Font & Typography")
@@ -1349,17 +1333,21 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         orientation = st.radio("Orientation", ['h', 'v'], horizontal=True, key="sankey_orientation", 
                               format_func=lambda x: "Horizontal" if x == 'h' else "Vertical")
         
+        # 🔧 FIXED: Hover template - NO manual session state assignment after widget
         hover_template = st.text_area(
             "Custom Hover Template (Plotly format)",
-            value=st.session_state.get('sankey_hover_template', '<b>%{label}</b><br>Weight: %{value:.2f}<extra></extra>'),
+            value=st.session_state.sankey_hover_template,
             key="sankey_hover_template",
             help="Use Plotly variables: %{label}, %{value}, %{source.label}, %{target.label}"
         )
-        st.session_state.sankey_hover_template = hover_template
+        # 🔧 REMOVED: st.session_state.sankey_hover_template = hover_template
         
-        # Reset button
+        # Reset button - properly reset both custom labels and hover template
         if st.button("🔄 Reset to Defaults", key="sankey_reset"):
             st.session_state.sankey_custom_labels = {}
+            st.session_state.sankey_hover_template = (
+                '<b>%{label}</b><br>Weight: %{value:.2f}<extra></extra>'
+            )
             st.rerun()
     
     # Build customization dict for Sankey creation
@@ -1377,13 +1365,12 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         ett_gating=ett_gating, 
         temporal_sim=temporal_sim, 
         top_k=top_k,
-        # Customization parameters
         custom_labels=custom_labels,
         font_size=font_size,
         font_family=font_family,
         node_colors=node_colors_list,
-        link_colors_hex=link_hex_list,  # 🔧 Hex colors for Streamlit
-        link_alphas=link_alpha_list,     # 🔧 Separate alpha values
+        link_colors_hex=link_hex_list,
+        link_alphas=link_alpha_list,
         node_pad=node_pad,
         node_thickness=node_thickness,
         show_values=show_values,
