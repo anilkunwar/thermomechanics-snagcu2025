@@ -114,7 +114,7 @@ class CacheManager:
             st.session_state.interpolation_field_history.popitem(last=False)
 
 # =============================================
-# 2. UNIFIED DATA LOADER (IMPROVED)
+# 2. UNIFIED DATA LOADER
 # =============================================
 class UnifiedFEADataLoader:
     def __init__(self):
@@ -224,7 +224,7 @@ class UnifiedFEADataLoader:
         return summary
 
 # =============================================
-# 3. ST-DGPA EXTRAPOLATOR (unchanged)
+# 3. ST-DGPA EXTRAPOLATOR
 # =============================================
 class SpatioTemporalGatedPhysicsAttentionExtrapolator:
     def __init__(self, sigma_param=0.3, spatial_weight=0.5, n_heads=4, temperature=1.0,
@@ -399,9 +399,8 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         except Exception as e: st.error(f"Error exporting VTU: {str(e)}"); return False
 
 # =============================================
-# 4. POLAR RADAR VISUALIZER (unchanged)
+# 4. POLAR RADAR VISUALIZER (FIXED)
 # =============================================
-#
 class PolarRadarVisualizer:
     """Creates polar radar charts with Energy (angular), Pulse Width (radial), and Peak Value (color/size)"""
     def __init__(self):
@@ -499,7 +498,7 @@ class PolarRadarVisualizer:
                     hovertemplate=f"<b>Target Query</b><br>Energy: {q_e:.2f} mJ<br>Duration: {q_d:.2f} ns<extra></extra>"
                 ))
 
-        # Build polar layout safely
+        # Build polar layout with robust tick handling
         polar_layout = dict(
             radialaxis=dict(
                 visible=True,
@@ -563,11 +562,9 @@ class PolarRadarVisualizer:
             )
 
         return fig
-                                    
-
 
 # =============================================
-# 5. SANKEY VISUALIZER (unchanged)
+# 5. SANKEY VISUALIZER
 # =============================================
 class SankeyVisualizer:
     def __init__(self):
@@ -672,7 +669,7 @@ class SankeyVisualizer:
         return fig
 
 # =============================================
-# 6. ENHANCED VISUALIZER (unchanged)
+# 6. ENHANCED VISUALIZER
 # =============================================
 class EnhancedVisualizer:
     @staticmethod
@@ -705,7 +702,7 @@ class EnhancedVisualizer:
         return fig
 
 # =============================================
-# 7. MAIN APPLICATION (FIXED 3D VIEWER)
+# 7. MAIN APPLICATION
 # =============================================
 def main():
     st.set_page_config(page_title="Laser Soldering ST-DGPA Platform", layout="wide", initial_sidebar_state="expanded")
@@ -764,17 +761,12 @@ def main():
                 timestep = st.slider("Timestep", 0, sim['n_timesteps']-1, 0)
                 if sim['points'] is not None and field in sim['fields']:
                     values = sim['fields'][field][timestep].copy()
-                    # ----- FIX: Robust conversion of vector/tensor fields to scalar intensity -----
+                    # Convert vector/tensor fields to scalar intensity
                     if values.ndim >= 2:
-                        # Take Euclidean norm over all axes except the first (points axis)
-                        # For vector: shape (n_points, 3) -> norm over axis=1
-                        # For higher tensors: norm over all axes starting from 1
                         norm_axes = tuple(range(1, values.ndim))
                         values = np.linalg.norm(values, axis=norm_axes)
-                    # values is now 1D scalar per point; handle NaNs
                     values = np.nan_to_num(values, nan=0.0)
                     
-                    # Create 3D mesh plot
                     fig = go.Figure(go.Mesh3d(
                         x=sim['points'][:,0], y=sim['points'][:,1], z=sim['points'][:,2],
                         i=sim['triangles'][:,0], j=sim['triangles'][:,1], k=sim['triangles'][:,2],
@@ -838,6 +830,10 @@ def main():
                         if idx < len(peak):
                             rows.append({'Name': s['name'], 'Energy': s['energy'], 'Duration': s['duration'], 'Peak_Value': peak[idx]})
                 df_polar = pd.DataFrame(rows)
+                
+                # Optional warning for degenerate energy range
+                if df_polar['Energy'].nunique() <= 1:
+                    st.info("All loaded simulations use the same energy. The polar chart will show a collapsed angular axis.")
                 
                 query_params = st.session_state.polar_query if show_target and st.session_state.get('polar_query') else None
                 fig_polar = st.session_state.polar_viz.create_polar_radar_chart(df_polar, field_type, query_params, timestep=t_step)
