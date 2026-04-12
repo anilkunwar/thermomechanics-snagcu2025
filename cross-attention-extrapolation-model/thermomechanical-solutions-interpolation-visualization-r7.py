@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ENHANCED LASER SOLDERING ST-DGPA PLATFORM WITH POLAR RADAR & 3D VISUALIZATION
-================================================================================
+ENHANCED LASER SOLDERING ST-DGPA PLATFORM WITH POLAR RADAR VISUALIZATION
+=========================================================================
 Complete integrated application for:
 - FEA laser soldering simulation loading from VTU files
 - ST-DGPA (Spatio-Temporal Gated Physics Attention) interpolation/extrapolation
-- Polar Radar Charts: Energy (angular) × Pulse Duration (radial) × Peak T/Stress
-- 3D mesh visualization with caching
+- Enhanced Polar Radar Charts: Energy (angular) × Pulse Duration (radial) × Peak T/Stress
+- Interactive 3D mesh visualization with caching
 - Robust error handling, session state management, and UI controls
-- NEW: Export functionality, advanced filtering, responsive design
-- IMPROVED: Polar radar with full customization and target query color matching
+- Export functionality, advanced filtering, responsive design
+- NEW: Enhanced radar plot with styling controls, consistent coloring, proper scaling
 """
 
 import streamlit as st
@@ -296,8 +296,7 @@ class UnifiedFEADataLoader:
         
         return simulations, summaries
     
-    def extract_summary_statistics(self, vtu_files: List[str], energy: float, 
-                                duration: float, name: str) -> Dict:
+    def extract_summary_statistics(self, vtu_files, energy, duration, name):
         """Extract comprehensive summary statistics from VTU files"""
         summary = {
             'name': name,
@@ -310,7 +309,8 @@ class UnifiedFEADataLoader:
         for idx, vtu_file in enumerate(vtu_files):
             try:
                 mesh = meshio.read(vtu_file)
-                summary['timesteps'].append(idx + 1)
+                timestep = idx + 1
+                summary['timesteps'].append(timestep)
                 
                 for field_name in mesh.point_data.keys():
                     data = mesh.point_data[field_name]
@@ -318,29 +318,44 @@ class UnifiedFEADataLoader:
                     if field_name not in summary['field_stats']:
                         summary['field_stats'][field_name] = {
                             'min': [], 'max': [], 'mean': [], 'std': [],
-                            'q25': [], 'q50': [], 'q75': []
+                            'q25': [], 'q50': [], 'q75': [], 'percentiles': []
                         }
                     
-                    # Convert vector/tensor fields to magnitude for statistics
+                    # Handle scalar vs vector fields
                     if data.ndim == 1:
                         clean_data = data[~np.isnan(data)]
+                        if clean_data.size > 0:
+                            summary['field_stats'][field_name]['min'].append(float(np.min(clean_data)))
+                            summary['field_stats'][field_name]['max'].append(float(np.max(clean_data)))
+                            summary['field_stats'][field_name]['mean'].append(float(np.mean(clean_data)))
+                            summary['field_stats'][field_name]['std'].append(float(np.std(clean_data)))
+                            summary['field_stats'][field_name]['q25'].append(float(np.percentile(clean_data, 25)))
+                            summary['field_stats'][field_name]['q50'].append(float(np.percentile(clean_data, 50)))
+                            summary['field_stats'][field_name]['q75'].append(float(np.percentile(clean_data, 75)))
+                            percentiles = np.percentile(clean_data, [10, 25, 50, 75, 90])
+                            summary['field_stats'][field_name]['percentiles'].append(percentiles)
+                        else:
+                            for key in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']:
+                                summary['field_stats'][field_name][key].append(0.0)
+                            summary['field_stats'][field_name]['percentiles'].append(np.zeros(5))
                     else:
-                        # Take Euclidean norm over component axes
-                        mag = np.linalg.norm(data, axis=1)
-                        clean_data = mag[~np.isnan(mag)]
-                    
-                    if clean_data.size > 0:
-                        summary['field_stats'][field_name]['min'].append(float(np.min(clean_data)))
-                        summary['field_stats'][field_name]['max'].append(float(np.max(clean_data)))
-                        summary['field_stats'][field_name]['mean'].append(float(np.mean(clean_data)))
-                        summary['field_stats'][field_name]['std'].append(float(np.std(clean_data)))
-                        summary['field_stats'][field_name]['q25'].append(float(np.percentile(clean_data, 25)))
-                        summary['field_stats'][field_name]['q50'].append(float(np.percentile(clean_data, 50)))
-                        summary['field_stats'][field_name]['q75'].append(float(np.percentile(clean_data, 75)))
-                    else:
-                        # Fill with zeros if no valid data
-                        for key in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']:
-                            summary['field_stats'][field_name][key].append(0.0)
+                        # Vector field - compute magnitude statistics
+                        magnitude = np.linalg.norm(data, axis=1)
+                        clean_mag = magnitude[~np.isnan(magnitude)]
+                        if clean_mag.size > 0:
+                            summary['field_stats'][field_name]['min'].append(float(np.min(clean_mag)))
+                            summary['field_stats'][field_name]['max'].append(float(np.max(clean_mag)))
+                            summary['field_stats'][field_name]['mean'].append(float(np.mean(clean_mag)))
+                            summary['field_stats'][field_name]['std'].append(float(np.std(clean_mag)))
+                            summary['field_stats'][field_name]['q25'].append(float(np.percentile(clean_mag, 25)))
+                            summary['field_stats'][field_name]['q50'].append(float(np.percentile(clean_mag, 50)))
+                            summary['field_stats'][field_name]['q75'].append(float(np.percentile(clean_mag, 75)))
+                            percentiles = np.percentile(clean_mag, [10, 25, 50, 75, 90])
+                            summary['field_stats'][field_name]['percentiles'].append(percentiles)
+                        else:
+                            for key in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']:
+                                summary['field_stats'][field_name][key].append(0.0)
+                            summary['field_stats'][field_name]['percentiles'].append(np.zeros(5))
                             
             except Exception as e:
                 st.warning(f"Error processing {vtu_file}: {e}")
@@ -350,46 +365,40 @@ class UnifiedFEADataLoader:
     
     def get_field_range(self, field_name: str, simulations: Dict) -> Tuple[float, float]:
         """Get global min/max for a field across all simulations"""
-        all_mins, all_maxs = [], []
+        min_val, max_val = np.inf, -np.inf
         for sim in simulations.values():
-            if field_name in sim.get('field_stats', {}):
-                stats = sim['field_stats'][field_name]
-                if stats['min']:
-                    all_mins.extend(stats['min'])
-                    all_maxs.extend(stats['max'])
-        if all_mins and all_maxs:
-            return min(all_mins), max(all_maxs)
-        return 0.0, 1.0
+            if 'fields' in sim and field_name in sim['fields']:
+                field_data = sim['fields'][field_name]
+                if field_data.ndim == 1:
+                    valid = field_data[~np.isnan(field_data)]
+                else:
+                    valid = np.linalg.norm(field_data, axis=-1)
+                    valid = valid[~np.isnan(valid)]
+                if valid.size > 0:
+                    min_val = min(min_val, np.min(valid))
+                    max_val = max(max_val, np.max(valid))
+        return (min_val if min_val != np.inf else 0, max_val if max_val != -np.inf else 1)
 
 # =============================================
-# 3. ST-DGPA EXTRAPOLATOR
+# 3. SPATIO-TEMPORAL GATED PHYSICS ATTENTION (ST-DGPA)
 # =============================================
 class SpatioTemporalGatedPhysicsAttentionExtrapolator:
-    """Advanced extrapolator with Spatio-Temporal Gated Physics Attention (ST-DGPA)"""
+    """Advanced extrapolator with Spatio-Temporal Gated Physics Attention"""
     
-    def __init__(self, sigma_param: float = 0.3, spatial_weight: float = 0.5,
-                 n_heads: int = 4, temperature: float = 1.0,
-                 sigma_g: float = 0.20, s_E: float = 10.0, s_tau: float = 5.0,
-                 s_t: float = 20.0, temporal_weight: float = 0.3):
-        # Core attention parameters
+    def __init__(self, sigma_param=0.3, spatial_weight=0.5, n_heads=4, temperature=1.0,
+                 sigma_g=0.20, s_E=10.0, s_tau=5.0, s_t=20.0, temporal_weight=0.3):
         self.sigma_param = sigma_param
         self.spatial_weight = spatial_weight
         self.n_heads = n_heads
         self.temperature = temperature
-        
-        # ST-DGPA specific gating parameters
-        self.sigma_g = sigma_g      # Gating kernel width
-        self.s_E = s_E              # Energy scaling factor (mJ)
-        self.s_tau = s_tau          # Duration scaling factor (ns)
-        self.s_t = s_t              # Time scaling factor (ns)
-        self.temporal_weight = temporal_weight  # Weight for temporal similarity
-        
-        # Physics parameters for heat transfer characterization
-        self.thermal_diffusivity = 1e-5      # m²/s, typical for metals
-        self.laser_spot_radius = 50e-6       # m, typical laser spot size
-        self.characteristic_length = 100e-6  # m, characteristic length for heat diffusion
-        
-        # Data containers
+        self.sigma_g = sigma_g
+        self.s_E = s_E
+        self.s_tau = s_tau
+        self.s_t = s_t
+        self.temporal_weight = temporal_weight
+        self.thermal_diffusivity = 1e-5
+        self.laser_spot_radius = 50e-6
+        self.characteristic_length = 100e-6
         self.source_db = []
         self.embedding_scaler = StandardScaler()
         self.value_scaler = StandardScaler()
@@ -398,7 +407,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         self.source_metadata = []
         self.fitted = False
     
-    def load_summaries(self, summaries: List[Dict]):
+    def load_summaries(self, summaries):
         """Load summary statistics and prepare for attention mechanism"""
         self.source_db = summaries
         if not summaries:
@@ -408,13 +417,11 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         
         for summary_idx, summary in enumerate(summaries):
             for timestep_idx, t in enumerate(summary['timesteps']):
-                # Compute physics-aware embedding with enhanced temporal features
                 emb = self._compute_enhanced_physics_embedding(
                     summary['energy'], summary['duration'], t
                 )
                 all_embeddings.append(emb)
                 
-                # Extract field values (flattened) for prediction target
                 field_vals = []
                 for field in sorted(summary['field_stats'].keys()):
                     stats = summary['field_stats'][field]
@@ -428,7 +435,6 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
                         field_vals.extend([0.0, 0.0, 0.0])
                 all_values.append(field_vals)
                 
-                # Store metadata for spatial and temporal correlations
                 metadata.append({
                     'summary_idx': summary_idx,
                     'timestep_idx': timestep_idx,
@@ -443,54 +449,54 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         if all_embeddings and all_values:
             all_embeddings = np.array(all_embeddings)
             all_values = np.array(all_values)
-            
-            # Scale embeddings for stable attention computation
             self.embedding_scaler.fit(all_embeddings)
             self.source_embeddings = self.embedding_scaler.transform(all_embeddings)
-            
-            # Scale values for stable prediction
             self.value_scaler.fit(all_values)
             self.source_values = all_values
             self.source_metadata = metadata
             self.fitted = True
-            
             st.info(f"✅ Prepared {len(all_embeddings)} embeddings with {all_embeddings.shape[1]} features")
     
-    def _compute_fourier_number(self, time_ns: float) -> float:
+    def _compute_fourier_number(self, time_ns):
         """Compute Fourier number (Fo = αt/L²) for heat transfer characterization"""
-        time_s = time_ns * 1e-9  # Convert ns to s
+        time_s = time_ns * 1e-9
         return self.thermal_diffusivity * time_s / (self.characteristic_length ** 2)
     
-    def _compute_thermal_penetration(self, time_ns: float) -> float:
-        """Compute thermal penetration depth (δ ~ √(αt)) in micrometers"""
-        time_s = time_ns * 1e-9  # Convert ns to s
-        return np.sqrt(self.thermal_diffusivity * time_s) * 1e6  # Convert to μm
+    def _compute_thermal_penetration(self, time_ns):
+        """Compute thermal penetration depth (δ ~ √(αt))"""
+        time_s = time_ns * 1e-9
+        return np.sqrt(self.thermal_diffusivity * time_s) * 1e6
     
-    def _compute_enhanced_physics_embedding(self, energy: float, duration: float, time: float) -> np.ndarray:
+    def _compute_enhanced_physics_embedding(self, energy, duration, time):
         """Compute comprehensive physics-aware embedding with temporal features"""
-        # Basic physical parameters
         logE = np.log1p(energy)
         power = energy / max(duration, 1e-6)
+        energy_density = energy / (duration * duration + 1e-6)
         time_ratio = time / max(duration, 1e-3)
-        
-        # Heat transfer specific features
+        heating_rate = power / max(time, 1e-6)
+        cooling_rate = 1.0 / (time + 1e-6)
+        thermal_diffusion = np.sqrt(time * 0.1) / max(duration, 1e-3)
+        thermal_penetration = np.sqrt(time) / 10.0
+        strain_rate = energy_density / (time + 1e-6)
+        stress_rate = power / (time + 1e-6)
         fourier_number = self._compute_fourier_number(time)
-        thermal_penetration = self._compute_thermal_penetration(time)
-        
-        # Temporal phase indicators
+        thermal_penetration_depth = self._compute_thermal_penetration(time)
+        diffusion_time_scale = time / (duration + 1e-6)
         heating_phase = 1.0 if time < duration else 0.0
         cooling_phase = 1.0 if time >= duration else 0.0
+        early_time = 1.0 if time < duration * 0.5 else 0.0
+        late_time = 1.0 if time > duration * 2.0 else 0.0
         
-        # Combined features with enhanced temporal information
         return np.array([
-            logE, duration, time, power, time_ratio,
-            fourier_number, thermal_penetration,
-            heating_phase, cooling_phase,
-            np.log1p(power), np.log1p(time), np.sqrt(time)
+            logE, duration, time, power, energy_density, time_ratio,
+            heating_rate, cooling_rate, thermal_diffusion, thermal_penetration,
+            strain_rate, stress_rate, fourier_number, thermal_penetration_depth,
+            diffusion_time_scale, heating_phase, cooling_phase, early_time, late_time,
+            np.log1p(power), np.log1p(time), np.sqrt(time),
+            time / (duration + 1e-6)
         ], dtype=np.float32)
     
-    def _compute_ett_gating(self, energy_query: float, duration_query: float,
-                           time_query: float, source_metadata: Optional[List] = None) -> np.ndarray:
+    def _compute_ett_gating(self, energy_query, duration_query, time_query, source_metadata=None):
         """Compute the (E, τ, t) gating kernel for ST-DGPA"""
         if source_metadata is None:
             source_metadata = self.source_metadata
@@ -501,213 +507,24 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             dt = (duration_query - meta['duration']) / self.s_tau
             dtime = (time_query - meta['time']) / self.s_t
             
-            # Apply physics-aware temporal scaling for heat transfer
             if self.temporal_weight > 0:
-                # For heat transfer: early times need tighter temporal matching
                 time_scaling_factor = 1.0 + 0.5 * (time_query / max(duration_query, 1e-6))
-                dtime *= time_scaling_factor
+                dtime = dtime * time_scaling_factor
             
             phi_squared.append(de**2 + dt**2 + dtime**2)
         
         phi_squared = np.array(phi_squared)
         gating = np.exp(-phi_squared / (2 * self.sigma_g**2))
         
-        # Normalize gating weights
         gating_sum = np.sum(gating)
-        return gating / gating_sum if gating_sum > 0 else np.ones_like(gating) / len(gating)
-    
-    def _compute_temporal_similarity(self, query_meta: Dict, source_metas: List[Dict]) -> np.ndarray:
-        """Compute temporal similarity with physics-aware weighting for heat transfer"""
-        similarities = []
-        for meta in source_metas:
-            time_diff = abs(query_meta['time'] - meta['time'])
-            
-            # Physics-aware temporal similarity
-            if query_meta['time'] < query_meta['duration'] * 1.5:
-                # Tighter matching during heating phase
-                tolerance = max(query_meta['duration'] * 0.1, 1.0)
-            else:
-                # Looser matching during late cooling/diffusion phase
-                tolerance = max(query_meta['duration'] * 0.3, 3.0)
-            
-            # Fourier number similarity for heat transfer characterization
-            fourier_similarity = np.exp(
-                -abs(query_meta.get('fourier_number', 0) - meta.get('fourier_number', 0)) / 0.1
-            )
-            time_similarity = np.exp(-time_diff / tolerance)
-            
-            # Combine time difference and Fourier number similarity
-            similarities.append(
-                (1 - self.temporal_weight) * time_similarity +
-                self.temporal_weight * fourier_similarity
-            )
-        
-        return np.array(similarities)
-    
-    def _compute_spatial_similarity(self, query_meta: Dict, source_metas: List[Dict]) -> np.ndarray:
-        """Compute spatial similarity based on parameter proximity"""
-        similarities = []
-        for meta in source_metas:
-            e_diff = abs(query_meta['energy'] - meta['energy']) / 50.0
-            d_diff = abs(query_meta['duration'] - meta['duration']) / 20.0
-            total_diff = np.sqrt(e_diff**2 + d_diff**2)
-            similarities.append(np.exp(-total_diff / self.sigma_param))
-        return np.array(similarities)
-    
-    def _multi_head_attention_with_gating(self, query_embedding: np.ndarray,
-                                         query_meta: Dict) -> Tuple:
-        """Multi-head attention mechanism with ST-DGPA (Spatio-Temporal Gated Physics Attention)"""
-        if not self.fitted or len(self.source_embeddings) == 0:
-            return None, None, None, None
-        
-        # Normalize query embedding
-        query_norm = self.embedding_scaler.transform([query_embedding])[0]
-        n_sources = len(self.source_embeddings)
-        head_weights = np.zeros((self.n_heads, n_sources))
-        
-        # Multi-head attention
-        for head in range(self.n_heads):
-            np.random.seed(42 + head)  # Deterministic but different per head
-            proj_dim = min(8, query_norm.shape[0])
-            proj_matrix = np.random.randn(query_norm.shape[0], proj_dim)
-            
-            # Project embeddings
-            query_proj = query_norm @ proj_matrix
-            source_proj = self.source_embeddings @ proj_matrix
-            
-            # Compute attention scores
-            distances = np.linalg.norm(query_proj - source_proj, axis=1)
-            scores = np.exp(-distances**2 / (2 * self.sigma_param**2))
-            
-            # Apply spatial regulation if enabled
-            if self.spatial_weight > 0:
-                spatial_sim = self._compute_spatial_similarity(query_meta, self.source_metadata)
-                scores = (1 - self.spatial_weight) * scores + self.spatial_weight * spatial_sim
-            
-            # Apply temporal regulation if enabled
-            if self.temporal_weight > 0:
-                temporal_sim = self._compute_temporal_similarity(query_meta, self.source_metadata)
-                scores = (1 - self.temporal_weight) * scores + self.temporal_weight * temporal_sim
-            
-            head_weights[head] = scores
-        
-        # Combine head weights
-        avg_weights = np.mean(head_weights, axis=0)
-        
-        # Apply temperature scaling
-        if self.temperature != 1.0:
-            avg_weights = avg_weights ** (1.0 / self.temperature)
-        
-        # Softmax normalization for physics attention
-        max_weight = np.max(avg_weights)
-        exp_weights = np.exp(avg_weights - max_weight)
-        physics_attention = exp_weights / (np.sum(exp_weights) + 1e-12)
-        
-        # Apply ST-DGPA: Combine physics attention with (E, τ, t) gating
-        ett_gating = self._compute_ett_gating(
-            query_meta['energy'], query_meta['duration'], query_meta['time']
-        )
-        
-        # ST-DGPA formula: w_i = (α_i * gating_i) / (∑_j α_j * gating_j)
-        combined_weights = physics_attention * ett_gating
-        combined_sum = np.sum(combined_weights)
-        final_weights = combined_weights / combined_sum if combined_sum > 1e-12 else physics_attention
-        
-        # Weighted prediction (using original values, not scaled)
-        prediction = np.sum(final_weights[:, np.newaxis] * self.source_values, axis=0) \
-            if len(self.source_values) > 0 else np.zeros(1)
-        
-        return prediction, final_weights, physics_attention, ett_gating
-    
-    def predict_field_statistics(self, energy_query: float, duration_query: float,
-                                time_query: float) -> Optional[Dict]:
-        """Predict field statistics for given parameters using ST-DGPA"""
-        if not self.fitted:
-            return None
-        
-        # Compute query embedding and metadata with enhanced temporal features
-        query_embedding = self._compute_enhanced_physics_embedding(
-            energy_query, duration_query, time_query
-        )
-        query_meta = {
-            'energy': energy_query,
-            'duration': duration_query,
-            'time': time_query,
-            'fourier_number': self._compute_fourier_number(time_query),
-            'thermal_penetration': self._compute_thermal_penetration(time_query)
-        }
-        
-        # Apply ST-DGPA attention mechanism
-        prediction, final_weights, physics_attention, ett_gating = \
-            self._multi_head_attention_with_gating(query_embedding, query_meta)
-        
-        if prediction is None:
-            return None
-        
-        # Reconstruct field predictions
-        result = {
-            'prediction': prediction,
-            'attention_weights': final_weights,
-            'physics_attention': physics_attention,
-            'ett_gating': ett_gating,
-            'confidence': float(np.max(final_weights)) if len(final_weights) > 0 else 0.0,
-            'temporal_confidence': self._compute_temporal_confidence(time_query, duration_query),
-            'heat_transfer_indicators': self._compute_heat_transfer_indicators(
-                energy_query, duration_query, time_query
-            ),
-            'field_predictions': {}
-        }
-        
-        # Map predictions back to fields
-        if self.source_db:
-            field_order = sorted(self.source_db[0]['field_stats'].keys())
-            for i, field in enumerate(field_order):
-                start_idx = i * 3  # mean, max, std
-                if start_idx + 2 < len(prediction):
-                    result['field_predictions'][field] = {
-                        'mean': float(prediction[start_idx]),
-                        'max': float(prediction[start_idx + 1]),
-                        'std': float(prediction[start_idx + 2])
-                    }
-        
-        return result
-    
-    def _compute_temporal_confidence(self, time_query: float, duration_query: float) -> float:
-        """Compute confidence in temporal prediction based on heat transfer physics"""
-        if time_query < duration_query * 0.5:  # Early heating phase
-            return 0.6  # Moderate confidence
-        elif time_query < duration_query * 1.5:  # Peak and early cooling
-            return 0.8  # Higher confidence
-        else:  # Late cooling/diffusion
-            return 0.9  # Highest confidence (diffusion-dominated)
-    
-    def _compute_heat_transfer_indicators(self, energy: float, duration: float,
-                                         time: float) -> Dict:
-        """Compute heat transfer characterization indicators"""
-        fourier_number = self._compute_fourier_number(time)
-        thermal_penetration = self._compute_thermal_penetration(time)
-        
-        # Phase identification
-        if time < duration * 0.3:
-            phase, regime = "Early Heating", "Adiabatic-like"
-        elif time < duration:
-            phase, regime = "Heating", "Conduction-dominated"
-        elif time < duration * 2:
-            phase, regime = "Early Cooling", "Mixed conduction"
+        if gating_sum > 0:
+            gating = gating / gating_sum
         else:
-            phase, regime = "Diffusion Cooling", "Thermal diffusion"
+            gating = np.ones_like(gating) / len(gating)
         
-        return {
-            'phase': phase,
-            'regime': regime,
-            'fourier_number': fourier_number,
-            'thermal_penetration_um': thermal_penetration,
-            'normalized_time': time / max(duration, 1e-6),
-            'energy_density': energy / duration
-        }
+        return gating
     
-    def predict_time_series(self, energy_query: float, duration_query: float,
-                           time_points: np.ndarray) -> Dict:
+    def predict_time_series(self, energy_query, duration_query, time_points):
         """Predict over a series of time points using ST-DGPA"""
         results = {
             'time_points': time_points,
@@ -720,9 +537,10 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             'heat_transfer_indicators': []
         }
         
-        # Initialize field predictions structure
         if self.source_db:
-            common_fields = set(f for s in self.source_db for f in s['field_stats'].keys())
+            common_fields = set()
+            for summary in self.source_db:
+                common_fields.update(summary['field_stats'].keys())
             for field in common_fields:
                 results['field_predictions'][field] = {'mean': [], 'max': [], 'std': []}
         
@@ -731,15 +549,10 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             if pred and 'field_predictions' in pred:
                 for field in pred['field_predictions']:
                     if field in results['field_predictions']:
-                        results['field_predictions'][field]['mean'].append(
-                            pred['field_predictions'][field]['mean']
-                        )
-                        results['field_predictions'][field]['max'].append(
-                            pred['field_predictions'][field]['max']
-                        )
-                        results['field_predictions'][field]['std'].append(
-                            pred['field_predictions'][field]['std']
-                        )
+                        stats = pred['field_predictions'][field]
+                        results['field_predictions'][field]['mean'].append(stats['mean'])
+                        results['field_predictions'][field]['max'].append(stats['max'])
+                        results['field_predictions'][field]['std'].append(stats['std'])
                 results['attention_maps'].append(pred['attention_weights'])
                 results['physics_attention_maps'].append(pred['physics_attention'])
                 results['ett_gating_maps'].append(pred['ett_gating'])
@@ -747,7 +560,6 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
                 results['temporal_confidences'].append(pred['temporal_confidence'])
                 results['heat_transfer_indicators'].append(pred['heat_transfer_indicators'])
             else:
-                # Fill with NaN if prediction failed
                 for field in results['field_predictions']:
                     results['field_predictions'][field]['mean'].append(np.nan)
                     results['field_predictions'][field]['max'].append(np.nan)
@@ -761,319 +573,597 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         
         return results
     
-    def interpolate_full_field(self, field_name: str, attention_weights: np.ndarray,
-                            source_metadata: List[Dict], simulations: Dict) -> Optional[np.ndarray]:
-        """Compute interpolated full field using ST-DGPA weights"""
-        if not self.fitted or len(attention_weights) == 0:
+    def predict_field_statistics(self, energy_query, duration_query, time_query):
+        """Predict field statistics for given parameters using ST-DGPA"""
+        if not self.fitted:
             return None
         
-        # Assume common mesh: Get shape from first simulation
-        first_sim = next(iter(simulations.values()))
-        if 'fields' not in first_sim or field_name not in first_sim['fields']:
-            return None
+        query_embedding = self._compute_enhanced_physics_embedding(energy_query, duration_query, time_query)
+        query_meta = {
+            'energy': energy_query,
+            'duration': duration_query,
+            'time': time_query,
+            'fourier_number': self._compute_fourier_number(time_query),
+            'thermal_penetration': self._compute_thermal_penetration(time_query)
+        }
         
-        field_shape = first_sim['fields'][field_name].shape[1:]
-        
-        # Initialize interpolated field based on field type
-        if len(field_shape) == 0:  # Scalar field
-            interpolated_field = np.zeros(first_sim['fields'][field_name].shape[1], dtype=np.float32)
-        else:  # Vector field
-            interpolated_field = np.zeros(field_shape, dtype=np.float32)
-        
-        total_weight, n_sources_used = 0.0, 0
-        for idx, weight in enumerate(attention_weights):
-            if weight < 1e-6:  # Skip negligible weights for efficiency
-                continue
-            meta = source_metadata[idx]
-            if meta['name'] in simulations and field_name in simulations[meta['name']]['fields']:
-                interpolated_field += weight * simulations[meta['name']]['fields'][field_name][meta['timestep_idx']]
-                total_weight += weight
-                n_sources_used += 1
-        
-        return interpolated_field / total_weight if total_weight > 0 else None
-    
-    def export_interpolated_vtu(self, field_name: str, interpolated_values: np.ndarray,
-                               simulations: Dict, output_path: str) -> bool:
-        """Export interpolated field to VTU file"""
-        if interpolated_values is None or len(simulations) == 0:
-            return False
-        
-        try:
-            # Get mesh from first simulation
-            first_sim = next(iter(simulations.values()))
-            points = first_sim['points']
-            cells = None
-            
-            # Get triangles if available
-            if 'triangles' in first_sim and first_sim['triangles'] is not None:
-                cells = [("triangle", first_sim['triangles'])]
-            
-            # Create meshio mesh
-            mesh = meshio.Mesh(
-                points, cells,
-                point_data={field_name: interpolated_values}
-            )
-            mesh.write(output_path)
-            return True
-        except Exception as e:
-            st.error(f"Error exporting VTU: {str(e)}")
-            return False
-
-# =============================================
-# 4. POLAR RADAR VISUALIZER (FIXED & ENHANCED)
-# =============================================
-class PolarRadarVisualizer:
-    """Creates polar radar charts with Energy (angular), Pulse Duration (radial), and Peak Value (color/size)"""
-    
-    def __init__(self):
-        self.color_scale_temp = 'Inferno'
-        self.color_scale_stress = 'Plasma'
-        self.target_symbol = 'star-diamond'
-        self.source_symbol = 'circle'
-    
-    def create_polar_radar_chart(self, df: pd.DataFrame, field_type: str = 'temperature',
-                                query_params: Optional[Dict] = None,
-                                timestep: int = 1,
-                                width: int = 800, height: int = 700,
-                                show_legend: bool = True,
-                                marker_size_range: Tuple[int, int] = (10, 30),
-                                # ADDED customization parameters
-                                radial_grid_width: float = 1.0,
-                                angular_grid_width: float = 1.0,
-                                radial_tick_font_size: int = 12,
-                                angular_tick_font_size: int = 12,
-                                title_font_size: int = 18,
-                                margin_pad: Dict[str, int] = None,
-                                energy_min: float = None,
-                                energy_max: float = None,
-                                target_peak_value: float = None) -> go.Figure:
-        """
-        Create polar radar chart with extensive customization.
-        
-        Parameters:
-        - radial_grid_width: line width for radial grid
-        - angular_grid_width: line width for angular grid
-        - radial_tick_font_size: font size for radial tick labels
-        - angular_tick_font_size: font size for angular tick labels
-        - title_font_size: font size for the title
-        - margin_pad: dict with 'l', 'r', 't', 'b' margins
-        - energy_min, energy_max: override the angular axis range (if None, use data min/max)
-        - target_peak_value: if provided, color the target marker with the same colorscale
-        """
-        if margin_pad is None:
-            margin_pad = {'l': 60, 'r': 60, 't': 80, 'b': 60}
-        
-        if df.empty:
-            fig = go.Figure()
-            fig.update_layout(title="No data available", width=width, height=height)
-            return fig
-
-        # Extract parameters, ensure numeric and finite
-        energies = pd.to_numeric(df['Energy'], errors='coerce').dropna().values
-        durations = pd.to_numeric(df['Duration'], errors='coerce').dropna().values
-        peak_values = pd.to_numeric(df['Peak_Value'], errors='coerce').dropna().values
-        sim_names = df.get('Name', [f"Sim {i}" for i in range(len(df))]).tolist()
-
-        if len(energies) == 0 or len(peak_values) == 0:
-            fig = go.Figure()
-            fig.update_layout(title="No valid numeric data", width=width, height=height)
-            return fig
-
-        # Determine energy range for angular axis
-        e_min_data, e_max_data = np.nanmin(energies), np.nanmax(energies)
-        if energy_min is None:
-            e_min = e_min_data
-        else:
-            e_min = energy_min
-        if energy_max is None:
-            e_max = e_max_data
-        else:
-            e_max = energy_max
-        
-        e_range = e_max - e_min if e_max > e_min else 1.0
-        if not np.isfinite(e_range) or e_range < 1e-6:
-            e_range = 1.0
-            e_min = 0.0
-
-        # Compute angles for source simulations
-        angles_rad = 2 * np.pi * (energies - e_min) / e_range
-        angles_deg = np.degrees(angles_rad)
-
-        # Prepare hover text
-        hover_text = []
-        for i in range(len(df)):
-            if i < len(sim_names) and i < len(energies) and i < len(durations) and i < len(peak_values):
-                hover_text.append(
-                    f"<b>{sim_names[i]}</b><br>"
-                    f"Time Step: {timestep}<br>"
-                    f"Energy: {energies[i]:.2f} mJ<br>"
-                    f"Duration: {durations[i]:.2f} ns<br>"
-                    f"Peak {field_type.capitalize()}: {peak_values[i]:.3f}"
-                )
-
-        # Determine color scale and title
-        is_temp = 'temp' in field_type.lower()
-        c_scale = self.color_scale_temp if is_temp else self.color_scale_stress
-        title_field = "Peak Temperature (K)" if is_temp else "Peak von Mises Stress (MPa)"
-
-        # Normalize peak values for marker sizing
-        p_min, p_max = np.min(peak_values), np.max(peak_values)
-        p_range = p_max - p_min if p_max > p_min else 1.0
-        marker_sizes = marker_size_range[0] + (peak_values - p_min) / p_range * (marker_size_range[1] - marker_size_range[0])
-
-        # Create Figure
-        fig = go.Figure()
-
-        # Source simulations scatter
-        fig.add_trace(go.Scatterpolar(
-            r=durations,
-            theta=angles_deg,
-            mode='markers',
-            marker=dict(
-                size=marker_sizes,
-                color=peak_values,
-                colorscale=c_scale,
-                colorbar=dict(title=title_field, thickness=20),
-                line=dict(width=2, color='white'),
-                symbol=self.source_symbol
-            ),
-            text=hover_text,
-            hoverinfo='text',
-            name='Source Simulations',
-            opacity=0.85
-        ))
-
-        # Add Target Query Point if provided
-        if query_params:
-            q_e = query_params.get('Energy')
-            q_d = query_params.get('Duration')
-            if q_e is not None and q_d is not None and np.isfinite(q_e) and np.isfinite(q_d):
-                q_angle_rad = 2 * np.pi * (q_e - e_min) / e_range
-                q_angle_deg = np.degrees(q_angle_rad)
-                
-                # Determine target marker color: use target_peak_value if available, else a default distinct color
-                if target_peak_value is not None and np.isfinite(target_peak_value):
-                    target_color = target_peak_value
-                    target_color_scale = c_scale
-                    target_colorbar = False  # share the same colorbar
-                else:
-                    # Fallback to a fixed color (e.g., lime green) but with warning
-                    target_color = 'limegreen'
-                    target_color_scale = None
-                    st.info("Target peak value not available, using fixed color.")
-                
-                fig.add_trace(go.Scatterpolar(
-                    r=[q_d],
-                    theta=[q_angle_deg],
-                    mode='markers',
-                    marker=dict(
-                        size=25,
-                        color=target_color,
-                        colorscale=target_color_scale if target_color_scale else None,
-                        symbol=self.target_symbol,
-                        line=dict(width=3, color='black'),
-                        colorbar=dict(title=title_field) if target_colorbar else None
-                    ),
-                    name='Target Query',
-                    hovertemplate=f"<b>Target Query</b><br>Energy: {q_e:.2f} mJ<br>Duration: {q_d:.2f} ns<br>Peak: {target_peak_value:.3f}<extra></extra>"
-                ))
-
-        # Build polar layout with customization
-        polar_layout = dict(
-            radialaxis=dict(
-                visible=True,
-                title="Pulse Duration (ns)",
-                gridcolor="lightgray",
-                gridwidth=radial_grid_width,
-                tickfont=dict(size=radial_tick_font_size)
-            ),
-            angularaxis=dict(
-                visible=True,
-                direction="clockwise",
-                rotation=90,
-                gridcolor="lightgray",
-                gridwidth=angular_grid_width,
-                tickfont=dict(size=angular_tick_font_size)
-                # Note: Plotly does not support 'title' on angularaxis
-            ),
-            bgcolor="white"
+        prediction, final_weights, physics_attention, ett_gating = self._multi_head_attention_with_gating(
+            query_embedding, query_meta
         )
-
-        # Add custom tick labels for energy if range is valid
-        if e_range > 1e-6 and np.isfinite(e_min) and np.isfinite(e_max):
-            try:
-                tick_angles, tick_texts = [], []
-                # Create 6 evenly spaced tick values between e_min and e_max
-                for v in np.linspace(e_min, e_max, 6):
-                    angle_rad = 2 * np.pi * (v - e_min) / e_range
-                    angle_deg = np.degrees(angle_rad)
-                    if 0 <= angle_deg <= 360:
-                        tick_angles.append(angle_deg)
-                        tick_texts.append(f"{v:.1f}")
-                if tick_angles:
-                    polar_layout['angularaxis']['tickvals'] = tick_angles
-                    polar_layout['angularaxis']['ticktext'] = tick_texts
-            except Exception:
-                pass  # Skip custom ticks if calculation fails
-
-        # Apply layout with error fallback
-        try:
-            fig.update_layout(
-                title=dict(
-                    text=f"Polar Radar: {title_field} at t={timestep} ns<br>"
-                         f"<span style='font-size:{title_font_size-4}px; color:gray;'>Angular: Energy (mJ) • Radial: Pulse Duration (ns)</span>",
-                    font=dict(size=title_font_size),
-                    x=0.5,
-                    xanchor='center'
-                ),
-                polar=polar_layout,
-                width=width,
-                height=height,
-                showlegend=show_legend,
-                margin=margin_pad,
-                hovermode='closest'
-            )
-        except Exception as e:
-            st.warning(f"Polar layout error, using fallback: {str(e)}")
-            fig.update_layout(
-                title=f"Polar Radar: {title_field} at t={timestep} ns",
-                width=width,
-                height=height,
-                showlegend=show_legend,
-                margin=margin_pad
-            )
-
-        return fig
+        
+        if prediction is None:
+            return None
+        
+        result = {
+            'prediction': prediction,
+            'attention_weights': final_weights,
+            'physics_attention': physics_attention,
+            'ett_gating': ett_gating,
+            'confidence': float(np.max(final_weights)) if len(final_weights) > 0 else 0.0,
+            'temporal_confidence': self._compute_temporal_confidence(time_query, duration_query),
+            'heat_transfer_indicators': self._compute_heat_transfer_indicators(energy_query, duration_query, time_query),
+            'field_predictions': {}
+        }
+        
+        if self.source_db:
+            field_order = sorted(self.source_db[0]['field_stats'].keys())
+            n_stats_per_field = 3
+            for i, field in enumerate(field_order):
+                start_idx = i * n_stats_per_field
+                if start_idx + 2 < len(prediction):
+                    result['field_predictions'][field] = {
+                        'mean': float(prediction[start_idx]),
+                        'max': float(prediction[start_idx + 1]),
+                        'std': float(prediction[start_idx + 2])
+                    }
+        
+        return result
     
-    def create_multi_timestep_radar(self, df: pd.DataFrame, field_type: str,
-                                   query_params: Optional[Dict],
-                                   timesteps: List[int],
-                                   width: int = 300, height: int = 300,
-                                   **kwargs) -> List[go.Figure]:
-        """Create multiple radar charts for different timesteps"""
-        figures = []
-        for t in timesteps:
-            # Filter data for this timestep (assuming df has timestep info)
-            df_t = df.copy()  # In practice, filter by actual timestep column
-            fig = self.create_polar_radar_chart(
-                df_t, field_type, query_params, timestep=t,
-                width=width, height=height, show_legend=(t == timesteps[0]),
-                marker_size_range=(8, 20),
-                **kwargs
-            )
-            figures.append(fig)
-        return figures
+    def _multi_head_attention_with_gating(self, query_embedding, query_meta):
+        """Multi-head attention mechanism with ST-DGPA"""
+        if not self.fitted or len(self.source_embeddings) == 0:
+            return None, None, None, None
+        
+        query_norm = self.embedding_scaler.transform([query_embedding])[0]
+        n_sources = len(self.source_embeddings)
+        head_weights = np.zeros((self.n_heads, n_sources))
+        
+        for head in range(self.n_heads):
+            np.random.seed(42 + head)
+            proj_dim = min(8, query_norm.shape[0])
+            proj_matrix = np.random.randn(query_norm.shape[0], proj_dim)
+            
+            query_proj = query_norm @ proj_matrix
+            source_proj = self.source_embeddings @ proj_matrix
+            
+            distances = np.linalg.norm(query_proj - source_proj, axis=1)
+            scores = np.exp(-distances**2 / (2 * self.sigma_param**2))
+            
+            if self.spatial_weight > 0:
+                spatial_sim = self._compute_spatial_similarity(query_meta, self.source_metadata)
+                scores = (1 - self.spatial_weight) * scores + self.spatial_weight * spatial_sim
+            
+            if self.temporal_weight > 0:
+                temporal_sim = self._compute_temporal_similarity(query_meta, self.source_metadata)
+                scores = (1 - self.temporal_weight) * scores + self.temporal_weight * temporal_sim
+            
+            head_weights[head] = scores
+        
+        avg_weights = np.mean(head_weights, axis=0)
+        
+        if self.temperature != 1.0:
+            avg_weights = avg_weights ** (1.0 / self.temperature)
+        
+        max_weight = np.max(avg_weights)
+        exp_weights = np.exp(avg_weights - max_weight)
+        physics_attention = exp_weights / (np.sum(exp_weights) + 1e-12)
+        
+        ett_gating = self._compute_ett_gating(query_meta['energy'], query_meta['duration'], query_meta['time'])
+        
+        combined_weights = physics_attention * ett_gating
+        combined_sum = np.sum(combined_weights)
+        
+        if combined_sum > 1e-12:
+            final_weights = combined_weights / combined_sum
+        else:
+            final_weights = physics_attention
+        
+        if len(self.source_values) > 0:
+            prediction = np.sum(final_weights[:, np.newaxis] * self.source_values, axis=0)
+        else:
+            prediction = np.zeros(1)
+        
+        return prediction, final_weights, physics_attention, ett_gating
+    
+    def _compute_temporal_similarity(self, query_meta, source_metas):
+        """Compute temporal similarity with physics-aware weighting"""
+        similarities = []
+        for meta in source_metas:
+            time_diff = abs(query_meta['time'] - meta['time'])
+            
+            if query_meta['time'] < query_meta['duration'] * 1.5:
+                temporal_tolerance = max(query_meta['duration'] * 0.1, 1.0)
+            else:
+                temporal_tolerance = max(query_meta['duration'] * 0.3, 3.0)
+            
+            if 'fourier_number' in meta and 'fourier_number' in query_meta:
+                fourier_diff = abs(query_meta['fourier_number'] - meta['fourier_number'])
+                fourier_similarity = np.exp(-fourier_diff / 0.1)
+            else:
+                fourier_similarity = 1.0
+            
+            time_similarity = np.exp(-time_diff / temporal_tolerance)
+            combined_similarity = (1 - self.temporal_weight) * time_similarity + self.temporal_weight * fourier_similarity
+            similarities.append(combined_similarity)
+        
+        return np.array(similarities)
+    
+    def _compute_spatial_similarity(self, query_meta, source_metas):
+        """Compute spatial similarity based on parameter proximity"""
+        similarities = []
+        for meta in source_metas:
+            e_diff = abs(query_meta['energy'] - meta['energy']) / 50.0
+            d_diff = abs(query_meta['duration'] - meta['duration']) / 20.0
+            total_diff = np.sqrt(e_diff**2 + d_diff**2)
+            similarity = np.exp(-total_diff / self.sigma_param)
+            similarities.append(similarity)
+        return np.array(similarities)
+    
+    def _compute_temporal_confidence(self, time_query, duration_query):
+        """Compute confidence in temporal prediction based on heat transfer physics"""
+        if time_query < duration_query * 0.5:
+            return 0.6
+        elif time_query < duration_query * 1.5:
+            return 0.8
+        else:
+            return 0.9
+    
+    def _compute_heat_transfer_indicators(self, energy, duration, time):
+        """Compute heat transfer characterization indicators"""
+        fourier_number = self._compute_fourier_number(time)
+        thermal_penetration = self._compute_thermal_penetration(time)
+        
+        if time < duration * 0.3:
+            phase = "Early Heating"
+            regime = "Adiabatic-like"
+        elif time < duration:
+            phase = "Heating"
+            regime = "Conduction-dominated"
+        elif time < duration * 2:
+            phase = "Early Cooling"
+            regime = "Mixed conduction"
+        else:
+            phase = "Diffusion Cooling"
+            regime = "Thermal diffusion"
+        
+        return {
+            'phase': phase,
+            'regime': regime,
+            'fourier_number': fourier_number,
+            'thermal_penetration_um': thermal_penetration,
+            'normalized_time': time / max(duration, 1e-6),
+            'energy_density': energy / duration
+        }
 
 # =============================================
-# 5. ENHANCED VISUALIZER (Sankey removed, keep only analysis)
+# 4. ENHANCED VISUALIZER WITH IMPROVED RADAR PLOT
 # =============================================
 class EnhancedVisualizer:
-    """Comprehensive visualization with extended analysis capabilities"""
+    """Comprehensive visualization with enhanced polar radar charts"""
+    
+    COLORSCALES = {
+        'temperature': ['#2c0078', '#4402a7', '#5e04d1', '#7b0ef6', '#9a38ff', '#b966ff', '#d691ff', '#f2bcff'],
+        'stress': ['#003f5c', '#2f4b7c', '#665191', '#a05195', '#d45087', '#f95d6a', '#ff7c43', '#ffa600'],
+        'displacement': ['#004c6d', '#346888', '#5886a5', '#7aa6c2', '#9dc6e0', '#c1e7ff'],
+        'default': ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+    }
+    
+    EXTENDED_COLORMAPS = [
+        'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis',
+        'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland',
+        'Bluered', 'Electric', 'Thermal', 'Balance',
+        'Brwnyl', 'Darkmint', 'Emrld', 'Mint', 'Oranges',
+        'Purp', 'Purples', 'Sunset', 'Sunsetdark', 'Teal',
+        'Tealgrn', 'Twilight', 'Burg', 'Burgyl'
+    ]
     
     @staticmethod
-    def create_stdgpa_analysis(results: Dict, energy_query: float, duration_query: float,
-                            time_points: np.ndarray) -> Optional[go.Figure]:
-        """Create comprehensive ST-DGPA analysis visualization"""
+    def create_enhanced_polar_radar_chart(df: pd.DataFrame, field_type: str, 
+                                         query_params: Optional[Dict] = None,
+                                         timestep: int = 1,
+                                         show_legend: bool = True,
+                                         width: int = 800,
+                                         height: int = 700,
+                                         # Enhanced styling parameters
+                                         title_font_size: int = 18,
+                                         title_font_family: str = "Arial, sans-serif",
+                                         title_padding_top: int = 40,
+                                         label_font_size: int = 12,
+                                         label_font_family: str = "Arial, sans-serif",
+                                         tick_font_size: int = 10,
+                                         radial_axis_range: Optional[Tuple[float, float]] = None,
+                                         angular_axis_rotation: int = 90,
+                                         angular_axis_direction: str = "clockwise",
+                                         radar_line_width: float = 2.5,
+                                         radar_line_opacity: float = 0.8,
+                                         radar_fill_opacity: float = 0.3,
+                                         target_query_color: str = "#FF0000",
+                                         target_query_line_width: float = 4.0,
+                                         target_query_marker_size: int = 10,
+                                         grid_color: str = "lightgray",
+                                         grid_line_width: float = 1,
+                                         background_color: str = "white",
+                                         margin_left: int = 60,
+                                         margin_right: int = 60,
+                                         margin_top: int = 80,
+                                         margin_bottom: int = 60,
+                                         legend_position: str = "top-right",
+                                         # Color mapping for target query consistency
+                                         use_colorbar_scale: bool = True,
+                                         colorbar_title: str = "Peak Value",
+                                         colorbar_tick_font_size: int = 9,
+                                         # Radar-specific enhancements
+                                         show_radial_grid: bool = True,
+                                         show_angular_grid: bool = True,
+                                         radial_grid_count: int = 5,
+                                         # Target query highlighting
+                                         highlight_target: bool = True,
+                                         target_label: str = "Target Query",
+                                         # Data normalization
+                                         normalize_by_max: bool = True,
+                                         max_reference_value: Optional[float] = None
+                                         ) -> go.Figure:
+        """
+        Create an enhanced polar radar chart with comprehensive styling controls
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            DataFrame containing simulation data with columns: Name, Energy, Duration, Peak_Value
+        field_type : str
+            Type of field being visualized (temperature, stress, etc.)
+        query_params : Optional[Dict]
+            Query parameters for highlighting target
+        timestep : int
+            Current timestep for display
+        show_legend : bool
+            Whether to show legend
+        width/height : int
+            Figure dimensions in pixels
+        
+        Enhanced Styling Parameters:
+        ---------------------------
+        Title Styling:
+        - title_font_size: Font size for main title
+        - title_font_family: Font family for title
+        - title_padding_top: Top padding for title to prevent overlap
+        
+        Label & Text Styling:
+        - label_font_size: Font size for axis labels
+        - label_font_family: Font family for labels
+        - tick_font_size: Font size for tick labels
+        
+        Radar Plot Styling:
+        - radar_line_width: Width of radar polygon lines
+        - radar_line_opacity: Opacity of radar lines (0.0-1.0)
+        - radar_fill_opacity: Opacity of filled area inside radar
+        - radial_axis_range: Tuple (min, max) for radial axis scaling
+        - angular_axis_rotation: Rotation angle for angular axis labels
+        - angular_axis_direction: "clockwise" or "counterclockwise"
+        
+        Target Query Styling:
+        - target_query_color: Color for target query line/marker
+        - target_query_line_width: Line width for target query
+        - target_query_marker_size: Marker size for target query points
+        - highlight_target: Whether to highlight target query separately
+        
+        Grid & Background:
+        - grid_color: Color for grid lines
+        - grid_line_width: Width of grid lines
+        - background_color: Background color of plot area
+        - show_radial_grid: Show radial grid lines
+        - show_angular_grid: Show angular grid lines
+        - radial_grid_count: Number of radial grid circles
+        
+        Layout & Margins:
+        - margin_left/right/top/bottom: Padding around plot area
+        - legend_position: Position of legend ("top-right", "bottom-left", etc.)
+        
+        Color Mapping:
+        - use_colorbar_scale: Use colorbar scale for target query coloring
+        - colorbar_title: Title for colorbar if shown
+        - colorbar_tick_font_size: Font size for colorbar ticks
+        
+        Data Processing:
+        - normalize_by_max: Normalize values by maximum for consistent scaling
+        - max_reference_value: Explicit maximum value for normalization
+        """
+        
+        # Handle empty dataframe
+        if df.empty or 'Peak_Value' not in df.columns:
+            fig = go.Figure()
+            fig.update_layout(
+                title="No Data Available for Radar Chart",
+                width=width, height=height
+            )
+            return fig
+        
+        # Prepare data for radar chart
+        # Extract unique energy values for angular axis
+        unique_energies = sorted(df['Energy'].unique())
+        
+        # FIX: Ensure we use the maximum energy from data or query, not 0.0
+        # If max_reference_value is provided, use it; otherwise compute from data
+        if max_reference_value is not None:
+            max_energy = max_reference_value
+        else:
+            max_energy = max(unique_energies) if unique_energies else 8.0
+        
+        # Ensure max_energy is at least 8.0 as per requirement
+        max_energy = max(max_energy, 8.0)
+        
+        # Create angular positions (theta) based on energy
+        # Map energy values to angles (0-360 degrees)
+        energy_to_angle = {e: (e / max_energy) * 360 for e in unique_energies}
+        
+        # Group data by energy and duration for radar spokes
+        radar_data = {}
+        for _, row in df.iterrows():
+            energy = row['Energy']
+            duration = row['Duration']
+            peak = row['Peak_Value']
+            
+            if energy not in radar_data:
+                radar_data[energy] = {}
+            if duration not in radar_data[energy]:
+                radar_data[energy][duration] = []
+            radar_data[energy][duration].append(peak)
+        
+        # Compute mean peak value for each energy-duration combination
+        for energy in radar_data:
+            for duration in radar_data[energy]:
+                values = radar_data[energy][duration]
+                radar_data[energy][duration] = np.mean(values) if values else 0
+        
+        # Prepare traces for each duration group
+        duration_groups = set()
+        for energy_data in radar_data.values():
+            duration_groups.update(energy_data.keys())
+        duration_groups = sorted(duration_groups)
+        
+        # Color mapping for durations using selected colormap
+        colors = px.colors.sample_colorscale(
+            'Viridis', 
+            [i/(max(len(duration_groups)-1, 1)) for i in range(len(duration_groups))]
+        )
+        
+        fig = go.Figure()
+        
+        # Add traces for each duration group
+        for idx, duration in enumerate(duration_groups):
+            r_values = []
+            theta_values = []
+            energy_labels = []
+            
+            for energy in unique_energies:
+                if energy in radar_data and duration in radar_data[energy]:
+                    peak_val = radar_data[energy][duration]
+                    
+                    # Normalize value if requested
+                    if normalize_by_max and max_reference_value:
+                        normalized_val = peak_val / max_reference_value
+                    else:
+                        normalized_val = peak_val
+                    
+                    r_values.append(normalized_val)
+                    theta_values.append(energy_to_angle[energy])
+                    energy_labels.append(f"{energy:.1f} mJ")
+            
+            if r_values:  # Only add trace if we have data
+                # Close the polygon for radar chart
+                r_values_closed = r_values + [r_values[0]]
+                theta_values_closed = theta_values + [theta_values[0]]
+                
+                fig.add_trace(go.Scatterpolar(
+                    r=r_values_closed,
+                    theta=theta_values_closed,
+                    name=f"τ = {duration:.1f} ns",
+                    fill='toself',
+                    line=dict(
+                        color=colors[idx % len(colors)],
+                        width=radar_line_width,
+                    ),
+                    fillcolor=colors[idx % len(colors)],
+                    opacity=radar_line_opacity,
+                    hovertemplate=(
+                        f"<b>Duration:</b> {duration:.1f} ns<br>" +
+                        "<b>Energy:</b> %{theta:.1f} mJ<br>" +
+                        f"<b>Peak {field_type}:</b> %{{r:.3f}}<br>" +
+                        "<extra></extra>"
+                    ),
+                    showlegend=show_legend
+                ))
+        
+        # Add target query point if provided
+        if query_params and highlight_target:
+            query_energy = query_params.get('energy_query', 0)
+            query_duration = query_params.get('duration_query', 0)
+            query_peak = query_params.get('peak_value', 0)
+            
+            # Normalize query value if needed
+            if normalize_by_max and max_reference_value:
+                query_peak_normalized = query_peak / max_reference_value
+            else:
+                query_peak_normalized = query_peak
+            
+            # Compute angle for query energy
+            query_angle = (query_energy / max_energy) * 360
+            
+            # Determine color for target query - CONSISTENT WITH COLORBAR SCALE
+            if use_colorbar_scale and max_reference_value:
+                # Map normalized value to color using Viridis colormap
+                normalized_color_val = min(max(query_peak_normalized / max_reference_value, 0), 1)
+                target_color = px.colors.sample_colorscale('Viridis', [normalized_color_val])[0]
+            else:
+                target_color = target_query_color
+            
+            # Add target query as a distinct trace
+            fig.add_trace(go.Scatterpolar(
+                r=[query_peak_normalized, query_peak_normalized],
+                theta=[query_angle, query_angle],
+                mode='markers+lines',
+                name=target_label,
+                marker=dict(
+                    size=target_query_marker_size,
+                    color=target_color,
+                    symbol='star',
+                    line=dict(width=2, color='white')
+                ),
+                line=dict(
+                    color=target_color,
+                    width=target_query_line_width,
+                    dash='dot'
+                ),
+                fill='none',
+                opacity=1.0,
+                hovertemplate=(
+                    f"<b>Target Query</b><br>" +
+                    f"<b>Energy:</b> {query_energy:.1f} mJ<br>" +
+                    f"<b>Duration:</b> {query_duration:.1f} ns<br>" +
+                    f"<b>Peak {field_type}:</b> {query_peak:.3f}<br>" +
+                    "<extra></extra>"
+                ),
+                showlegend=show_legend
+            ))
+            
+            # Add annotation for target query
+            fig.add_annotation(
+                x=query_angle,
+                y=query_peak_normalized * 1.1,  # Slightly outside the point
+                text=f"Target<br>{query_peak:.2f}",
+                showarrow=True,
+                arrowhead=2,
+                arrowsize=1,
+                arrowwidth=2,
+                arrowcolor=target_color,
+                font=dict(size=label_font_size - 2, color=target_color),
+                bgcolor='rgba(255,255,255,0.9)',
+                bordercolor=target_color,
+                borderwidth=1,
+                borderpad=4,
+                ax=0,
+                ay=-40
+            )
+        
+        # Configure polar axis with enhanced styling
+        polar_config = dict(
+            radialaxis=dict(
+                visible=True,
+                range=radial_axis_range if radial_axis_range else [0, 1.2],
+                tickfont=dict(size=tick_font_size, family=label_font_family),
+                gridcolor=grid_color if show_radial_grid else 'rgba(0,0,0,0)',
+                gridwidth=grid_line_width if show_radial_grid else 0,
+                linecolor=grid_color,
+                linewidth=grid_line_width,
+                tickformat='.2f',
+                title=dict(
+                    text=f"Peak {field_type} (normalized)" if normalize_by_max else f"Peak {field_type}",
+                    font=dict(size=label_font_size, family=label_font_family)
+                )
+            ),
+            angularaxis=dict(
+                tickfont=dict(size=tick_font_size, family=label_font_family),
+                rotation=angular_axis_rotation,
+                direction=angular_axis_direction,
+                gridcolor=grid_color if show_angular_grid else 'rgba(0,0,0,0)',
+                gridwidth=grid_line_width if show_angular_grid else 0,
+                linecolor=grid_color,
+                linewidth=grid_line_width,
+                tickmode='array',
+                tickvals=[energy_to_angle[e] for e in unique_energies],
+                ticktext=[f"{e:.1f}" for e in unique_energies],
+                title=dict(
+                    text="Energy (mJ)",
+                    font=dict(size=label_font_size, family=label_font_family)
+                )
+            ),
+            bgcolor=background_color,
+            gridshape='circular'
+        )
+        
+        # Configure layout with enhanced styling and padding
+        fig.update_layout(
+            polar=polar_config,
+            title=dict(
+                text=f"Polar Radar: {field_type.capitalize()} Distribution<br>" +
+                     f"<sub>Timestep {timestep} | Energy Range: 0-{max_energy:.1f} mJ</sub>",
+                font=dict(size=title_font_size, family=title_font_family),
+                x=0.5,
+                xanchor='center',
+                y=0.98,
+                yanchor='top',
+                pad=dict(t=title_padding_top, b=10)
+            ),
+            showlegend=show_legend,
+            legend=dict(
+                yanchor="top",
+                y=0.99 if legend_position.startswith("top") else 0.01,
+                xanchor="right" if "right" in legend_position else "left",
+                x=0.99 if "right" in legend_position else 0.01,
+                font=dict(size=label_font_size - 1, family=label_font_family),
+                bgcolor='rgba(255,255,255,0.95)',
+                bordercolor=grid_color,
+                borderwidth=1
+            ),
+            width=width,
+            height=height,
+            margin=dict(
+                l=margin_left,
+                r=margin_right,
+                t=margin_top,
+                b=margin_bottom
+            ),
+            plot_bgcolor=background_color,
+            paper_bgcolor=background_color,
+            hovermode='closest',
+            hoverlabel=dict(
+                bgcolor='white',
+                font_size=label_font_size - 1,
+                font_family=label_font_family,
+                bordercolor=grid_color
+            )
+        )
+        
+        # Add colorbar if using colorbar scale for target
+        if use_colorbar_scale and max_reference_value and query_params:
+            # Create a dummy scatter trace for colorbar
+            fig.add_trace(go.Scatter(
+                x=[None], y=[None],
+                mode='markers',
+                marker=dict(
+                    size=0,
+                    colorscale='Viridis',
+                    showscale=True,
+                    cmin=0,
+                    cmax=max_reference_value,
+                    colorbar=dict(
+                        title=dict(text=colorbar_title, font=dict(size=colorbar_tick_font_size)),
+                        thickness=20,
+                        len=0.5,
+                        x=1.02,
+                        xpad=10,
+                        tickfont=dict(size=colorbar_tick_font_size)
+                    )
+                ),
+                showlegend=False,
+                hoverinfo='skip'
+            ))
+        
+        return fig
+    
+    @staticmethod
+    def create_stdgpa_analysis(results, energy_query, duration_query, time_points):
+        """Create ST-DGPA-specific analysis visualizations"""
         if not results or 'attention_maps' not in results or len(results['attention_maps']) == 0:
             return None
         
@@ -1083,8 +1173,9 @@ class EnhancedVisualizer:
         fig = make_subplots(
             rows=3, cols=3,
             subplot_titles=[
-                "ST-DGPA Final Weights", "Physics Attention Only", "(E, τ, t) Gating Only",
-                "ST-DGPA vs Physics Attention", "Temporal Coherence Analysis", "Heat Transfer Phase",
+                "ST-DGPA Final Weights", "Physics Attention Only",
+                "(E, τ, t) Gating Only", "ST-DGPA vs Physics Attention",
+                "Temporal Coherence Analysis", "Heat Transfer Phase",
                 "Parameter Space 3D", "Attention Network", "Weight Evolution"
             ],
             vertical_spacing=0.12,
@@ -1102,579 +1193,1910 @@ class EnhancedVisualizer:
         
         # 1. Final ST-DGPA weights
         fig.add_trace(
-            go.Bar(x=list(range(len(final_weights))), y=final_weights,
-                  marker_color='blue', showlegend=False),
+            go.Bar(
+                x=list(range(len(final_weights))),
+                y=final_weights,
+                name='ST-DGPA Weights',
+                marker_color='blue',
+                showlegend=False
+            ),
             row=1, col=1
         )
         
         # 2. Physics attention only
         fig.add_trace(
-            go.Bar(x=list(range(len(physics_attention))), y=physics_attention,
-                  marker_color='green', showlegend=False),
+            go.Bar(
+                x=list(range(len(physics_attention))),
+                y=physics_attention,
+                name='Physics Attention',
+                marker_color='green',
+                showlegend=False
+            ),
             row=1, col=2
         )
         
         # 3. (E, τ, t) gating only
         fig.add_trace(
-            go.Bar(x=list(range(len(ett_gating))), y=ett_gating,
-                  marker_color='red', showlegend=False),
+            go.Bar(
+                x=list(range(len(ett_gating))),
+                y=ett_gating,
+                name='(E, τ, t) Gating',
+                marker_color='red',
+                showlegend=False
+            ),
             row=1, col=3
         )
         
         # 4. Comparison: ST-DGPA vs Physics Attention
         fig.add_trace(
-            go.Scatter(x=list(range(len(final_weights))), y=final_weights,
-                      mode='lines+markers', line=dict(color='blue', width=3)),
+            go.Scatter(
+                x=list(range(len(final_weights))),
+                y=final_weights,
+                mode='lines+markers',
+                name='ST-DGPA Weights',
+                line=dict(color='blue', width=3)
+            ),
             row=2, col=1
         )
         fig.add_trace(
-            go.Scatter(x=list(range(len(physics_attention))), y=physics_attention,
-                      mode='lines+markers', line=dict(color='green', width=2, dash='dash')),
+            go.Scatter(
+                x=list(range(len(physics_attention))),
+                y=physics_attention,
+                mode='lines+markers',
+                name='Physics Attention',
+                line=dict(color='green', width=2, dash='dash')
+            ),
             row=2, col=1
         )
         
         # 5. Temporal coherence analysis
-        if st.session_state.get('summaries') and hasattr(st.session_state.extrapolator, 'source_metadata'):
+        if st.session_state.get('summaries'):
             times, weights = [], []
             for i, weight in enumerate(final_weights):
-                if weight > 0.01 and i < len(st.session_state.extrapolator.source_metadata):
-                    times.append(st.session_state.extrapolator.source_metadata[i]['time'])
-                    weights.append(weight)
+                if weight > 0.01:
+                    if hasattr(st.session_state.extrapolator, 'source_metadata'):
+                        meta = st.session_state.extrapolator.source_metadata[i]
+                        times.append(meta['time'])
+                        weights.append(weight)
             if times and weights:
                 fig.add_trace(
-                    go.Scatter(x=times, y=weights, mode='markers',
-                              marker=dict(size=np.array(weights)*50, color=weights,
-                                         colorscale='Viridis', showscale=False)),
+                    go.Scatter(
+                        x=times,
+                        y=weights,
+                        mode='markers',
+                        marker=dict(
+                            size=np.array(weights) * 50,
+                            color=weights,
+                            colorscale='Viridis',
+                            showscale=False
+                        ),
+                        name='Weight vs Time',
+                        showlegend=False
+                    ),
                     row=2, col=2
                 )
                 fig.add_vline(x=time, line_dash="dash", line_color="red", row=2, col=2)
         
-        # Update layout
+        # 6. Heat transfer phase indicator
+        if 'heat_transfer_indicators' in results and results['heat_transfer_indicators']:
+            indicators = results['heat_transfer_indicators'][timestep_idx]
+            if indicators:
+                categories = ['Heating', 'Cooling', 'Diffusion', 'Adiabatic']
+                phase = indicators.get('phase', 'Unknown')
+                
+                if phase == 'Early Heating' or phase == 'Heating':
+                    values = [0.9, 0.3, 0.2, 0.1]
+                elif phase == 'Early Cooling':
+                    values = [0.4, 0.8, 0.3, 0.1]
+                elif phase == 'Diffusion Cooling':
+                    values = [0.2, 0.5, 0.9, 0.2]
+                else:
+                    values = [0.7, 0.5, 0.3, 0.2]
+                
+                values_closed = list(values) + [values[0]]
+                categories_closed = list(categories) + [categories[0]]
+                
+                fig.add_trace(
+                    go.Scatterpolar(
+                        r=values_closed,
+                        theta=categories_closed,
+                        fill='toself',
+                        name='Heat Transfer',
+                        line=dict(color='orange', width=2),
+                        fillcolor='rgba(255, 165, 0, 0.5)',
+                        showlegend=False
+                    ),
+                    row=2, col=3
+                )
+        
+        # 7. Parameter space 3D visualization
+        if st.session_state.get('summaries'):
+            energies, durations, times_3d, weights_3d = [], [], [], []
+            for i, summary in enumerate(st.session_state.summaries[:10]):
+                for t_idx, t in enumerate(summary['timesteps'][:5]):
+                    energies.append(summary['energy'])
+                    durations.append(summary['duration'])
+                    times_3d.append(t)
+                    weights_3d.append(np.mean(final_weights) if i < len(final_weights) else 0.1)
+            
+            fig.add_trace(
+                go.Scatter3d(
+                    x=energies,
+                    y=durations,
+                    z=times_3d,
+                    mode='markers',
+                    marker=dict(
+                        size=np.array(weights_3d) * 20,
+                        color=weights_3d,
+                        colorscale='Viridis',
+                        opacity=0.7,
+                        colorbar=dict(title="Weight", x=1.05)
+                    ),
+                    name='Sources (E, τ, t)',
+                    showlegend=False
+                ),
+                row=3, col=1
+            )
+            
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[energy_query],
+                    y=[duration_query],
+                    z=[time],
+                    mode='markers',
+                    marker=dict(
+                        size=15,
+                        color='red',
+                        symbol='diamond'
+                    ),
+                    name='Query Point',
+                    showlegend=False
+                ),
+                row=3, col=1
+            )
+        
+        # 8. Attention network (simplified)
+        if len(final_weights) > 5:
+            top_indices = np.argsort(final_weights)[-5:]
+            top_weights = final_weights[top_indices]
+            node_x = [0] + list(range(1, 6))
+            node_y = [0] + [0] * 5
+            node_text = ['Query'] + [f'Source {i+1}' for i in top_indices]
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=node_x,
+                    y=node_y,
+                    mode='markers+text',
+                    text=node_text,
+                    textposition="top center",
+                    marker=dict(
+                        size=[30] + list(top_weights * 50),
+                        color=['red'] + ['blue'] * 5
+                    ),
+                    name='Attention Network',
+                    showlegend=False
+                ),
+                row=3, col=2
+            )
+            
+            for i in range(1, 6):
+                fig.add_trace(
+                    go.Scatter(
+                        x=[0, i],
+                        y=[0, 0],
+                        mode='lines',
+                        line=dict(width=top_weights[i-1] * 10, color='gray'),
+                        showlegend=False
+                    ),
+                    row=3, col=2
+                )
+        
+        # 9. Weight evolution over time
+        if len(results['attention_maps']) > 1:
+            if len(final_weights) > 0:
+                top_idx = np.argmax(final_weights)
+                weight_evolution = []
+                for t_idx in range(len(results['attention_maps'])):
+                    if top_idx < len(results['attention_maps'][t_idx]):
+                        weight_evolution.append(results['attention_maps'][t_idx][top_idx])
+                
+                if weight_evolution:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=time_points[:len(weight_evolution)],
+                            y=weight_evolution,
+                            mode='lines+markers',
+                            line=dict(color='purple', width=3),
+                            name='Top Source Weight',
+                            showlegend=False
+                        ),
+                        row=3, col=3
+                    )
+        
         fig.update_layout(
             height=1000,
             title_text=f"ST-DGPA Analysis at t={time} ns (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
-            showlegend=True
+            showlegend=True,
+            legend=dict(x=1.05, y=1)
         )
+        
+        # Update axes labels
+        for row in [1, 2]:
+            for col in [1, 2, 3]:
+                fig.update_xaxes(title_text="Source Index" if col <= 2 else "Time (ns)", row=row, col=col)
+                fig.update_yaxes(title_text="Weight", row=row, col=col)
+        
+        fig.update_polars(
+            radialaxis=dict(visible=True, range=[0, 1]),
+            angularaxis=dict(direction="clockwise"),
+            row=2, col=3
+        )
+        
+        fig.update_scenes(
+            xaxis_title="Energy (mJ)",
+            yaxis_title="Duration (ns)",
+            zaxis_title="Time (ns)",
+            camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)),
+            row=3, col=1
+        )
+        
+        fig.update_xaxes(title_text="Node", row=3, col=2)
+        fig.update_yaxes(title_text="", showticklabels=False, row=3, col=2)
+        fig.update_xaxes(title_text="Time (ns)", row=3, col=3)
+        fig.update_yaxes(title_text="Weight", row=3, col=3)
         
         return fig
     
     @staticmethod
-    def create_confidence_plot(results: Dict, time_points: np.ndarray) -> go.Figure:
-        """Create confidence evolution plot"""
-        fig = go.Figure()
+    def create_temporal_analysis(results, time_points):
+        """Create temporal-specific analysis visualizations"""
+        if not results or 'heat_transfer_indicators' not in results:
+            return None
         
-        if 'confidence_scores' in results and results['confidence_scores']:
-            fig.add_trace(go.Scatter(
-                x=time_points,
-                y=results['confidence_scores'],
-                mode='lines+markers',
-                name='Prediction Confidence',
-                line=dict(color='orange', width=3),
-                fill='tozeroy',
-                fillcolor='rgba(255, 165, 0, 0.2)'
-            ))
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=[
+                "Heat Transfer Phase Evolution",
+                "Fourier Number Evolution",
+                "Temporal Confidence",
+                "Thermal Penetration Depth"
+            ],
+            vertical_spacing=0.15,
+            horizontal_spacing=0.15
+        )
         
-        if 'temporal_confidences' in results and results['temporal_confidences']:
-            fig.add_trace(go.Scatter(
-                x=time_points,
-                y=results['temporal_confidences'],
+        # 1. Heat transfer phase evolution
+        phases = [ind.get('phase', 'Unknown') for ind in results['heat_transfer_indicators'] if ind]
+        phase_mapping = {'Early Heating': 0, 'Heating': 1, 'Early Cooling': 2, 'Diffusion Cooling': 3}
+        phase_values = [phase_mapping.get(p, 0) for p in phases]
+        
+        fig.add_trace(
+            go.Scatter(
+                x=time_points[:len(phase_values)],
+                y=phase_values,
                 mode='lines+markers',
-                name='Temporal Confidence',
-                line=dict(color='green', width=3, dash='dash')
-            ))
+                line=dict(color='red', width=3),
+                name='Phase',
+                showlegend=False
+            ),
+            row=1, col=1
+        )
+        
+        for phase_name, phase_val in phase_mapping.items():
+            fig.add_hline(y=phase_val, line_dash="dot", line_color="gray",
+                         annotation_text=phase_name, row=1, col=1)
+        
+        # 2. Fourier number evolution
+        fourier_numbers = [ind.get('fourier_number', 0) for ind in results['heat_transfer_indicators'] if ind]
+        if fourier_numbers:
+            fig.add_trace(
+                go.Scatter(
+                    x=time_points[:len(fourier_numbers)],
+                    y=fourier_numbers,
+                    mode='lines+markers',
+                    line=dict(color='blue', width=3),
+                    name='Fourier Number',
+                    showlegend=False
+                ),
+                row=1, col=2
+            )
+        
+        # 3. Temporal confidence
+        if 'temporal_confidences' in results:
+            fig.add_trace(
+                go.Scatter(
+                    x=time_points[:len(results['temporal_confidences'])],
+                    y=results['temporal_confidences'],
+                    mode='lines+markers',
+                    line=dict(color='green', width=3),
+                    fill='tozeroy',
+                    fillcolor='rgba(0, 255, 0, 0.2)',
+                    name='Temporal Confidence',
+                    showlegend=False
+                ),
+                row=2, col=1
+            )
+        
+        # 4. Thermal penetration depth
+        penetration_depths = [ind.get('thermal_penetration_um', 0) for ind in results['heat_transfer_indicators'] if ind]
+        if penetration_depths:
+            fig.add_trace(
+                go.Scatter(
+                    x=time_points[:len(penetration_depths)],
+                    y=penetration_depths,
+                    mode='lines+markers',
+                    line=dict(color='orange', width=3),
+                    name='Penetration (μm)',
+                    showlegend=False
+                ),
+                row=2, col=2
+            )
         
         fig.update_layout(
-            title="Prediction Confidence Over Time",
-            xaxis_title="Time (ns)",
-            yaxis_title="Confidence",
-            height=400,
-            yaxis_range=[0, 1],
-            hovermode='x unified'
+            height=700,
+            title_text="Temporal Analysis of Heat Transfer Characteristics",
+            showlegend=False
         )
+        
+        fig.update_xaxes(title_text="Time (ns)", row=1, col=1)
+        fig.update_yaxes(title_text="Phase", row=1, col=1)
+        fig.update_xaxes(title_text="Time (ns)", row=1, col=2)
+        fig.update_yaxes(title_text="Fourier Number", row=1, col=2)
+        fig.update_xaxes(title_text="Time (ns)", row=2, col=1)
+        fig.update_yaxes(title_text="Confidence", row=2, col=1)
+        fig.update_xaxes(title_text="Time (ns)", row=2, col=2)
+        fig.update_yaxes(title_text="Depth (μm)", row=2, col=2)
         
         return fig
 
 # =============================================
-# 6. EXPORT UTILITIES
-# =============================================
-class ExportManager:
-    """Handles export of results in various formats"""
-    
-    @staticmethod
-    def export_to_json(data: Dict, filename: Optional[str] = None) -> Tuple[str, str]:
-        """Export data to JSON format"""
-        if filename is None:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"stdgpa_export_{timestamp}.json"
-        
-        # Convert numpy types to Python types for JSON serialization
-        def convert_numpy(obj):
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, dict):
-                return {k: convert_numpy(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_numpy(v) for v in obj]
-            return obj
-        
-        json_str = json.dumps(convert_numpy(data), indent=2)
-        return json_str, filename
-    
-    @staticmethod
-    def export_to_csv(df: pd.DataFrame, filename: Optional[str] = None) -> Tuple[str, str]:
-        """Export DataFrame to CSV"""
-        if filename is None:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"stdgpa_export_{timestamp}.csv"
-        
-        csv_str = df.to_csv(index=False)
-        return csv_str, filename
-    
-    @staticmethod
-    def export_plotly_figure(fig: go.Figure, format: str = 'png',
-                           filename: Optional[str] = None) -> Optional[bytes]:
-        """Export Plotly figure to image format"""
-        try:
-            if filename is None:
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = f"stdgpa_plot_{timestamp}.{format}"
-            
-            if format == 'png':
-                return fig.to_image(format='png', width=1200, height=800, scale=2)
-            elif format == 'svg':
-                return fig.to_image(format='svg', width=1200, height=800)
-            elif format == 'html':
-                return fig.to_html(include_plotlyjs='cdn').encode('utf-8')
-            else:
-                st.error(f"Unsupported export format: {format}")
-                return None
-        except Exception as e:
-            st.error(f"Export error: {e}")
-            st.info("Tip: Install 'kaleido' for image export: pip install -U kaleido")
-            return None
-
-# =============================================
-# 7. MAIN APPLICATION
+# MAIN INTEGRATED APPLICATION
 # =============================================
 def main():
-    # Page configuration
     st.set_page_config(
-        page_title="Laser Soldering ST-DGPA Platform",
+        page_title="Enhanced FEA Laser Simulation Platform with ST-DGPA",
         layout="wide",
         initial_sidebar_state="expanded",
         page_icon="🔬"
     )
     
-    # Custom CSS for enhanced styling
+    # Custom CSS with enhanced styling
     st.markdown("""
     <style>
     .main-header {
-        font-size: 2.5rem;
-        text-align: center;
-        margin-bottom: 1.5rem;
-        font-weight: 800;
-        color: #1a202c;
+        font-size: 3rem;
         background: linear-gradient(90deg, #1E88E5, #4A00E0);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
+        text-align: center;
+        margin-bottom: 1.5rem;
+        font-weight: 800;
     }
     .sub-header {
-        font-size: 1.5rem;
+        font-size: 1.8rem;
         color: #2c3e50;
         margin-top: 1.5rem;
         margin-bottom: 1rem;
         padding-bottom: 0.5rem;
-        border-bottom: 2px solid #3498db;
+        border-bottom: 3px solid #3498db;
         font-weight: 600;
     }
     .info-box {
-        background-color: #F0F9FF;
-        border-left: 4px solid #3B82F6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin: 1rem 0;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1.5rem 0;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+    }
+    .warning-box {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1.5rem 0;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+    }
+    .success-box {
+        background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1.5rem 0;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+    }
+    .stdgpa-box {
+        background: linear-gradient(135deg, #f093fb 0%, #00f2fe 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1.5rem 0;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+    }
+    .heat-transfer-box {
+        background: linear-gradient(135deg, #ff9a9e 0%, #fad0c4 100%);
+        color: #333;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1.5rem 0;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
     }
     .metric-card {
         background: white;
         padding: 1rem;
-        border-radius: 0.5rem;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        margin-bottom: 0.5rem;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        margin-bottom: 1rem;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 12px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: #f8f9fa;
+        border-radius: 8px 8px 0 0;
+        color: #495057;
+        font-weight: 600;
+        padding: 0 24px;
+        transition: all 0.3s ease;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        background-color: #e9ecef;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1E88E5;
+        color: white;
+    }
+    .stButton > button {
+        background: linear-gradient(90deg, #1E88E5, #4A00E0);
+        color: white;
+        border: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+    }
+    .interpolation-3d-container {
+        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1rem 0;
+    }
+    .cache-status {
+        background: #e8f5e8;
+        border-left: 4px solid #4CAF50;
+        padding: 0.75rem;
+        margin: 0.5rem 0;
+        border-radius: 4px;
+        font-size: 0.9rem;
+    }
+    .radar-controls {
+        background: #f0f9ff;
+        border-left: 4px solid #3B82F6;
+        padding: 1rem;
+        border-radius: 8px;
+        margin: 1rem 0;
     }
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<h1 class="main-header">🔬 Laser Soldering ST-DGPA Analysis Platform</h1>', unsafe_allow_html=True)
-
-    # Initialize Session State
+    st.markdown('<h1 class="main-header">🔬 Enhanced FEA Laser Simulation Platform with ST-DGPA</h1>',
+               unsafe_allow_html=True)
+    
+    # Initialize session state
     if 'data_loader' not in st.session_state:
         st.session_state.data_loader = UnifiedFEADataLoader()
-    if 'extrapolator' not in st.session_state:
-        st.session_state.extrapolator = SpatioTemporalGatedPhysicsAttentionExtrapolator()
-    if 'polar_viz' not in st.session_state:
-        st.session_state.polar_viz = PolarRadarVisualizer()
-    # Sankey visualizer removed from UI
-    if 'enhanced_viz' not in st.session_state:
-        st.session_state.enhanced_viz = EnhancedVisualizer()
-    if 'export_manager' not in st.session_state:
-        st.session_state.export_manager = ExportManager()
     
-    # Initialize result containers
-    if 'interpolation_results' not in st.session_state:
-        st.session_state.interpolation_results = None
-    if 'interpolation_params' not in st.session_state:
-        st.session_state.interpolation_params = None
-    if 'polar_query' not in st.session_state:
-        st.session_state.polar_query = None
-    if 'data_loaded' not in st.session_state:
-        st.session_state.data_loaded = False
-
-    # Sidebar Configuration
+    st.session_state.extrapolator = SpatioTemporalGatedPhysicsAttentionExtrapolator(
+        sigma_param=0.3, spatial_weight=0.5, n_heads=4, temperature=1.0,
+        sigma_g=0.20, s_E=10.0, s_tau=5.0, s_t=20.0, temporal_weight=0.3
+    )
+    st.session_state.visualizer = EnhancedVisualizer()
+    st.session_state.data_loaded = False
+    st.session_state.current_mode = "Data Viewer"
+    st.session_state.selected_colormap = "Viridis"
+    st.session_state.interpolation_results = None
+    st.session_state.interpolation_params = None
+    st.session_state.interpolation_3d_cache = {}
+    st.session_state.interpolation_field_history = OrderedDict()
+    st.session_state.current_3d_field = None
+    st.session_state.current_3d_timestep = 0
+    st.session_state.last_prediction_id = None
+    st.session_state.polar_query = None
+    st.session_state.polar_field = None
+    st.session_state.polar_timestep = 1
+    
+    # Sidebar
     with st.sidebar:
-        st.header("⚙️ Configuration")
+        st.markdown("### ⚙️ Navigation")
+        app_mode = st.radio(
+            "Select Mode",
+            ["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis", "ST-DGPA Analysis", "Heat Transfer Analysis"],
+            index=["Data Viewer", "Interpolation/Extrapolation", "Comparative Analysis", "ST-DGPA Analysis", "Heat Transfer Analysis"].index(
+                st.session_state.current_mode if 'current_mode' in st.session_state else "Data Viewer"
+            ),
+            key="nav_mode"
+        )
+        st.session_state.current_mode = app_mode
         
-        # Data loading options
-        load_full = st.checkbox("Load Full Mesh", value=True,
-                               help="Load complete mesh data for 3D visualization (slower)")
+        st.markdown("---")
+        st.markdown("### 📊 Data Settings")
+        col1, col2 = st.columns(2)
+        with col1:
+            load_full_data = st.checkbox("Load Full Mesh", value=True,
+                                       help="Load complete mesh data for 3D visualization")
+        with col2:
+            st.session_state.selected_colormap = st.selectbox(
+                "Colormap",
+                EnhancedVisualizer.EXTENDED_COLORMAPS,
+                index=0
+            )
+        
+        if st.session_state.current_mode == "Interpolation/Extrapolation" and not load_full_data:
+            st.warning("⚠️ Full mesh loading is required for 3D interpolation visualization. Please enable and reload.")
         
         if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
             with st.spinner("Loading simulation data..."):
-                sims, summaries = st.session_state.data_loader.load_all_simulations(
-                    load_full_mesh=load_full
+                CacheManager.clear_3d_cache()
+                st.session_state.last_prediction_id = None
+                simulations, summaries = st.session_state.data_loader.load_all_simulations(
+                    load_full_mesh=load_full_data
                 )
-                st.session_state.simulations = sims
+                st.session_state.simulations = simulations
                 st.session_state.summaries = summaries
-                
-                if sims and summaries:
+                if simulations and summaries:
                     st.session_state.extrapolator.load_summaries(summaries)
                     st.session_state.data_loaded = True
                     st.session_state.available_fields = set()
-                    for s in summaries:
-                        st.session_state.available_fields.update(s['field_stats'].keys())
+                    for summary in summaries:
+                        st.session_state.available_fields.update(summary['field_stats'].keys())
         
-        # Show loaded data summary
-        if st.session_state.get('data_loaded') and st.session_state.get('summaries'):
-            st.success(f"✅ {len(st.session_state.summaries)} simulations loaded")
+        # Cache management controls
+        if st.session_state.data_loaded and 'interpolation_3d_cache' in st.session_state:
             st.markdown("---")
-            
-            # ST-DGPA Parameters
-            st.header("🎯 ST-DGPA Parameters")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                sigma_g = st.slider("σ_g (Gating)", 0.05, 1.0, 0.20, 0.05,
-                                   help="Gating kernel width - smaller = sharper gating")
-                s_E = st.slider("s_E (Energy)", 0.1, 50.0, 10.0, 0.5,
-                               help="Energy scaling factor in mJ")
-            with col2:
-                s_tau = st.slider("s_τ (Duration)", 0.1, 20.0, 5.0, 0.5,
-                                 help="Duration scaling factor in ns")
-                s_t = st.slider("s_t (Time)", 1.0, 50.0, 20.0, 1.0,
-                               help="Time scaling factor in ns")
-            
-            temporal_weight = st.slider("Temporal Weight", 0.0, 1.0, 0.3, 0.05,
-                                       help="Weight for temporal similarity in attention")
-            
-            # Update extrapolator parameters
-            st.session_state.extrapolator.sigma_g = sigma_g
-            st.session_state.extrapolator.s_E = s_E
-            st.session_state.extrapolator.s_tau = s_tau
-            st.session_state.extrapolator.s_t = s_t
-            st.session_state.extrapolator.temporal_weight = temporal_weight
-            
-            # Cache management
-            st.markdown("---")
-            st.header("🗄️ Cache Management")
-            if st.button("Clear Cache", use_container_width=True):
-                CacheManager.clear_3d_cache()
-            
-            if 'interpolation_3d_cache' in st.session_state:
+            st.markdown("### 🗄️ Cache Management")
+            with st.expander("Cache Statistics", expanded=False):
                 cache_size = len(st.session_state.interpolation_3d_cache)
-                st.caption(f"Cache size: {cache_size}/20 entries")
-
-    # Main Tabs - SANKEY TAB REMOVED
-    tabs = st.tabs([
-        "📊 Data Overview",
-        "🔮 Interpolation",
-        "🎯 Polar Radar",
-        "🧠 ST-DGPA Analysis",
-        "💾 Export"
-    ])
+                history_size = len(st.session_state.interpolation_field_history)
+                st.metric("Cached Fields", cache_size)
+                st.metric("Field History", history_size)
+                if cache_size > 0:
+                    st.write("**Cached Fields:**")
+                    for cache_key, cache_data in list(st.session_state.interpolation_3d_cache.items())[:5]:
+                        field_name = cache_data.get('field_name', 'Unknown')
+                        timestep = cache_data.get('timestep_idx', 0)
+                        st.caption(f"• {field_name} (t={timestep})")
+                    if cache_size > 5:
+                        st.caption(f"... and {cache_size - 5} more")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Clear Cache", use_container_width=True):
+                        CacheManager.clear_3d_cache()
+                        st.rerun()
+                with col2:
+                    if st.button("Refresh Stats", use_container_width=True):
+                        st.rerun()
+        
+        if st.session_state.data_loaded:
+            st.markdown("---")
+            st.markdown("### 📈 Loaded Data")
+            with st.expander("Data Overview", expanded=True):
+                st.metric("Simulations", len(st.session_state.simulations))
+                st.metric("Available Fields", len(st.session_state.available_fields))
+                if st.session_state.summaries:
+                    energies = [s['energy'] for s in st.session_state.summaries]
+                    durations = [s['duration'] for s in st.session_state.summaries]
+                    st.metric("Energy Range", f"{min(energies):.1f} - {max(energies):.1f} mJ")
+                    st.metric("Duration Range", f"{min(durations):.1f} - {max(durations):.1f} ns")
     
-    # Check if data is loaded
-    if not st.session_state.get('data_loaded') or not st.session_state.get('summaries'):
-        st.info("👈 Please load simulations using the sidebar to begin analysis.")
+    # Main content based on selected mode
+    if app_mode == "Data Viewer":
+        render_data_viewer()
+    elif app_mode == "Interpolation/Extrapolation":
+        render_interpolation_extrapolation()
+    elif app_mode == "Comparative Analysis":
+        render_comparative_analysis()
+    elif app_mode == "ST-DGPA Analysis":
+        render_stdgpa_analysis()
+    elif app_mode == "Heat Transfer Analysis":
+        render_heat_transfer_analysis()
+
+def render_data_viewer():
+    """Render the enhanced data visualization interface"""
+    st.markdown('<h2 class="sub-header">📁 Data Viewer</h2>', unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first using the "Load All Simulations" button in the sidebar.</p>
+        </div>
+        """, unsafe_allow_html=True)
         with st.expander("📁 Expected Directory Structure"):
             st.code("""
             fea_solutions/
-            ├── q0p5mJ-delta4p2ns/    # Energy: 0.5 mJ, Duration: 4.2 ns
-            │   ├── a_t0001.vtu       # Timestep 1
-            │   ├── a_t0002.vtu       # Timestep 2
+            ├── q0p5mJ-delta4p2ns/        # Energy: 0.5 mJ, Duration: 4.2 ns
+            │   ├── a_t0001.vtu           # Timestep 1
+            │   ├── a_t0002.vtu           # Timestep 2
             │   └── ...
-            ├── q1p0mJ-delta2p0ns/    # Energy: 1.0 mJ, Duration: 2.0 ns
-            └── ...
+            └── q1p0mJ-delta2p0ns/        # Energy: 1.0 mJ, Duration: 2.0 ns
+                ├── a_t0001.vtu
+                └── ...
             """)
         return
     
-    # --- TAB 1: Data Overview ---
-    with tabs[0]:
-        st.subheader("Loaded Simulations Summary")
+    simulations = st.session_state.simulations
+    
+    # Simulation selection
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        sim_name = st.selectbox("Select Simulation", sorted(simulations.keys()),
+                              key="viewer_sim_select", help="Choose a simulation to visualize")
+    sim = simulations[sim_name]
+    with col2:
+        st.metric("Energy", f"{sim['energy_mJ']:.2f} mJ")
+    with col3:
+        st.metric("Duration", f"{sim['duration_ns']:.2f} ns")
+    
+    if not sim.get('has_mesh', False):
+        st.warning("This simulation was loaded without mesh data. Please reload with 'Load Full Mesh' enabled.")
+        return
+    
+    if 'field_info' not in sim or not sim['field_info']:
+        st.error("No field data available for this simulation.")
+        return
+    
+    # Field, timestep, colormap, and opacity selection
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        field = st.selectbox("Select Field", sorted(sim['field_info'].keys()),
+                           key="viewer_field_select", help="Choose a field to visualize")
+    with col2:
+        timestep = st.slider("Timestep", 0, sim['n_timesteps'] - 1, 0,
+                           key="viewer_timestep_slider", help="Select timestep to display")
+    with col3:
+        colormap = st.selectbox("Colormap", EnhancedVisualizer.EXTENDED_COLORMAPS,
+                              index=EnhancedVisualizer.EXTENDED_COLORMAPS.index(st.session_state.selected_colormap),
+                              key="viewer_colormap")
+    with col4:
+        opacity = st.slider("Opacity", min_value=0.0, max_value=1.0, value=0.9, step=0.05,
+                          key="viewer_opacity", help="Adjust transparency of the 3D visualization")
+    
+    # Main 3D visualization
+    if 'points' in sim and 'fields' in sim and field in sim['fields']:
+        pts = sim['points']
+        kind, _ = sim['field_info'][field]
+        raw = sim['fields'][field][timestep]
         
-        # Create summary DataFrame
-        df_summary = pd.DataFrame([
-            {
-                'Name': s['name'],
+        if kind == "scalar":
+            values = np.where(np.isnan(raw), 0, raw)
+            label = field
+        else:
+            magnitude = np.linalg.norm(raw, axis=1)
+            values = np.where(np.isnan(magnitude), 0, magnitude)
+            label = f"{field} (magnitude)"
+        
+        # Create 3D visualization
+        if sim.get('triangles') is not None and len(sim['triangles']) > 0:
+            tri = sim['triangles']
+            valid_triangles = [t for t in tri if all(idx < len(pts) for idx in t)]
+            if valid_triangles:
+                valid_triangles = np.array(valid_triangles)
+                mesh_data = go.Mesh3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
+                    intensity=values, colorscale=colormap, intensitymode='vertex',
+                    colorbar=dict(title=dict(text=label, font=dict(size=14)), thickness=20, len=0.75),
+                    opacity=opacity,
+                    lighting=dict(ambient=0.8, diffuse=0.8, specular=0.5, roughness=0.5),
+                    lightposition=dict(x=100, y=200, z=300),
+                    hovertemplate='<b>Value:</b> %{intensity:.3f}<br><b>X:</b> %{x:.3f}<br><b>Y:</b> %{y:.3f}<br><b>Z:</b> %{z:.3f}<extra></extra>'
+                )
+            else:
+                mesh_data = go.Scatter3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode='markers',
+                    marker=dict(size=4, color=values, colorscale=colormap, opacity=opacity,
+                              colorbar=dict(title=dict(text=label, font=dict(size=14)), thickness=20, len=0.75), showscale=True),
+                    hovertemplate='<b>Value:</b> %{marker.color:.3f}<br><b>X:</b> %{x:.3f}<br><b>Y:</b> %{y:.3f}<br><b>Z:</b> %{z:.3f}<extra></extra>'
+                )
+        else:
+            mesh_data = go.Scatter3d(
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode='markers',
+                marker=dict(size=4, color=values, colorscale=colormap, opacity=opacity,
+                          colorbar=dict(title=dict(text=label, font=dict(size=14)), thickness=20, len=0.75), showscale=True),
+                hovertemplate='<b>Value:</b> %{marker.color:.3f}<br><b>X:</b> %{x:.3f}<br><b>Y:</b> %{y:.3f}<br><b>Z:</b> %{z:.3f}<extra></extra>'
+            )
+        
+        fig = go.Figure(data=mesh_data)
+        fig.update_layout(
+            title=dict(text=f"{label} at Timestep {timestep + 1}<br><sub>{sim_name}</sub>", font=dict(size=20)),
+            scene=dict(aspectmode="data", camera=dict(eye=dict(x=1.5, y=1.5, z=1.5), up=dict(x=0, y=0, z=1)),
+                      xaxis=dict(title="X", gridcolor="lightgray", showbackground=True, backgroundcolor="white"),
+                      yaxis=dict(title="Y", gridcolor="lightgray", showbackground=True, backgroundcolor="white"),
+                      zaxis=dict(title="Z", gridcolor="lightgray", showbackground=True, backgroundcolor="white")),
+            height=700, margin=dict(l=0, r=0, t=80, b=0)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Field statistics
+        st.markdown('<h3 class="sub-header">📊 Field Statistics</h3>', unsafe_allow_html=True)
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1: st.metric("Min", f"{np.min(values):.3f}")
+        with col2: st.metric("Max", f"{np.max(values):.3f}")
+        with col3: st.metric("Mean", f"{np.mean(values):.3f}")
+        with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
+        with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
+        
+        # Field evolution over time
+        st.markdown('<h3 class="sub-header">📈 Field Evolution Over Time</h3>', unsafe_allow_html=True)
+        summary = next((s for s in st.session_state.summaries if s['name'] == sim_name), None)
+        if summary and field in summary['field_stats']:
+            stats = summary['field_stats'][field]
+            fig_time = go.Figure()
+            if stats['mean']:
+                fig_time.add_trace(go.Scatter(x=summary['timesteps'], y=stats['mean'], mode='lines',
+                                            name='Mean', line=dict(color='blue', width=3)))
+                if stats['std']:
+                    y_upper = np.array(stats['mean']) + np.array(stats['std'])
+                    y_lower = np.array(stats['mean']) - np.array(stats['std'])
+                    fig_time.add_trace(go.Scatter(
+                        x=summary['timesteps'] + summary['timesteps'][::-1],
+                        y=np.concatenate([y_upper, y_lower[::-1]]),
+                        fill='toself', fillcolor='rgba(0, 100, 255, 0.2)',
+                        line=dict(color='rgba(255,255,255,0)'), showlegend=False, name='± Std Dev'
+                    ))
+                if stats['max']:
+                    fig_time.add_trace(go.Scatter(x=summary['timesteps'], y=stats['max'], mode='lines',
+                                                name='Maximum', line=dict(color='red', width=2, dash='dash')))
+            fig_time.update_layout(
+                title=dict(text=f"{field} Statistics Over Time", font=dict(size=18)),
+                xaxis_title="Timestep (ns)", yaxis_title=f"{field} Value",
+                hovermode="x unified", height=400, showlegend=True,
+                legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+            )
+            st.plotly_chart(fig_time, use_container_width=True)
+
+def render_interpolation_extrapolation():
+    """Render the enhanced interpolation/extrapolation interface with ST-DGPA"""
+    st.markdown('<h2 class="sub-header">🔮 Interpolation/Extrapolation Engine with ST-DGPA</h2>',
+               unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first to enable interpolation/extrapolation capabilities.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    if st.session_state.simulations and not next(iter(st.session_state.simulations.values())).get('has_mesh', False):
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ Full Mesh Data Required</h3>
+        <p>3D interpolation visualization requires full mesh data. Please reload simulations with "Load Full Mesh" enabled in the sidebar.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("""
+    <div class="stdgpa-box">
+    <h3>🧠 Spatio-Temporal Gated Physics Attention (ST-DGPA)</h3>
+    <p>This engine uses <strong>Spatio-Temporal Gated Physics Attention (ST-DGPA)</strong> to interpolate and extrapolate simulation results.</p>
+    <p><strong>ST-DGPA Formula:</strong> w_i = (α_i × gating_i) / (∑_j α_j × gating_j)</p>
+    <p>where φ_i = √(((E*-E_i)/s_E)² + ((τ*-τ_i)/s_τ)² + ((t*-t_i)/s_t)²) and gating_i = exp(-φ_i²/(2σ_g²))</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Display loaded simulations summary
+    with st.expander("📋 Loaded Simulations Summary", expanded=True):
+        if st.session_state.summaries:
+            df_summary = pd.DataFrame([{
+                'Simulation': s['name'],
                 'Energy (mJ)': s['energy'],
                 'Duration (ns)': s['duration'],
                 'Timesteps': len(s['timesteps']),
-                'Fields': ', '.join(sorted(s['field_stats'].keys())[:3]) + ('...' if len(s['field_stats']) > 3 else '')
-            }
-            for s in st.session_state.summaries
+                'Max Time (ns)': max(s['timesteps']) if s['timesteps'] else 0,
+                'Fields': ', '.join(sorted(s['field_stats'].keys())[:3]) + ('...' if len(s['field_stats']) > 3 else ''),
+                'Has Full Mesh': 'Yes' if st.session_state.simulations.get(s['name'], {}).get('has_mesh', False) else 'No'
+            } for s in st.session_state.summaries])
+            st.dataframe(
+                df_summary.style.format({
+                    'Energy (mJ)': '{:.2f}',
+                    'Duration (ns)': '{:.2f}',
+                    'Max Time (ns)': '{:.0f}'
+                }).background_gradient(subset=['Energy (mJ)', 'Duration (ns)', 'Max Time (ns)'], cmap='Blues'),
+                use_container_width=True, height=300
+            )
+    
+    # Query parameters
+    st.markdown('<h3 class="sub-header">🎯 Query Parameters</h3>', unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        if st.session_state.summaries:
+            energies = [s['energy'] for s in st.session_state.summaries]
+            min_energy, max_energy = min(energies), max(energies)
+        else:
+            min_energy, max_energy = 0.1, 50.0
+        energy_query = st.number_input("Energy (mJ)", min_value=float(min_energy * 0.5),
+                                     max_value=float(max_energy * 2.0),
+                                     value=float((min_energy + max_energy) / 2), step=0.1,
+                                     key="interp_energy", help=f"Training range: {min_energy:.1f} - {max_energy:.1f} mJ")
+    with col2:
+        if st.session_state.summaries:
+            durations = [s['duration'] for s in st.session_state.summaries]
+            min_duration, max_duration = min(durations), max(durations)
+        else:
+            min_duration, max_duration = 0.5, 20.0
+        duration_query = st.number_input("Pulse Duration (ns)", min_value=float(min_duration * 0.5),
+                                       max_value=float(max_duration * 2.0),
+                                       value=float((min_duration + max_duration) / 2), step=0.1,
+                                       key="interp_duration", help=f"Training range: {min_duration:.1f} - {max_duration:.1f} ns")
+    with col3:
+        max_time = st.number_input("Max Prediction Time (ns)", min_value=1, max_value=200, value=50, step=1,
+                                 key="interp_maxtime", help="Maximum time for prediction (ns)")
+    with col4:
+        time_resolution = st.selectbox("Time Resolution", ["1 ns", "2 ns", "5 ns", "10 ns"], index=1, key="interp_resolution")
+    
+    time_step_map = {"1 ns": 1, "2 ns": 2, "5 ns": 5, "10 ns": 10}
+    time_step = time_step_map[time_resolution]
+    time_points = np.arange(1, max_time + 1, time_step)
+    
+    # Model parameters with ST-DGPA-specific parameters
+    with st.expander("⚙️ ST-DGPA Attention Parameters", expanded=False):
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            sigma_param = st.slider("Kernel Width (σ)", min_value=0.1, max_value=1.0, value=0.3, step=0.05,
+                                  key="interp_sigma", help="Controls the attention focus width")
+        with col2:
+            spatial_weight = st.slider("Spatial Weight", min_value=0.0, max_value=1.0, value=0.5, step=0.05,
+                                     key="interp_spatial", help="Weight for spatial locality regulation")
+        with col3:
+            n_heads = st.slider("Attention Heads", min_value=1, max_value=8, value=4, step=1,
+                              key="interp_heads", help="Number of parallel attention heads")
+        with col4:
+            temperature = st.slider("Temperature", min_value=0.1, max_value=2.0, value=1.0, step=0.1,
+                                  key="interp_temp", help="Softmax temperature for attention weights")
+    
+    # ST-DGPA-specific parameters
+    st.markdown("### 🎯 ST-DGPA Gating Parameters")
+    col5, col6, col7, col8 = st.columns(4)
+    with col5:
+        sigma_g = st.slider("Gating Kernel Width (σ_g)", min_value=0.05, max_value=1.0, value=0.20, step=0.05,
+                          key="interp_sigma_g", help="Sharpness of the (E, τ, t) gating kernel")
+    with col6:
+        s_E = st.slider("Energy Scale (s_E) [mJ]", min_value=0.1, max_value=50.0, value=10.0, step=0.5,
+                      key="interp_s_E", help="Scaling factor for energy in gating kernel")
+    with col7:
+        s_tau = st.slider("Duration Scale (s_τ) [ns]", min_value=0.1, max_value=20.0, value=5.0, step=0.5,
+                        key="interp_s_tau", help="Scaling factor for pulse duration in gating kernel")
+    with col8:
+        s_t = st.slider("Time Scale (s_t) [ns]", min_value=1.0, max_value=50.0, value=20.0, step=1.0,
+                      key="interp_s_t", help="Scaling factor for time in gating kernel")
+    
+    # Temporal weight parameter
+    st.markdown("### ⏱️ Temporal Weighting")
+    temporal_weight = st.slider("Temporal Similarity Weight", min_value=0.0, max_value=1.0, value=0.3, step=0.05,
+                              key="interp_temporal_weight", help="Weight for temporal similarity in attention calculation")
+    
+    # Update extrapolator parameters
+    st.session_state.extrapolator.sigma_param = sigma_param
+    st.session_state.extrapolator.spatial_weight = spatial_weight
+    st.session_state.extrapolator.n_heads = n_heads
+    st.session_state.extrapolator.temperature = temperature
+    st.session_state.extrapolator.sigma_g = sigma_g
+    st.session_state.extrapolator.s_E = s_E
+    st.session_state.extrapolator.s_tau = s_tau
+    st.session_state.extrapolator.s_t = s_t
+    st.session_state.extrapolator.temporal_weight = temporal_weight
+    
+    # Heat transfer physics parameters
+    with st.expander("🔥 Heat Transfer Physics Parameters", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            thermal_diffusivity = st.number_input("Thermal Diffusivity (m²/s)", min_value=1e-7, max_value=1e-4,
+                                                value=1e-5, format="%.1e", key="thermal_diffusivity",
+                                                help="Material thermal diffusivity (typical metals: ~1e-5 m²/s)")
+            st.session_state.extrapolator.thermal_diffusivity = thermal_diffusivity
+        with col2:
+            spot_radius = st.number_input("Laser Spot Radius (μm)", min_value=1.0, max_value=200.0, value=50.0,
+                                        key="spot_radius", help="Laser spot radius for heat transfer calculations")
+            st.session_state.extrapolator.laser_spot_radius = spot_radius * 1e-6
+        with col3:
+            char_length = st.number_input("Characteristic Length (μm)", min_value=10.0, max_value=500.0, value=100.0,
+                                        key="char_length", help="Characteristic length for heat diffusion")
+            st.session_state.extrapolator.characteristic_length = char_length * 1e-6
+    
+    # Display derived heat transfer parameters
+    fourier_max = st.session_state.extrapolator._compute_fourier_number(max_time)
+    penetration_max = st.session_state.extrapolator._compute_thermal_penetration(max_time)
+    st.info(f"**Derived Parameters:** Max Fourier Number: {fourier_max:.3f}, Max Thermal Penetration: {penetration_max:.1f} μm")
+    
+    # 3D interpolation specific settings
+    with st.expander("🖼️ 3D Interpolation Settings", expanded=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            enable_3d = st.checkbox("Enable 3D Field Interpolation", value=True,
+                                  help="Enable full 3D field interpolation and visualization")
+            optimize_performance = st.checkbox("Optimize Performance", value=True,
+                                            help="Use top-K attention weights and subsampling for large meshes")
+        with col2:
+            if optimize_performance:
+                top_k = st.slider("Top-K Sources", min_value=3, max_value=20, value=10,
+                                help="Use only top-K sources by attention weight")
+                subsample_factor = st.slider("Mesh Subsampling", min_value=1, max_value=10, value=1,
+                                           help="Factor for mesh subsampling (1=full resolution)")
+    
+    # Run prediction
+    if st.button("🚀 Run ST-DGPA Prediction", type="primary", use_container_width=True):
+        with st.spinner("Running Spatio-Temporal Gated Physics Attention (ST-DGPA) prediction..."):
+            CacheManager.clear_3d_cache()
+            results = st.session_state.extrapolator.predict_time_series(
+                energy_query, duration_query, time_points
+            )
+            if results and 'field_predictions' in results and results['field_predictions']:
+                st.session_state.interpolation_results = results
+                st.session_state.interpolation_params = {
+                    'energy_query': energy_query, 'duration_query': duration_query,
+                    'time_points': time_points, 'sigma_param': sigma_param,
+                    'spatial_weight': spatial_weight, 'n_heads': n_heads,
+                    'temperature': temperature, 'sigma_g': sigma_g,
+                    's_E': s_E, 's_tau': s_tau, 's_t': s_t,
+                    'temporal_weight': temporal_weight, 'thermal_diffusivity': thermal_diffusivity,
+                    'top_k': top_k if 'top_k' in locals() and optimize_performance else None,
+                    'subsample_factor': subsample_factor if 'subsample_factor' in locals() and optimize_performance else None
+                }
+                prediction_id = hashlib.md5(
+                    f"{energy_query}_{duration_query}_{sigma_param}_{sigma_g}_{s_t}".encode()
+                ).hexdigest()[:8]
+                st.session_state.last_prediction_id = prediction_id
+                
+                st.markdown("""
+                <div class="success-box">
+                <h3>✅ ST-DGPA Prediction Successful</h3>
+                <p>Spatio-Temporal Gated Physics Attention predictions generated with explicit energy-duration-time gating.</p>
+                <p><strong>Heat transfer characterized:</strong> Fourier numbers and thermal penetration depths computed.</p>
+                <p><strong>Cache initialized:</strong> 3D field interpolations will be cached for faster switching.</p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Visualization tabs - UPDATED: Removed Sankey tab
+                tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+                    "📈 Predictions", "🧠 ST-DGPA Analysis", "⏱️ Temporal Analysis",
+                    "🌐 3D Analysis", "📊 Details", "🖼️ 3D Rendering"
+                ])
+                
+                with tab1:
+                    render_prediction_results(results, time_points, energy_query, duration_query)
+                with tab2:
+                    render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points)
+                with tab3:
+                    render_temporal_analysis(results, time_points, energy_query, duration_query)
+                with tab4:
+                    render_3d_analysis(results, time_points, energy_query, duration_query)
+                with tab5:
+                    render_detailed_results(results, time_points, energy_query, duration_query)
+                with tab6:
+                    render_3d_interpolation(results, time_points, energy_query, duration_query,
+                                          enable_3d, optimize_performance, top_k if optimize_performance else None)
+            else:
+                st.error("Prediction failed. Please check input parameters and ensure sufficient training data.")
+    
+    # If results already exist from previous run, show them
+    elif st.session_state.interpolation_results is not None:
+        st.markdown(f"""
+        <div class="info-box">
+        <h3>📊 Previous ST-DGPA Prediction Results Available</h3>
+        <p>Showing results from previous ST-DGPA prediction run with temporal gating.</p>
+        <p><strong>Prediction ID:</strong> {st.session_state.last_prediction_id or 'N/A'}</p>
+        <p><strong>Cached fields:</strong> {len(st.session_state.interpolation_3d_cache)}</p>
+        <p><strong>Temporal gating enabled:</strong> Yes (s_t = {st.session_state.extrapolator.s_t:.1f} ns)</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        params = st.session_state.interpolation_params or {}
+        energy_query = params.get('energy_query', 0)
+        duration_query = params.get('duration_query', 0)
+        time_points = params.get('time_points', [])
+        results = st.session_state.interpolation_results
+        
+        # Visualization tabs - UPDATED: Removed Sankey tab
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "📈 Predictions", "🧠 ST-DGPA Analysis", "⏱️ Temporal Analysis",
+            "🌐 3D Analysis", "📊 Details", "🖼️ 3D Rendering"
         ])
         
-        # Display with formatting
-        st.dataframe(
-            df_summary.style.format({
-                'Energy (mJ)': '{:.2f}',
-                'Duration (ns)': '{:.2f}'
-            }).background_gradient(subset=['Energy (mJ)', 'Duration (ns)'], cmap='Blues'),
-            use_container_width=True,
-            height=300
-        )
-        
-        # 3D Viewer (if mesh data available)
-        if st.session_state.simulations and next(iter(st.session_state.simulations.values())).get('has_mesh'):
-            st.markdown("### 🎨 3D Field Viewer")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                sim_name = st.selectbox("Simulation", sorted(st.session_state.simulations.keys()), key="viewer_sim")
-            with col2:
-                sim = st.session_state.simulations[sim_name]
-                field = st.selectbox("Field", sorted(sim['field_info'].keys()), key="viewer_field")
-            with col3:
-                timestep = st.slider("Timestep", 0, sim['n_timesteps']-1, 0, key="viewer_timestep")
-            
-            if sim['points'] is not None and field in sim['fields']:
-                values = sim['fields'][field][timestep].copy()
-                
-                # Convert vector/tensor fields to scalar intensity
-                if values.ndim >= 2:
-                    norm_axes = tuple(range(1, values.ndim))
-                    values = np.linalg.norm(values, axis=norm_axes)
-                
-                values = np.nan_to_num(values, nan=0.0)
-                
-                # Determine colormap based on field type
-                colormap = 'Viridis'
-                if 'temp' in field.lower():
-                    colormap = 'Inferno'
-                elif 'stress' in field.lower():
-                    colormap = 'Plasma'
-                
-                # Create 3D visualization
-                if sim['triangles'] is not None and len(sim['triangles']) > 0:
-                    fig = go.Figure(go.Mesh3d(
-                        x=sim['points'][:,0], y=sim['points'][:,1], z=sim['points'][:,2],
-                        i=sim['triangles'][:,0], j=sim['triangles'][:,1], k=sim['triangles'][:,2],
-                        intensity=values,
-                        colorscale=colormap,
-                        intensitymode='vertex',
-                        colorbar=dict(title=field),
-                        hovertemplate='<b>Value:</b> %{intensity:.3f}<br><b>X:</b> %{x:.3f}<br><b>Y:</b> %{y:.3f}<br><b>Z:</b> %{z:.3f}<extra></extra>'
-                    ))
-                else:
-                    fig = go.Figure(go.Scatter3d(
-                        x=sim['points'][:,0], y=sim['points'][:,1], z=sim['points'][:,2],
-                        mode='markers',
-                        marker=dict(
-                            size=3,
-                            color=values,
-                            colorscale=colormap,
-                            colorbar=dict(title=field),
-                            showscale=True
-                        ),
-                        hovertemplate='<b>Value:</b> %{marker.color:.3f}<br><b>X:</b> %{x:.3f}<br><b>Y:</b> %{y:.3f}<br><b>Z:</b> %{z:.3f}<extra></extra>'
-                    ))
-                
-                fig.update_layout(
-                    scene=dict(aspectmode="data"),
-                    title=f"{field} at Timestep {timestep+1}",
-                    height=600
+        with tab1:
+            render_prediction_results(results, time_points, energy_query, duration_query)
+        with tab2:
+            render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points)
+        with tab3:
+            render_temporal_analysis(results, time_points, energy_query, duration_query)
+        with tab4:
+            render_3d_analysis(results, time_points, energy_query, duration_query)
+        with tab5:
+            render_detailed_results(results, time_points, energy_query, duration_query)
+        with tab6:
+            enable_3d = True
+            optimize_performance = params.get('top_k') is not None
+            top_k = params.get('top_k')
+            render_3d_interpolation(results, time_points, energy_query, duration_query,
+                                  enable_3d, optimize_performance, top_k)
+
+def render_prediction_results(results, time_points, energy_query, duration_query):
+    """Render prediction results visualization"""
+    available_fields = list(results['field_predictions'].keys())
+    if not available_fields:
+        st.warning("No field predictions available.")
+        return
+    
+    n_fields = min(len(available_fields), 4)
+    fig = make_subplots(
+        rows=n_fields, cols=1,
+        subplot_titles=[f"Predicted {field}" for field in available_fields[:n_fields]],
+        vertical_spacing=0.1, shared_xaxes=True
+    )
+    
+    for idx, field in enumerate(available_fields[:n_fields]):
+        row = idx + 1
+        if results['field_predictions'][field]['mean']:
+            fig.add_trace(
+                go.Scatter(x=time_points, y=results['field_predictions'][field]['mean'],
+                         mode='lines+markers', name=f'{field} (mean)',
+                         line=dict(width=3, color='blue'), fillcolor='rgba(0, 0, 255, 0.1)'),
+                row=row, col=1
+            )
+            if results['field_predictions'][field]['mean'] and results['field_predictions'][field]['std']:
+                mean_vals = results['field_predictions'][field]['mean']
+                std_vals = results['field_predictions'][field]['std']
+                y_upper = np.array(mean_vals) + np.array(std_vals)
+                y_lower = np.array(mean_vals) - np.array(std_vals)
+                fig.add_trace(
+                    go.Scatter(x=np.concatenate([time_points, time_points[::-1]]),
+                             y=np.concatenate([y_upper, y_lower[::-1]]),
+                             fill='toself', fillcolor='rgba(0, 0, 255, 0.2)',
+                             line=dict(color='rgba(255,255,255,0)'), showlegend=False, name=f'{field} ± std'),
+                    row=row, col=1
                 )
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Field statistics
-                col1, col2, col3, col4 = st.columns(4)
-                with col1: st.metric("Min", f"{np.min(values):.3f}")
-                with col2: st.metric("Max", f"{np.max(values):.3f}")
-                with col3: st.metric("Mean", f"{np.mean(values):.3f}")
-                with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
+    
+    fig.update_layout(
+        height=300 * n_fields,
+        title_text=f"Field Predictions (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
+        showlegend=True, hovermode="x unified"
+    )
+    
+    for i in range(1, n_fields + 1):
+        fig.update_yaxes(title_text="Value", row=i, col=1)
+    fig.update_xaxes(title_text="Time (ns)", row=n_fields, col=1)
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Confidence plot
+    if results['confidence_scores']:
+        fig_conf = go.Figure()
+        fig_conf.add_trace(go.Scatter(
+            x=time_points, y=results['confidence_scores'],
+            mode='lines+markers', line=dict(color='orange', width=3),
+            fill='tozeroy', fillcolor='rgba(255, 165, 0, 0.2)',
+            name='Prediction Confidence'
+        ))
+        if 'temporal_confidences' in results:
+            fig_conf.add_trace(go.Scatter(
+                x=time_points, y=results['temporal_confidences'],
+                mode='lines+markers', line=dict(color='green', width=3, dash='dash'),
+                name='Temporal Confidence'
+            ))
+        fig_conf.update_layout(
+            title="Prediction Confidence Over Time",
+            xaxis_title="Time (ns)", yaxis_title="Confidence",
+            height=400, yaxis_range=[0, 1]
+        )
+        st.plotly_chart(fig_conf, use_container_width=True)
+        
+        avg_conf = np.mean(results['confidence_scores'])
+        min_conf = np.min(results['confidence_scores'])
+        max_conf = np.max(results['confidence_scores'])
+        col1, col2, col3 = st.columns(3)
+        with col1: st.metric("Average Confidence", f"{avg_conf:.3f}")
+        with col2: st.metric("Minimum Confidence", f"{min_conf:.3f}")
+        with col3: st.metric("Maximum Confidence", f"{max_conf:.3f}")
+        
+        if avg_conf < 0.3:
+            st.warning("⚠️ **Low Confidence**: Query parameters are far from training data. Extrapolation risk is high.")
+        elif avg_conf < 0.6:
+            st.info("ℹ️ **Moderate Confidence**: Query parameters are in extrapolation region.")
+        else:
+            st.success("✅ **High Confidence**: Query parameters are well-supported by training data.")
 
-    # --- TAB 2: Interpolation ---
-    with tabs[1]:
-        st.subheader("Run ST-DGPA Interpolation")
+def render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points):
+    """Render ST-DGPA-specific attention visualizations"""
+    if not results.get('physics_attention_maps') or len(results['physics_attention_maps'][0]) == 0:
+        st.info("No ST-DGPA attention data available.")
+        return
+    
+    st.markdown('<h4 class="sub-header">🧠 ST-DGPA Attention Analysis</h4>', unsafe_allow_html=True)
+    
+    selected_timestep_idx = st.slider("Select timestep for ST-DGPA analysis",
+                                    0, len(time_points) - 1, len(time_points) // 2,
+                                    key="stdgpa_timestep")
+    
+    final_weights = results['attention_maps'][selected_timestep_idx]
+    physics_attention = results['physics_attention_maps'][selected_timestep_idx]
+    ett_gating = results['ett_gating_maps'][selected_timestep_idx]
+    selected_time = time_points[selected_timestep_idx]
+    
+    fig = st.session_state.visualizer.create_stdgpa_analysis(
+        results, energy_query, duration_query, time_points
+    )
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Detailed ST-DGPA analysis
+    st.markdown("##### 📊 ST-DGPA Weight Analysis")
+    if len(final_weights) > 0:
+        comparison_data = []
+        for i in range(min(15, len(final_weights))):
+            comparison_data.append({
+                'Source': f"Source {i+1}",
+                'Physics Attention': physics_attention[i],
+                '(E, τ, t) Gating': ett_gating[i],
+                'ST-DGPA Final Weight': final_weights[i],
+                'Weight Change (%)': ((final_weights[i] - physics_attention[i]) / physics_attention[i] * 100) if physics_attention[i] > 0 else 0
+            })
+        df_comparison = pd.DataFrame(comparison_data)
+        styled_df = df_comparison.style.format({
+            'Physics Attention': '{:.4f}',
+            '(E, τ, t) Gating': '{:.4f}',
+            'ST-DGPA Final Weight': '{:.4f}',
+            'Weight Change (%)': '{:.1f}%'
+        })
+        if 'Weight Change (%)' in df_comparison.columns:
+            styled_df = styled_df.background_gradient(
+                subset=['Weight Change (%)'], cmap='RdYlGn', vmin=-100, vmax=100
+            )
+        st.dataframe(styled_df, use_container_width=True)
         
-        # Query parameter inputs
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            # Get energy range from loaded data
-            energies = [s['energy'] for s in st.session_state.summaries]
-            min_e, max_e = min(energies), max(energies)
-            q_E = st.number_input("Energy (mJ)", float(min_e*0.5), float(max_e*2.0), 
-                                 float((min_e+max_e)/2), 0.1, key="interp_energy")
-        with c2:
-            durations = [s['duration'] for s in st.session_state.summaries]
-            min_d, max_d = min(durations), max(durations)
-            q_τ = st.number_input("Duration (ns)", float(min_d*0.5), float(max_d*2.0),
-                                 float((min_d+max_d)/2), 0.1, key="interp_duration")
-        with c3:
-            max_t = st.number_input("Max Time (ns)", 1, 200, 50, 1, key="interp_maxtime")
+        st.markdown("##### 📈 ST-DGPA Statistics")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            max_physics = np.max(physics_attention) if len(physics_attention) > 0 else 0
+            st.metric("Max Physics Attention", f"{max_physics:.4f}")
+        with col2:
+            max_gating = np.max(ett_gating) if len(ett_gating) > 0 else 0
+            st.metric("Max (E, τ, t) Gating", f"{max_gating:.4f}")
+        with col3:
+            max_stdgpa = np.max(final_weights) if len(final_weights) > 0 else 0
+            st.metric("Max ST-DGPA Weight", f"{max_stdgpa:.4f}")
+        with col4:
+            weight_change_avg = np.mean(np.abs(np.array(final_weights) - np.array(physics_attention))) if len(final_weights) > 0 else 0
+            st.metric("Avg Weight Change", f"{weight_change_avg:.4f}")
         
-        time_resolution = st.selectbox("Time Resolution", ["1 ns", "2 ns", "5 ns", "10 ns"], index=1)
-        time_step = {"1 ns": 1, "2 ns": 2, "5 ns": 5, "10 ns": 10}[time_resolution]
-        time_points = np.arange(1, max_t + 1, time_step)
-        
-        # Run prediction button
-        if st.button("🚀 Run ST-DGPA Prediction", type="primary", use_container_width=True):
-            with st.spinner("Computing Spatio-Temporal Gated Physics Attention..."):
-                start_time = time.time()
-                results = st.session_state.extrapolator.predict_time_series(q_E, q_τ, time_points)
-                elapsed = time.time() - start_time
-                
-                if results and results['field_predictions']:
-                    st.session_state.interpolation_results = results
-                    st.session_state.interpolation_params = {
-                        'energy_query': q_E,
-                        'duration_query': q_τ,
-                        'time_points': time_points
-                    }
-                    st.session_state.polar_query = {'Energy': q_E, 'Duration': q_τ}
-                    st.success(f"✅ Prediction Complete ({elapsed:.2f}s)")
+        st.markdown("##### 🔍 ST-DGPA Effect Analysis")
+        if len(physics_attention) > 0 and len(final_weights) > 0:
+            weight_diffs = final_weights - physics_attention
+            boosted_indices = np.where(weight_diffs > 0)[0]
+            suppressed_indices = np.where(weight_diffs < 0)[0]
+            if len(boosted_indices) > 0:
+                max_boost_idx = boosted_indices[np.argmax(weight_diffs[boosted_indices])]
+                max_boost = weight_diffs[max_boost_idx]
+                st.info(f"**ST-DGPA boosted {len(boosted_indices)} sources** (max boost: +{max_boost:.3f} for source {max_boost_idx+1})")
+            if len(suppressed_indices) > 0:
+                max_suppress_idx = suppressed_indices[np.argmin(weight_diffs[suppressed_indices])]
+                max_suppress = weight_diffs[max_suppress_idx]
+                st.info(f"**ST-DGPA suppressed {len(suppressed_indices)} sources** (max suppression: {max_suppress:.3f} for source {max_suppress_idx+1})")
+            
+            top_indices = np.argsort(final_weights)[-5:][::-1]
+            st.write("**Top 5 Sources by ST-DGPA Weight:**")
+            for rank, idx in enumerate(top_indices):
+                if hasattr(st.session_state.extrapolator, 'source_metadata') and idx < len(st.session_state.extrapolator.source_metadata):
+                    meta = st.session_state.extrapolator.source_metadata[idx]
+                    time_info = f", t={meta['time']} ns"
                 else:
-                    st.error("❌ Prediction failed. Check parameters and ensure sufficient training data.")
-        
-        # Display results if available
-        if st.session_state.interpolation_results:
-            results = st.session_state.interpolation_results
-            params = st.session_state.interpolation_params
-            
-            st.subheader("Prediction Results")
-            
-            # Field selection
-            fields = list(results['field_predictions'].keys())
-            if fields:
-                selected_fields = st.multiselect("Select Fields to Plot", fields, default=fields[:3])
-                
-                if selected_fields:
-                    # Create prediction plot
-                    fig_preds = go.Figure()
-                    for f in selected_fields:
-                        if results['field_predictions'][f]['mean']:
-                            fig_preds.add_trace(go.Scatter(
-                                x=params['time_points'],
-                                y=results['field_predictions'][f]['mean'],
-                                mode='lines',
-                                name=f,
-                                line=dict(width=2)
-                            ))
-                            # Add confidence band if std available
-                            if results['field_predictions'][f]['std']:
-                                mean = np.array(results['field_predictions'][f]['mean'])
-                                std = np.array(results['field_predictions'][f]['std'])
-                                fig_preds.add_trace(go.Scatter(
-                                    x=np.concatenate([params['time_points'], params['time_points'][::-1]]),
-                                    y=np.concatenate([mean + std, (mean - std)[::-1]]),
-                                    fill='toself',
-                                    fillcolor=f'rgba(0, 100, 255, 0.1)',
-                                    line=dict(color='rgba(255,255,255,0)'),
-                                    showlegend=False,
-                                    name=f'{f} ± std'
-                                ))
-                    
-                    fig_preds.update_layout(
-                        title="Predicted Mean Values with Confidence Bands",
-                        xaxis_title="Time (ns)",
-                        yaxis_title="Value",
-                        height=400,
-                        hovermode='x unified'
-                    )
-                    st.plotly_chart(fig_preds, use_container_width=True)
-                
-                # Confidence plot
-                if results['confidence_scores']:
-                    fig_conf = st.session_state.enhanced_viz.create_confidence_plot(results, params['time_points'])
-                    st.plotly_chart(fig_conf, use_container_width=True)
-                
-                # Statistics summary
-                st.markdown("##### 📊 Prediction Statistics")
-                if 'confidence_scores' in results:
-                    conf_scores = results['confidence_scores']
-                    col1, col2, col3 = st.columns(3)
-                    with col1: st.metric("Avg Confidence", f"{np.mean(conf_scores):.3f}")
-                    with col2: st.metric("Min Confidence", f"{np.min(conf_scores):.3f}")
-                    with col3: st.metric("Max Confidence", f"{np.max(conf_scores):.3f}")
+                    time_info = ""
+                st.write(f"{rank+1}. Source {idx+1}{time_info}: Physics={physics_attention[idx]:.4f}, Gating={ett_gating[idx]:.4f}, ST-DGPA={final_weights[idx]:.4f}")
 
-    # --- TAB 3: Polar Radar (enhanced with customization) ---
-    with tabs[2]:
-        st.subheader("🎯 Polar Radar Visualization")
+def render_temporal_analysis(results, time_points, energy_query, duration_query):
+    """Render temporal-specific analysis"""
+    if not results or 'heat_transfer_indicators' not in results:
+        st.info("No temporal analysis data available.")
+        return
+    
+    st.markdown('<h4 class="sub-header">⏱️ Temporal Analysis</h4>', unsafe_allow_html=True)
+    
+    fig = st.session_state.visualizer.create_temporal_analysis(results, time_points)
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
+    
+    st.markdown("##### 📊 Temporal Metrics")
+    if results['heat_transfer_indicators']:
+        phases = [ind.get('phase', 'Unknown') for ind in results['heat_transfer_indicators'] if ind]
+        phase_counts = {}
+        for phase in phases:
+            phase_counts[phase] = phase_counts.get(phase, 0) + 1
         
-        # Field and timestep selection
+        col1, col2, col3, col4 = st.columns(4)
+        phase_list = ['Early Heating', 'Heating', 'Early Cooling', 'Diffusion Cooling']
+        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4']
+        for idx, phase in enumerate(phase_list):
+            count = phase_counts.get(phase, 0)
+            percentage = (count / len(phases) * 100) if phases else 0
+            with [col1, col2, col3, col4][idx % 4]:
+                st.metric(f"{phase}", f"{percentage:.1f}%", delta=f"{count} timesteps" if count > 0 else None)
+    
+    if 'temporal_confidences' in results:
+        avg_temporal_conf = np.mean(results['temporal_confidences'])
+        min_temporal_conf = np.min(results['temporal_confidences'])
+        max_temporal_conf = np.max(results['temporal_confidences'])
+        st.markdown("##### 📈 Temporal Confidence")
+        col1, col2, col3 = st.columns(3)
+        with col1: st.metric("Average Temporal Confidence", f"{avg_temporal_conf:.3f}")
+        with col2: st.metric("Minimum Temporal Confidence", f"{min_temporal_conf:.3f}")
+        with col3: st.metric("Maximum Temporal Confidence", f"{max_temporal_conf:.3f}")
+        
+        if avg_temporal_conf < 0.5:
+            st.warning("⚠️ **Low Temporal Confidence**: Time interpolation may be unreliable, especially during heating phases.")
+        elif avg_temporal_conf < 0.7:
+            st.info("ℹ️ **Moderate Temporal Confidence**: Time interpolation is reasonable but may have artifacts during rapid changes.")
+        else:
+            st.success("✅ **High Temporal Confidence**: Time interpolation is reliable across all phases.")
+    
+    st.markdown("##### 🔥 Heat Transfer Regime Analysis")
+    if results['heat_transfer_indicators']:
+        sample_indices = [0, len(time_points)//4, len(time_points)//2, 3*len(time_points)//4, -1]
+        sample_data = []
+        for idx in sample_indices:
+            if idx < len(results['heat_transfer_indicators']):
+                indicators = results['heat_transfer_indicators'][idx]
+                if indicators:
+                    sample_data.append({
+                        'Time (ns)': time_points[idx],
+                        'Phase': indicators.get('phase', 'Unknown'),
+                        'Regime': indicators.get('regime', 'Unknown'),
+                        'Fourier Number': f"{indicators.get('fourier_number', 0):.3f}",
+                        'Penetration (μm)': f"{indicators.get('thermal_penetration_um', 0):.1f}",
+                        'Norm. Time': f"{indicators.get('normalized_time', 0):.2f}"
+                    })
+        if sample_data:
+            df_heat_transfer = pd.DataFrame(sample_data)
+            st.dataframe(df_heat_transfer, use_container_width=True)
+
+def render_3d_analysis(results, time_points, energy_query, duration_query):
+    """Render 3D analysis visualizations"""
+    st.markdown('<h4 class="sub-header">🌐 3D Parameter Space Analysis</h4>', unsafe_allow_html=True)
+    
+    if st.session_state.summaries:
+        train_energies, train_durations, train_max_temps, train_max_stresses = [], [], [], []
+        for summary in st.session_state.summaries:
+            train_energies.append(summary['energy'])
+            train_durations.append(summary['duration'])
+            if 'temperature' in summary['field_stats']:
+                train_max_temps.append(np.max(summary['field_stats']['temperature']['max']))
+            else:
+                train_max_temps.append(0)
+            if 'principal stress' in summary['field_stats']:
+                train_max_stresses.append(np.max(summary['field_stats']['principal stress']['max']))
+            else:
+                train_max_stresses.append(0)
+        
+        query_max_temp = np.max(results['field_predictions'].get('temperature', {}).get('max', [0]))
+        query_max_stress = np.max(results['field_predictions'].get('principal stress', {}).get('max', [0]))
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            fig_temp = go.Figure()
+            fig_temp.add_trace(go.Scatter3d(
+                x=train_energies, y=train_durations, z=train_max_temps,
+                mode='markers', marker=dict(size=8, color=train_max_temps, colorscale='Viridis',
+                                          opacity=0.7, colorbar=dict(title="Max Temp")),
+                name='Training Data',
+                hovertemplate='Training<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Max Temp: %{z:.1f}<extra></extra>'
+            ))
+            fig_temp.add_trace(go.Scatter3d(
+                x=[energy_query], y=[duration_query], z=[query_max_temp],
+                mode='markers', marker=dict(size=12, color='red', symbol='diamond'),
+                name='Query Point',
+                hovertemplate='Query<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Pred Temp: %{z:.1f}<extra></extra>'
+            ))
+            fig_temp.update_layout(
+                title="Parameter Space - Maximum Temperature",
+                scene=dict(xaxis_title="Energy (mJ)", yaxis_title="Duration (ns)", zaxis_title="Max Temperature"),
+                height=500
+            )
+            st.plotly_chart(fig_temp, use_container_width=True)
+        
+        with col2:
+            fig_stress = go.Figure()
+            fig_stress.add_trace(go.Scatter3d(
+                x=train_energies, y=train_durations, z=train_max_stresses,
+                mode='markers', marker=dict(size=8, color=train_max_stresses, colorscale='Plasma',
+                                          opacity=0.7, colorbar=dict(title="Max Stress")),
+                name='Training Data',
+                hovertemplate='Training<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Max Stress: %{z:.1f}<extra></extra>'
+            ))
+            fig_stress.add_trace(go.Scatter3d(
+                x=[energy_query], y=[duration_query], z=[query_max_stress],
+                mode='markers', marker=dict(size=12, color='red', symbol='diamond'),
+                name='Query Point',
+                hovertemplate='Query<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Pred Stress: %{z:.1f}<extra></extra>'
+            ))
+            fig_stress.update_layout(
+                title="Parameter Space - Maximum Stress",
+                scene=dict(xaxis_title="Energy (mJ)", yaxis_title="Duration (ns)", zaxis_title="Max Stress"),
+                height=500
+            )
+            st.plotly_chart(fig_stress, use_container_width=True)
+        
+        st.markdown("##### ⏱️ Time Evolution in Parameter Space")
+        if 'field_predictions' in results and 'temperature' in results['field_predictions']:
+            temp_evolution = results['field_predictions']['temperature']['mean']
+            fig_evolution = go.Figure()
+            fig_evolution.add_trace(go.Scatter3d(
+                x=train_energies, y=train_durations,
+                z=[train_max_temps[0]] * len(train_energies),
+                mode='markers', marker=dict(size=6, color='lightblue', opacity=0.3),
+                name='Training Data'
+            ))
+            fig_evolution.add_trace(go.Scatter3d(
+                x=[energy_query] * len(time_points), y=[duration_query] * len(time_points),
+                z=temp_evolution, mode='lines+markers',
+                marker=dict(size=8, color=temp_evolution, colorscale='Viridis',
+                          showscale=True, colorbar=dict(title="Temperature")),
+                line=dict(color='gray', width=2), name='Temperature Evolution'
+            ))
+            fig_evolution.update_layout(
+                title="Temperature Evolution Over Time",
+                scene=dict(xaxis_title="Energy (mJ)", yaxis_title="Duration (ns)", zaxis_title="Temperature"),
+                height=500
+            )
+            st.plotly_chart(fig_evolution, use_container_width=True)
+
+def render_detailed_results(results, time_points, energy_query, duration_query):
+    """Render detailed prediction results"""
+    st.markdown('<h4 class="sub-header">📊 Detailed Prediction Results</h4>', unsafe_allow_html=True)
+    
+    data_rows = []
+    for idx, t in enumerate(time_points):
+        row = {'Time (ns)': t}
+        for field in results['field_predictions']:
+            if field in results['field_predictions']:
+                if idx < len(results['field_predictions'][field]['mean']):
+                    row[f'{field}_mean'] = results['field_predictions'][field]['mean'][idx]
+                    row[f'{field}_max'] = results['field_predictions'][field]['max'][idx]
+                    row[f'{field}_std'] = results['field_predictions'][field]['std'][idx]
+        if idx < len(results['confidence_scores']):
+            row['confidence'] = results['confidence_scores'][idx]
+        if idx < len(results.get('temporal_confidences', [])):
+            row['temporal_confidence'] = results['temporal_confidences'][idx]
+        if idx < len(results.get('heat_transfer_indicators', [])):
+            indicators = results['heat_transfer_indicators'][idx]
+            if indicators:
+                row['phase'] = indicators.get('phase', 'Unknown')
+                row['fourier_number'] = indicators.get('fourier_number', 0)
+                row['penetration_um'] = indicators.get('thermal_penetration_um', 0)
+        data_rows.append(row)
+    
+    if data_rows:
+        df_results = pd.DataFrame(data_rows)
+        format_dict = {}
+        for col in df_results.columns:
+            if col not in ['Time (ns)', 'phase']:
+                if 'mean' in col or 'max' in col or 'std' in col:
+                    format_dict[col] = "{:.3f}"
+                elif 'confidence' in col:
+                    format_dict[col] = "{:.3f}"
+                elif 'fourier_number' in col:
+                    format_dict[col] = "{:.4f}"
+                elif 'penetration_um' in col:
+                    format_dict[col] = "{:.1f}"
+        
+        styled_df = df_results.style.format(format_dict)
+        
+        def highlight_confidence(val):
+            if isinstance(val, (int, float)):
+                if val < 0.3:
+                    return 'background-color: #ffcccc'
+                elif val < 0.6:
+                    return 'background-color: #fff4cc'
+                else:
+                    return 'background-color: #ccffcc'
+            return ''
+        
+        confidence_cols = [col for col in df_results.columns if 'confidence' in col]
+        for col in confidence_cols:
+            styled_df = styled_df.map(highlight_confidence, subset=[col])
+        
+        phase_colors = {
+            'Early Heating': '#FF6B6B', 'Heating': '#4ECDC4',
+            'Early Cooling': '#45B7D1', 'Diffusion Cooling': '#96CEB4'
+        }
+        def color_phase(val):
+            if val in phase_colors:
+                return f'background-color: {phase_colors[val]}; color: white'
+            return ''
+        if 'phase' in df_results.columns:
+            styled_df = styled_df.map(color_phase, subset=['phase'])
+        
+        st.dataframe(styled_df, use_container_width=True, height=400)
+        
+        st.markdown("##### 📈 Prediction Statistics")
+        if 'confidence' in df_results.columns:
+            conf_stats = df_results['confidence'].describe()
+            col1, col2, col3, col4 = st.columns(4)
+            with col1: st.metric("Mean Confidence", f"{conf_stats['mean']:.3f}")
+            with col2: st.metric("Min Confidence", f"{conf_stats['min']:.3f}")
+            with col3: st.metric("Max Confidence", f"{conf_stats['max']:.3f}")
+            with col4: st.metric("Std Dev", f"{conf_stats['std']:.3f}")
+        
+        st.markdown("##### 💾 Export Results")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            csv = df_results.to_csv(index=False).encode('utf-8')
+            st.download_button(label="📥 Download as CSV", data=csv,
+                             file_name=f"stdgpa_predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.csv",
+                             mime="text/csv", use_container_width=True)
+        with col2:
+            json_str = df_results.to_json(orient='records', indent=2)
+            st.download_button(label="📥 Download as JSON", data=json_str.encode('utf-8'),
+                             file_name=f"stdgpa_predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.json",
+                             mime="application/json", use_container_width=True)
+        with col3:
+            html = styled_df.to_html()
+            st.download_button(label="📥 Download as HTML", data=html.encode('utf-8'),
+                             file_name=f"stdgpa_predictions_E{energy_query:.1f}mJ_tau{duration_query:.1f}ns.html",
+                             mime="text/html", use_container_width=True)
+
+def render_3d_interpolation(results, time_points, energy_query, duration_query,
+                          enable_3d=True, optimize_performance=False, top_k=10):
+    """Render 3D field interpolation visualization with adjustable opacity"""
+    st.markdown('<h4 class="sub-header">🖼️ 3D Field Interpolation with ST-DGPA</h4>', unsafe_allow_html=True)
+    
+    if not st.session_state.get('simulations'):
+        st.warning("No full simulations loaded for 3D rendering. Please reload with 'Load Full Mesh' enabled.")
+        return
+    
+    first_sim = next(iter(st.session_state.simulations.values()))
+    if not first_sim.get('has_mesh', False):
+        st.error("Simulations were loaded without full mesh data. Please reload with 'Load Full Mesh' enabled.")
+        return
+    
+    if 'interpolation_3d_cache' in st.session_state and st.session_state.interpolation_3d_cache:
+        cache_size = len(st.session_state.interpolation_3d_cache)
+        st.markdown(f"""
+        <div class="cache-status">
+        <strong>Cache Status:</strong> {cache_size} field(s) cached |
+        <strong>Prediction ID:</strong> {st.session_state.last_prediction_id or 'N/A'} |
+        <strong>Temporal Gating:</strong> s_t = {st.session_state.extrapolator.s_t:.1f} ns
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("""
+    <div class="interpolation-3d-container">
+    <h5>3D Field Interpolation Settings</h5>
+    <p>Visualize interpolated full field using ST-DGPA-weighted averaging of source simulations with temporal gating.</p>
+    <p><strong>Field switching is now cached</strong> - previously computed fields load instantly.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    params = st.session_state.interpolation_params or {}
+    available_fields = list(results['field_predictions'].keys())
+    if not available_fields:
+        st.warning("No field predictions available for 3D visualization.")
+        return
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if 'current_3d_field' not in st.session_state or st.session_state.current_3d_field not in available_fields:
+            st.session_state.current_3d_field = available_fields[0]
+        selected_field_3d = st.selectbox("Select Field for 3D Rendering", available_fields,
+                                       index=available_fields.index(st.session_state.current_3d_field) if st.session_state.current_3d_field in available_fields else 0,
+                                       key="interp_3d_field", help="Choose field to visualize in 3D",
+                                       on_change=lambda: setattr(st.session_state, 'current_3d_field',
+                                                               st.session_state.interp_3d_field if 'interp_3d_field' in st.session_state else available_fields[0]))
+        st.session_state.current_3d_field = selected_field_3d
+    with col2:
+        if 'current_3d_timestep' not in st.session_state:
+            st.session_state.current_3d_timestep = min(len(time_points)//2, len(time_points)-1)
+        timestep_idx_3d = st.slider("Select Timestep for 3D", 0, len(time_points) - 1,
+                                  st.session_state.current_3d_timestep, key="interp_3d_timestep",
+                                  help="Select timestep for 3D visualization",
+                                  on_change=lambda: setattr(st.session_state, 'current_3d_timestep',
+                                                          st.session_state.interp_3d_timestep if 'interp_3d_timestep' in st.session_state else 0))
+        st.session_state.current_3d_timestep = timestep_idx_3d
+    with col3:
+        opacity_3d = st.slider("Opacity", min_value=0.0, max_value=1.0, value=0.9, step=0.05,
+                             key="interp_3d_opacity", help="Adjust transparency of the 3D plot (0 = invisible, 1 = fully opaque)")
+    
+    selected_time_3d = time_points[timestep_idx_3d]
+    attention_weights_3d = results['attention_maps'][timestep_idx_3d]
+    physics_attention_3d = results['physics_attention_maps'][timestep_idx_3d]
+    ett_gating_3d = results['ett_gating_maps'][timestep_idx_3d]
+    confidence_score = results['confidence_scores'][timestep_idx_3d]
+    temporal_confidence = results['temporal_confidences'][timestep_idx_3d] if 'temporal_confidences' in results else 0.0
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1: st.metric("Prediction Confidence", f"{confidence_score:.3f}")
+    with col2: st.metric("Temporal Confidence", f"{temporal_confidence:.3f}")
+    with col3: st.metric("Timestep", f"{selected_time_3d} ns")
+    with col4:
+        cached = CacheManager.get_cached_interpolation(selected_field_3d, timestep_idx_3d, params) is not None
+        cache_status = "✅ Cached" if cached else "🔄 Compute"
+        st.metric("Cache Status", cache_status)
+    
+    cached_result = CacheManager.get_cached_interpolation(selected_field_3d, timestep_idx_3d, params)
+    if cached_result:
+        interpolated_values = cached_result['interpolated_values']
+        cache_source = "cache"
+        st.success(f"✅ Loaded {selected_field_3d} from cache (previously computed)")
+    else:
+        if optimize_performance and len(attention_weights_3d) > top_k:
+            top_indices = np.argsort(attention_weights_3d)[-top_k:]
+            filtered_weights = np.zeros_like(attention_weights_3d)
+            filtered_weights[top_indices] = attention_weights_3d[top_indices]
+            filtered_weights = filtered_weights / np.sum(filtered_weights)
+            attention_weights_3d = filtered_weights
+            st.info(f"Using top-{top_k} sources for performance optimization")
+        
+        with st.spinner(f"Computing {selected_field_3d} field at t={selected_time_3d} ns..."):
+            interpolated_values = st.session_state.extrapolator.interpolate_full_field(
+                selected_field_3d, attention_weights_3d,
+                st.session_state.extrapolator.source_metadata, st.session_state.simulations
+            )
+            if interpolated_values is None:
+                st.error("Failed to interpolate field. Ensure full meshes are loaded and field exists.")
+                return
+            CacheManager.set_cached_interpolation(selected_field_3d, timestep_idx_3d, params, interpolated_values)
+            cache_source = "new computation"
+            st.info(f"✅ Computed and cached {selected_field_3d}")
+    
+    first_sim = next(iter(st.session_state.simulations.values()))
+    pts = first_sim['points']
+    triangles = first_sim.get('triangles')
+    
+    subsample_factor = params.get('subsample_factor', 1)
+    if optimize_performance and subsample_factor > 1 and pts.shape[0] > 10000:
+        indices = np.arange(0, pts.shape[0], subsample_factor)
+        pts = pts[indices]
+        interpolated_values = interpolated_values[indices]
+        st.info(f"Subsampled mesh from {pts.shape[0]*subsample_factor} to {pts.shape[0]} points for performance")
+    
+    if interpolated_values.ndim == 1:
+        values = np.nan_to_num(interpolated_values)
+        label = selected_field_3d
+        field_type = "scalar"
+    else:
+        magnitude = np.linalg.norm(interpolated_values, axis=1)
+        values = np.nan_to_num(magnitude)
+        label = f"{selected_field_3d} (magnitude)"
+        field_type = "vector"
+    
+    st.markdown(f"### 📊 {label} at t={selected_time_3d} ns")
+    
+    with st.expander("🔍 ST-DGPA Weight Analysis for This Timestep", expanded=False):
+        col1, col2, col3, col4 = st.columns(4)
+        with col1: st.metric("Max Physics Attention", f"{np.max(physics_attention_3d):.4f}")
+        with col2: st.metric("Max (E, τ, t) Gating", f"{np.max(ett_gating_3d):.4f}")
+        with col3: st.metric("Max ST-DGPA Weight", f"{np.max(attention_weights_3d):.4f}")
+        with col4:
+            if hasattr(st.session_state.extrapolator, '_assess_temporal_coherence'):
+                coherence = st.session_state.extrapolator._assess_temporal_coherence(
+                    st.session_state.extrapolator.source_metadata, attention_weights_3d
+                )
+                st.metric("Temporal Coherence", f"{coherence:.3f}")
+        
+        if len(attention_weights_3d) > 0:
+            top_indices = np.argsort(attention_weights_3d)[-5:][::-1]
+            st.write("**Top 5 Contributing Sources:**")
+            for i, idx in enumerate(top_indices):
+                meta = st.session_state.extrapolator.source_metadata[idx]
+                st.write(f"{i+1}. {meta['name']} (E={meta['energy']:.1f} mJ, τ={meta['duration']:.1f} ns, t={meta['time']:.1f} ns): "
+                        f"Physics={physics_attention_3d[idx]:.4f}, Gating={ett_gating_3d[idx]:.4f}, ST-DGPA={attention_weights_3d[idx]:.4f}")
+    
+    if 'interpolation_field_history' in st.session_state and st.session_state.interpolation_field_history:
+        recent_fields = list(st.session_state.interpolation_field_history.keys())[-5:]
+        if recent_fields:
+            st.caption(f"**Recently viewed:** {', '.join([f.split('_')[0] for f in recent_fields])}")
+    
+    if triangles is not None and len(triangles) > 0 and pts.shape[0] < 50000:
+        if optimize_performance and subsample_factor > 1:
+            mesh_data = go.Scatter3d(
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode='markers',
+                marker=dict(size=4, color=values, colorscale=st.session_state.selected_colormap,
+                          opacity=opacity_3d, colorbar=dict(title=dict(text=label, font=dict(size=12)),
+                                                          thickness=20, len=0.6), showscale=True),
+                hovertemplate='<b>Value:</b> %{marker.color:.3f}<br><b>X:</b> %{x:.3f}<br><b>Y:</b> %{y:.3f}<br><b>Z:</b> %{z:.3f}<extra></extra>'
+            )
+        else:
+            valid_triangles = triangles[np.all(triangles < len(pts), axis=1)]
+            if len(valid_triangles) > 0:
+                mesh_data = go.Mesh3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
+                    intensity=values, colorscale=st.session_state.selected_colormap, intensitymode='vertex',
+                    colorbar=dict(title=dict(text=label, font=dict(size=12)), thickness=20, len=0.6),
+                    opacity=opacity_3d,
+                    lighting=dict(ambient=0.8, diffuse=0.8, specular=0.5, roughness=0.5),
+                    lightposition=dict(x=100, y=200, z=300),
+                    hovertemplate='<b>Value:</b> %{intensity:.3f}<br><b>X:</b> %{x:.3f}<br><b>Y:</b> %{y:.3f}<br><b>Z:</b> %{z:.3f}<extra></extra>'
+                )
+            else:
+                mesh_data = go.Scatter3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode='markers',
+                    marker=dict(size=4, color=values, colorscale=st.session_state.selected_colormap,
+                              opacity=opacity_3d, colorbar=dict(title=label), showscale=True),
+                    hovertemplate='<b>Value:</b> %{marker.color:.3f}<br><b>X:</b> %{x:.3f}<br><b>Y:</b> %{y:.3f}<br><b>Z:</b> %{z:.3f}<extra></extra>'
+                )
+    else:
+        mesh_data = go.Scatter3d(
+            x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode='markers',
+            marker=dict(size=4, color=values, colorscale=st.session_state.selected_colormap,
+                      opacity=opacity_3d, colorbar=dict(title=dict(text=label, font=dict(size=12)),
+                                                      thickness=20, len=0.6), showscale=True),
+            hovertemplate='<b>Value:</b> %{marker.color:.3f}<br><b>X:</b> %{x:.3f}<br><b>Y:</b> %{y:.3f}<br><b>Z:</b> %{z:.3f}<extra></extra>'
+        )
+    
+    fig_3d = go.Figure(data=mesh_data)
+    
+    heat_transfer_phase = "Unknown"
+    if 'heat_transfer_indicators' in results and timestep_idx_3d < len(results['heat_transfer_indicators']):
+        indicators = results['heat_transfer_indicators'][timestep_idx_3d]
+        if indicators:
+            heat_transfer_phase = indicators.get('phase', 'Unknown')
+    
+    fig_3d.update_layout(
+        title=dict(
+            text=f"ST-DGPA Interpolated {label} at t={selected_time_3d} ns<br>"
+                 f"E={energy_query:.1f} mJ, τ={duration_query:.1f} ns, Phase: {heat_transfer_phase}<br>"
+                 f"Confidence: {confidence_score:.3f}, Temporal: {temporal_confidence:.3f}<br>"
+                 f"<sub>σ_g={params.get('sigma_g', 0.20):.2f}, s_E={params.get('s_E', 10.0):.1f}, s_τ={params.get('s_tau', 5.0):.1f}, s_t={params.get('s_t', 20.0):.1f}</sub>",
+            font=dict(size=14)
+        ),
+        scene=dict(
+            aspectmode="data",
+            camera=dict(eye=dict(x=1.5, y=1.5, z=1.5), up=dict(x=0, y=0, z=1)),
+            xaxis=dict(title="X", gridcolor="lightgray", showbackground=True, backgroundcolor="white"),
+            yaxis=dict(title="Y", gridcolor="lightgray", showbackground=True, backgroundcolor="white"),
+            zaxis=dict(title="Z", gridcolor="lightgray", showbackground=True, backgroundcolor="white")
+        ),
+        height=700, margin=dict(l=0, r=0, t=100, b=0)
+    )
+    
+    st.plotly_chart(fig_3d, use_container_width=True)
+    
+    st.markdown("##### 📊 Interpolated Field Statistics")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1: st.metric("Min", f"{np.min(values):.3f}")
+    with col2: st.metric("Max", f"{np.max(values):.3f}")
+    with col3: st.metric("Mean", f"{np.mean(values):.3f}")
+    with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
+    with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
+    
+    fig_hist = go.Figure()
+    fig_hist.add_trace(go.Histogram(x=values, nbinsx=50, marker_color='skyblue',
+                                  opacity=0.7, name='Value Distribution'))
+    fig_hist.update_layout(title=f"Distribution of Interpolated {label} Values",
+                         xaxis_title=label, yaxis_title="Frequency", height=400)
+    st.plotly_chart(fig_hist, use_container_width=True)
+    
+    st.markdown("##### 💾 Export Interpolated Field")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("📥 Export as VTU File", use_container_width=True, key="export_vtu_3d"):
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.vtu') as tmp:
+                success = st.session_state.extrapolator.export_interpolated_vtu(
+                    selected_field_3d, interpolated_values, st.session_state.simulations, tmp.name
+                )
+                if success:
+                    with open(tmp.name, 'rb') as f:
+                        vtu_data = f.read()
+                    b64 = base64.b64encode(vtu_data).decode()
+                    href = f'<a href="data:application/octet-stream;base64,{b64}" download="stdgpa_interpolated_{selected_field_3d}_t{selected_time_3d}.vtu">Download VTU File</a>'
+                    st.markdown(href, unsafe_allow_html=True)
+    with col2:
+        if st.button("📥 Export as NPZ File", use_container_width=True, key="export_npz_3d"):
+            npz_data = {
+                'field_name': selected_field_3d, 'values': interpolated_values,
+                'points': pts, 'triangles': triangles,
+                'metadata': {
+                    'energy_mJ': energy_query, 'duration_ns': duration_query,
+                    'time_ns': selected_time_3d, 'confidence': confidence_score,
+                    'temporal_confidence': temporal_confidence,
+                    'heat_transfer_phase': heat_transfer_phase,
+                    'stdgpa_params': {
+                        'sigma_g': params.get('sigma_g', 0.20), 's_E': params.get('s_E', 10.0),
+                        's_tau': params.get('s_tau', 5.0), 's_t': params.get('s_t', 20.0),
+                        'temporal_weight': params.get('temporal_weight', 0.3)
+                    },
+                    'cache_source': cache_source
+                }
+            }
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.npz') as tmp:
+                np.savez(tmp, **npz_data)
+                with open(tmp.name, 'rb') as f:
+                    npz_bytes = f.read()
+                b64 = base64.b64encode(npz_bytes).decode()
+                href = f'<a href="data:application/octet-stream;base64,{b64}" download="stdgpa_interpolated_{selected_field_3d}_t{selected_time_3d}.npz">Download NPZ File</a>'
+                st.markdown(href, unsafe_allow_html=True)
+    with col3:
+        if st.button("📥 Export Heat Transfer Data", use_container_width=True, key="export_heat_3d"):
+            if 'heat_transfer_indicators' in results and timestep_idx_3d < len(results['heat_transfer_indicators']):
+                indicators = results['heat_transfer_indicators'][timestep_idx_3d]
+                heat_data = {
+                    'time_ns': selected_time_3d, 'energy_mJ': energy_query, 'duration_ns': duration_query,
+                    'field_stats': {'min': float(np.min(values)), 'max': float(np.max(values)),
+                                  'mean': float(np.mean(values)), 'std': float(np.std(values))},
+                    'heat_transfer_indicators': indicators,
+                    'attention_analysis': {
+                        'n_sources_used': len([w for w in attention_weights_3d if w > 1e-6]),
+                        'max_weight': float(np.max(attention_weights_3d)),
+                        'temporal_coherence': float(st.session_state.extrapolator._assess_temporal_coherence(
+                            st.session_state.extrapolator.source_metadata, attention_weights_3d
+                        ) if hasattr(st.session_state.extrapolator, '_assess_temporal_coherence') else 0.0)
+                    }
+                }
+                json_str = json.dumps(heat_data, indent=2)
+                st.download_button(label="📥 Download Heat Data", data=json_str.encode('utf-8'),
+                                 file_name=f"heat_transfer_{selected_field_3d}_t{selected_time_3d}.json",
+                                 mime="application/json", use_container_width=True)
+    
+    if len(available_fields) > 1:
+        st.markdown("##### ⚡ Quick Field Switching")
+        other_fields = [f for f in available_fields if f != selected_field_3d][:4]
+        if other_fields:
+            cols = st.columns(len(other_fields))
+            for idx, field in enumerate(other_fields):
+                with cols[idx]:
+                    if st.button(f"📊 {field[:10]}...", key=f"quick_switch_{field}", use_container_width=True):
+                        st.session_state.current_3d_field = field
+                        st.rerun()
+
+def render_comparative_analysis():
+    """Render enhanced comparative analysis interface with IMPROVED RADAR PLOT"""
+    st.markdown('<h2 class="sub-header">📊 Comparative Analysis</h2>', unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first to enable comparative analysis.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    simulations = st.session_state.simulations
+    summaries = st.session_state.summaries
+    
+    st.markdown('<h3 class="sub-header">🎯 Select Target Simulation</h3>', unsafe_allow_html=True)
+    available_simulations = sorted(simulations.keys())
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        target_simulation = st.selectbox("Select target simulation for highlighting",
+                                       available_simulations, key="target_sim_select",
+                                       help="This simulation will be highlighted in all visualizations")
+    with col2:
+        n_comparisons = st.number_input("Number of comparisons", min_value=1, max_value=10, value=5, step=1,
+                                      key="n_comparisons")
+    
+    comparison_sims = [sim for sim in available_simulations if sim != target_simulation]
+    selected_comparisons = st.multiselect("Select simulations for comparison", comparison_sims,
+                                        default=comparison_sims[:min(n_comparisons - 1, len(comparison_sims))],
+                                        help="Select simulations to compare with the target")
+    
+    visualization_sims = [target_simulation] + selected_comparisons
+    if not visualization_sims:
+        st.info("Please select at least one simulation for comparison.")
+        return
+    
+    st.markdown('<h3 class="sub-header">📈 Select Field for Analysis</h3>', unsafe_allow_html=True)
+    available_fields = set()
+    for sim_name in visualization_sims:
+        if sim_name in simulations:
+            available_fields.update(simulations[sim_name]['field_info'].keys())
+    if not available_fields:
+        st.error("No field data available for selected simulations.")
+        return
+    selected_field = st.selectbox("Select field for analysis", sorted(available_fields),
+                                key="comparison_field", help="Choose a field to compare across simulations")
+    
+    # Visualization tabs - REMOVED SANKEY TAB
+    tab1, tab2, tab3 = st.tabs(["🎯 Enhanced Radar Plot", "⏱️ Evolution", "🌐 3D Analysis"])
+    
+    with tab1:
+        # ENHANCED RADAR CHART WITH FULL STYLING CONTROLS
+        st.markdown('<h4 class="sub-header">🎨 Enhanced Radar Chart Controls</h4>', unsafe_allow_html=True)
+        
+        # Radar styling controls in expandable section
+        with st.expander("🎨 Radar Chart Styling Options", expanded=True):
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.markdown("**Title Styling**")
+                title_font_size = st.slider("Title Font Size", 12, 30, 18, key="radar_title_font")
+                title_font_family = st.selectbox("Title Font Family", ["Arial, sans-serif", "Courier New, monospace", "Times New Roman, serif"],
+                                               index=0, key="radar_title_family")
+                title_padding = st.slider("Title Padding (top)", 20, 100, 40, key="radar_title_pad")
+            with col2:
+                st.markdown("**Label Styling**")
+                label_font_size = st.slider("Label Font Size", 8, 20, 12, key="radar_label_font")
+                label_font_family = st.selectbox("Label Font Family", ["Arial, sans-serif", "Courier New, monospace", "Times New Roman, serif"],
+                                               index=0, key="radar_label_family")
+                tick_font_size = st.slider("Tick Font Size", 6, 16, 10, key="radar_tick_font")
+            with col3:
+                st.markdown("**Radar Line Styling**")
+                radar_line_width = st.slider("Radar Line Width", 1.0, 5.0, 2.5, 0.5, key="radar_line_width")
+                radar_line_opacity = st.slider("Radar Line Opacity", 0.1, 1.0, 0.8, 0.1, key="radar_line_opacity")
+                radar_fill_opacity = st.slider("Radar Fill Opacity", 0.0, 0.8, 0.3, 0.1, key="radar_fill_opacity")
+            with col4:
+                st.markdown("**Target Query Styling**")
+                target_query_color = st.color_picker("Target Query Color", "#FF0000", key="radar_target_color")
+                target_query_line_width = st.slider("Target Line Width", 2.0, 6.0, 4.0, 0.5, key="radar_target_width")
+                target_query_marker_size = st.slider("Target Marker Size", 5, 20, 10, key="radar_target_marker")
+        
+        # Grid and layout controls
+        with st.expander("📐 Grid & Layout Options", expanded=False):
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.markdown("**Grid Styling**")
+                grid_color = st.color_picker("Grid Color", "#d3d3d3", key="radar_grid_color")
+                grid_line_width = st.slider("Grid Line Width", 0.5, 3.0, 1.0, 0.5, key="radar_grid_width")
+                show_radial_grid = st.checkbox("Show Radial Grid", value=True, key="radar_show_radial")
+                show_angular_grid = st.checkbox("Show Angular Grid", value=True, key="radar_show_angular")
+                radial_grid_count = st.slider("Radial Grid Count", 3, 10, 5, key="radar_grid_count")
+            with col2:
+                st.markdown("**Axis Configuration**")
+                radial_axis_min = st.number_input("Radial Axis Min", value=0.0, key="radar_radial_min")
+                radial_axis_max = st.number_input("Radial Axis Max", value=1.2, key="radar_radial_max")
+                angular_rotation = st.slider("Angular Axis Rotation", 0, 360, 90, key="radar_angular_rot")
+                angular_direction = st.selectbox("Angular Direction", ["clockwise", "counterclockwise"],
+                                               index=0, key="radar_angular_dir")
+            with col3:
+                st.markdown("**Background & Margins**")
+                background_color = st.color_picker("Background Color", "#ffffff", key="radar_bg_color")
+                margin_left = st.slider("Margin Left", 40, 120, 60, key="radar_margin_l")
+                margin_right = st.slider("Margin Right", 40, 120, 60, key="radar_margin_r")
+                margin_top = st.slider("Margin Top", 60, 140, 80, key="radar_margin_t")
+                margin_bottom = st.slider("Margin Bottom", 40, 120, 60, key="radar_margin_b")
+            with col4:
+                st.markdown("**Legend & Color**")
+                legend_position = st.selectbox("Legend Position",
+                                             ["top-right", "top-left", "bottom-right", "bottom-left", "center"],
+                                             index=0, key="radar_legend_pos")
+                use_colorbar_scale = st.checkbox("Use Colorbar Scale for Target", value=True,
+                                               key="radar_use_colorbar",
+                                               help="Color target query based on value using Viridis colormap")
+                colorbar_title = st.text_input("Colorbar Title", "Peak Value", key="radar_cbar_title")
+                colorbar_tick_font = st.slider("Colorbar Tick Font", 6, 14, 9, key="radar_cbar_font")
+        
+        # Data processing controls
+        with st.expander("📊 Data Processing Options", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                normalize_by_max = st.checkbox("Normalize by Maximum Value", value=True,
+                                             key="radar_normalize",
+                                             help="Normalize all values by reference maximum for consistent scaling")
+                max_reference_value = st.number_input("Max Reference Value", min_value=0.0,
+                                                    value=8.0,  # FIXED: Default to 8.0 mJ as requested
+                                                    key="radar_max_ref",
+                                                    help="Reference maximum value for normalization (use 8.0 as largest)")
+            with col2:
+                highlight_target = st.checkbox("Highlight Target Query", value=True,
+                                             key="radar_highlight_target")
+                target_label = st.text_input("Target Label", "Target Query", key="radar_target_label")
+        
+        # Prepare data for radar chart
         all_fields = set()
         for s in st.session_state.summaries:
             all_fields.update(s['field_stats'].keys())
         
-        col1, col2 = st.columns(2)
-        with col1:
-            field_type = st.selectbox("Field Type", sorted(all_fields), key="polar_field")
-        with col2:
-            max_timestep = max(s.get('timesteps', [1])[-1] for s in st.session_state.summaries)
-            t_step = st.number_input("Timestep Index", 1, max_timestep, 1, key="polar_timestep")
-        
-        # Sidebar inside tab for customization
-        with st.expander("🎨 Radar Chart Customization", expanded=True):
-            st.markdown("#### Appearance Settings")
-            col_a, col_b = st.columns(2)
-            with col_a:
-                radial_grid_width = st.slider("Radial grid line width", 0.5, 3.0, 1.0, 0.1)
-                radial_tick_font = st.slider("Radial tick font size", 8, 20, 12)
-                title_font = st.slider("Title font size", 12, 28, 18)
-            with col_b:
-                angular_grid_width = st.slider("Angular grid line width", 0.5, 3.0, 1.0, 0.1)
-                angular_tick_font = st.slider("Angular tick font size", 8, 20, 12)
-            
-            st.markdown("#### Figure Margins (pixels)")
-            col_c, col_d, col_e, col_f = st.columns(4)
-            with col_c: margin_l = st.number_input("Left", 20, 200, 60)
-            with col_d: margin_r = st.number_input("Right", 20, 200, 60)
-            with col_e: margin_t = st.number_input("Top", 40, 200, 80)
-            with col_f: margin_b = st.number_input("Bottom", 40, 200, 60)
-            
-            st.markdown("#### Energy Axis Range")
-            col_g, col_h = st.columns(2)
-            with col_g:
-                use_custom_max = st.checkbox("Set custom max energy", value=True)
-                if use_custom_max:
-                    custom_max_energy = st.number_input("Maximum Energy (mJ)", value=8.0, step=0.5)
-                else:
-                    custom_max_energy = None
-            with col_h:
-                use_custom_min = st.checkbox("Set custom min energy", value=False)
-                if use_custom_min:
-                    custom_min_energy = st.number_input("Minimum Energy (mJ)", value=0.0, step=0.5)
-                else:
-                    custom_min_energy = None
-        
-        # Build DataFrame for polar chart
+        # Build DataFrame for polar chart with proper energy scaling
         rows = []
         for s in st.session_state.summaries:
-            if t_step <= len(s['timesteps']):
-                idx = t_step - 1
-                peak = s['field_stats'].get(field_type, {}).get('max', [0])
+            if timestep <= len(s['timesteps']):
+                idx = timestep - 1
+                peak = s['field_stats'].get(selected_field, {}).get('max', [0])
                 if idx < len(peak):
                     rows.append({
                         'Name': s['name'],
@@ -1685,37 +3107,70 @@ def main():
         
         df_polar = pd.DataFrame(rows)
         
-        # Get target query parameters and predicted peak value for the selected timestep and field
-        query_params = None
-        target_peak_value = None
-        if st.session_state.get('polar_query') and st.session_state.get('interpolation_results'):
-            q = st.session_state.polar_query
-            query_params = q
-            # Retrieve predicted peak for this timestep and field
-            results = st.session_state.interpolation_results
-            if field_type in results['field_predictions']:
-                # Find index for timestep t_step (convert to 0-based)
-                t_idx = t_step - 1
-                if t_idx < len(results['field_predictions'][field_type]['max']):
-                    target_peak_value = results['field_predictions'][field_type]['max'][t_idx]
+        # Warning for degenerate energy range
+        if df_polar['Energy'].nunique() <= 1:
+            st.info("ℹ️ All loaded simulations use the same energy. The polar chart will show a collapsed angular axis.")
         
-        # Create polar radar chart with customization
-        fig_polar = st.session_state.polar_viz.create_polar_radar_chart(
-            df_polar, field_type, query_params, timestep=t_step,
-            show_legend=True,
-            radial_grid_width=radial_grid_width,
-            angular_grid_width=angular_grid_width,
-            radial_tick_font_size=radial_tick_font,
-            angular_tick_font_size=angular_tick_font,
-            title_font_size=title_font,
-            margin_pad={'l': margin_l, 'r': margin_r, 't': margin_t, 'b': margin_b},
-            energy_min=custom_min_energy if use_custom_min else None,
-            energy_max=custom_max_energy if use_custom_max else None,
-            target_peak_value=target_peak_value
+        # Get query params if showing target
+        query_params = None
+        if st.session_state.get('polar_query') and highlight_target:
+            query_params = st.session_state.polar_query.copy()
+            # Add peak value from data if available
+            if selected_field in results.get('field_predictions', {}):
+                if 'max' in results['field_predictions'][selected_field]:
+                    query_params['peak_value'] = results['field_predictions'][selected_field]['max'][timestep-1] if timestep-1 < len(results['field_predictions'][selected_field]['max']) else 0
+        
+        # CREATE ENHANCED POLAR RADAR CHART
+        fig_polar = st.session_state.visualizer.create_enhanced_polar_radar_chart(
+            df_polar, selected_field, query_params, timestep=timestep,
+            show_legend=True, width=900, height=750,
+            # Title styling
+            title_font_size=title_font_size,
+            title_font_family=title_font_family,
+            title_padding_top=title_padding,
+            # Label styling
+            label_font_size=label_font_size,
+            label_font_family=label_font_family,
+            tick_font_size=tick_font_size,
+            # Radar styling
+            radar_line_width=radar_line_width,
+            radar_line_opacity=radar_line_opacity,
+            radar_fill_opacity=radar_fill_opacity,
+            radial_axis_range=(radial_axis_min, radial_axis_max) if radial_axis_max > radial_axis_min else None,
+            angular_axis_rotation=angular_rotation,
+            angular_axis_direction=angular_direction,
+            # Target query styling
+            target_query_color=target_query_color,
+            target_query_line_width=target_query_line_width,
+            target_query_marker_size=target_query_marker_size,
+            # Grid & background
+            grid_color=grid_color,
+            grid_line_width=grid_line_width,
+            background_color=background_color,
+            show_radial_grid=show_radial_grid,
+            show_angular_grid=show_angular_grid,
+            radial_grid_count=radial_grid_count,
+            # Layout margins
+            margin_left=margin_left,
+            margin_right=margin_right,
+            margin_top=margin_top,
+            margin_bottom=margin_bottom,
+            legend_position=legend_position,
+            # Color mapping
+            use_colorbar_scale=use_colorbar_scale,
+            colorbar_title=colorbar_title,
+            colorbar_tick_font_size=colorbar_tick_font,
+            # Target highlighting
+            highlight_target=highlight_target,
+            target_label=target_label,
+            # Data normalization
+            normalize_by_max=normalize_by_max,
+            max_reference_value=max_reference_value if normalize_by_max else None
         )
+        
         st.plotly_chart(fig_polar, use_container_width=True)
         
-        # Multi-timestep comparison (optional)
+        # Multi-timestep comparison
         if st.checkbox("Show Multiple Timesteps", key="polar_multi"):
             st.markdown("##### Multi-Timestep Comparison")
             t_indices = st.multiselect("Select Timesteps", [1, 2, 3, 4, 5], default=[1, 3, 5])
@@ -1724,11 +3179,10 @@ def main():
                 cols = st.columns(len(t_indices))
                 for col, t_idx in zip(cols, t_indices):
                     if t_idx <= max(len(s.get('timesteps', [])) for s in st.session_state.summaries):
-                        # Build data for this timestep
                         rows_t = []
                         for s in st.session_state.summaries:
                             if t_idx <= len(s['timesteps']):
-                                peak_t = s['field_stats'].get(field_type, {}).get('max', [0])
+                                peak_t = s['field_stats'].get(selected_field, {}).get('max', [0])
                                 if t_idx-1 < len(peak_t):
                                     rows_t.append({
                                         'Name': s['name'],
@@ -1737,166 +3191,704 @@ def main():
                                         'Peak_Value': peak_t[t_idx-1]
                                     })
                         
-                        # Get target peak for this timestep
-                        target_val = None
-                        if st.session_state.get('interpolation_results'):
-                            if field_type in st.session_state.interpolation_results['field_predictions']:
-                                if t_idx-1 < len(st.session_state.interpolation_results['field_predictions'][field_type]['max']):
-                                    target_val = st.session_state.interpolation_results['field_predictions'][field_type]['max'][t_idx-1]
-                        
-                        fig_t = st.session_state.polar_viz.create_polar_radar_chart(
-                            pd.DataFrame(rows_t), field_type, query_params,
-                            timestep=t_idx, width=350, height=350, show_legend=(t_idx == t_indices[0]),
-                            radial_grid_width=radial_grid_width, angular_grid_width=angular_grid_width,
-                            radial_tick_font_size=radial_tick_font-2, angular_tick_font_size=angular_tick_font-2,
-                            title_font_size=title_font-2,
-                            margin_pad={'l': 40, 'r': 40, 't': 60, 'b': 40},
-                            energy_min=custom_min_energy if use_custom_min else None,
-                            energy_max=custom_max_energy if use_custom_max else None,
-                            target_peak_value=target_val
+                        fig_t = st.session_state.visualizer.create_enhanced_polar_radar_chart(
+                            pd.DataFrame(rows_t), selected_field, query_params,
+                            timestep=t_idx, width=300, height=300, show_legend=(t_idx == t_indices[0]),
+                            # Use simplified styling for small multiples
+                            title_font_size=12, label_font_size=9, tick_font_size=7,
+                            radar_line_width=1.5, radar_fill_opacity=0.2,
+                            margin_left=40, margin_right=40, margin_top=50, margin_bottom=40
                         )
                         with col:
                             st.plotly_chart(fig_t, use_container_width=True)
                             st.caption(f"Timestep {t_idx}")
-
-    # --- TAB 4: ST-DGPA Analysis (formerly tab 5) ---
-    with tabs[3]:
-        st.subheader("🧠 ST-DGPA Attention & Physics Analysis")
-        
-        if st.session_state.interpolation_results and st.session_state.get('interpolation_params'):
-            res = st.session_state.interpolation_results
-            params = st.session_state.interpolation_params
-            
-            fig_stdgpa = st.session_state.enhanced_viz.create_stdgpa_analysis(
-                res, params['energy_query'], params['duration_query'], params['time_points']
-            )
-            
-            if fig_stdgpa:
-                st.plotly_chart(fig_stdgpa, use_container_width=True)
-                
-                # Export options
-                with st.expander("💾 Export Analysis"):
-                    if st.button("Export as PNG"):
-                        img_bytes = st.session_state.export_manager.export_plotly_figure(
-                            fig_stdgpa, format='png'
-                        )
-                        if img_bytes:
-                            st.download_button(
-                                label="⬇️ Download PNG",
-                                data=img_bytes,
-                                file_name=f"stdgpa_analysis_{params['energy_query']:.1f}mJ.png",
-                                mime="image/png"
-                            )
-            else:
-                st.info("ℹ️ No attention data available for analysis.")
+    
+    with tab2:
+        st.markdown("##### ⏱️ Field Evolution Over Time")
+        evolution_fig = st.session_state.visualizer.create_field_evolution_comparison(
+            summaries, visualization_sims, selected_field, target_sim=target_simulation
+        )
+        if evolution_fig.data:
+            st.plotly_chart(evolution_fig, use_container_width=True)
         else:
-            st.info("ℹ️ Please run an interpolation first (Tab 2) to see ST-DGPA analysis.")
-
-    # --- TAB 5: Export (formerly tab 6) ---
-    with tabs[4]:
-        st.subheader("💾 Export Results")
-        
-        if st.session_state.interpolation_results and st.session_state.get('interpolation_params'):
-            results = st.session_state.interpolation_results
-            params = st.session_state.interpolation_params
+            st.info(f"No {selected_field} data available for selected simulations")
+    
+    with tab3:
+        st.markdown("##### 🌐 3D Parameter Space Analysis")
+        if summaries:
+            energies, durations, max_vals, sim_names, is_target = [], [], [], [], []
+            for summary in summaries:
+                if summary['name'] in visualization_sims and selected_field in summary['field_stats']:
+                    energies.append(summary['energy'])
+                    durations.append(summary['duration'])
+                    sim_names.append(summary['name'])
+                    is_target.append(summary['name'] == target_simulation)
+                    stats = summary['field_stats'][selected_field]
+                    if stats['max']:
+                        max_vals.append(np.max(stats['max']))
+                    else:
+                        max_vals.append(0)
             
-            st.markdown("### Export Prediction Results")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                # Export as JSON
-                export_data = {
-                    'metadata': {
-                        'generated_at': datetime.now().isoformat(),
-                        'query_params': params,
-                        'stdgpa_params': {
-                            'sigma_g': st.session_state.extrapolator.sigma_g,
-                            's_E': st.session_state.extrapolator.s_E,
-                            's_tau': st.session_state.extrapolator.s_tau,
-                            's_t': st.session_state.extrapolator.s_t,
-                            'temporal_weight': st.session_state.extrapolator.temporal_weight
-                        }
-                    },
-                    'results': results
-                }
-                json_str, json_name = st.session_state.export_manager.export_to_json(export_data)
-                st.download_button(
-                    label="📥 Download as JSON",
-                    data=json_str,
-                    file_name=json_name,
-                    mime="application/json",
-                    use_container_width=True
+            if energies and durations and max_vals:
+                fig_3d = go.Figure()
+                target_indices = [i for i, target in enumerate(is_target) if target]
+                comp_indices = [i for i, target in enumerate(is_target) if not target]
+                
+                if comp_indices:
+                    fig_3d.add_trace(go.Scatter3d(
+                        x=[energies[i] for i in comp_indices],
+                        y=[durations[i] for i in comp_indices],
+                        z=[max_vals[i] for i in comp_indices],
+                        mode='markers',
+                        marker=dict(size=8, color=[max_vals[i] for i in comp_indices],
+                                  colorscale='Viridis', opacity=0.7, colorbar=dict(title=f"Max {selected_field}")),
+                        name='Comparison Sims',
+                        text=[sim_names[i] for i in comp_indices],
+                        hovertemplate='%{text}<br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Value: %{z:.1f}<extra></extra>'
+                    ))
+                
+                if target_indices:
+                    for idx in target_indices:
+                        fig_3d.add_trace(go.Scatter3d(
+                            x=[energies[idx]], y=[durations[idx]], z=[max_vals[idx]],
+                            mode='markers', marker=dict(size=15, color='red', symbol='diamond'),
+                            name='Target Sim', text=sim_names[idx],
+                            hovertemplate='<b>%{text}</b><br>Energy: %{x:.1f} mJ<br>Duration: %{y:.1f} ns<br>Value: %{z:.1f}<extra></extra>'
+                        ))
+                
+                fig_3d.update_layout(
+                    title=f"Parameter Space - {selected_field}",
+                    scene=dict(xaxis_title="Energy (mJ)", yaxis_title="Duration (ns)", zaxis_title=f"Max {selected_field}"),
+                    height=600
                 )
-            
-            with col2:
-                # Export as CSV
-                if results['field_predictions']:
-                    # Create DataFrame from predictions
-                    csv_data = []
-                    for idx, t in enumerate(params['time_points']):
-                        row = {'Time (ns)': t}
-                        for field in results['field_predictions']:
-                            if results['field_predictions'][field]['mean']:
-                                row[f'{field}_mean'] = results['field_predictions'][field]['mean'][idx]
-                                row[f'{field}_max'] = results['field_predictions'][field]['max'][idx]
-                                row[f'{field}_std'] = results['field_predictions'][field]['std'][idx]
-                        if idx < len(results['confidence_scores']):
-                            row['confidence'] = results['confidence_scores'][idx]
-                        csv_data.append(row)
-                    
-                    if csv_data:
-                        df_csv = pd.DataFrame(csv_data)
-                        csv_str, csv_name = st.session_state.export_manager.export_to_csv(df_csv)
-                        st.download_button(
-                            label="📥 Download as CSV",
-                            data=csv_str,
-                            file_name=csv_name,
-                            mime="text/csv",
-                            use_container_width=True
-                        )
-            
-            with col3:
-                # Export attention weights
-                if results['attention_maps']:
-                    attention_df = pd.DataFrame(results['attention_maps'])
-                    att_csv, att_name = st.session_state.export_manager.export_to_csv(
-                        attention_df, filename="attention_weights.csv"
-                    )
-                    st.download_button(
-                        label="📥 Download Attention Weights",
-                        data=att_csv,
-                        file_name=att_name,
-                        mime="text/csv",
-                        use_container_width=True
-                    )
-            
-            st.markdown("---")
-            st.markdown("### Export Visualizations")
-            
-            # List available visualizations to export
-            viz_options = []
-            if st.session_state.get('polar_query'):
-                viz_options.append("Polar Radar Chart")
-            if results.get('attention_maps'):
-                viz_options.append("ST-DGPA Analysis")
-            
-            if viz_options:
-                selected_viz = st.multiselect("Select Visualizations to Export", viz_options)
+                st.plotly_chart(fig_3d, use_container_width=True)
                 
-                for viz in selected_viz:
-                    if viz == "Polar Radar Chart" and st.session_state.get('polar_query'):
-                        st.info("Polar Radar export: Use the camera icon on the chart or the download button below.")
-                        # We could re-generate the chart with current settings and export, but for simplicity we guide user.
-                        if st.button("Export Current Polar Chart as PNG"):
-                            # Recreate the polar chart with current settings (same as in tab 3)
-                            # This is a bit complex, we'll rely on Plotly's built-in camera icon.
-                            st.info("Please hover over the chart and click the camera icon to save as PNG.")
-                    
-                    elif viz == "ST-DGPA Analysis" and results.get('attention_maps'):
-                        st.info("ST-DGPA Analysis export available in Tab 4.")
+                if len(energies) >= 3:
+                    st.markdown("##### 📏 Parameter Space Coverage")
+                    min_e, max_e = min(energies), max(energies)
+                    min_d, max_d = min(durations), max(durations)
+                    col1, col2, col3 = st.columns(3)
+                    with col1: st.metric("Energy Range", f"{min_e:.1f} - {max_e:.1f} mJ")
+                    with col2: st.metric("Duration Range", f"{min_d:.1f} - {max_d:.1f} ns")
+                    with col3:
+                        area = (max_e - min_e) * (max_d - min_d)
+                        st.metric("Parameter Space Area", f"{area:.1f} mJ·ns")
+        
+        st.markdown('<h3 class="sub-header">📋 Comparative Statistics</h3>', unsafe_allow_html=True)
+        stats_data = []
+        for sim_name in visualization_sims:
+            summary = next((s for s in summaries if s['name'] == sim_name), None)
+            if summary and selected_field in summary['field_stats']:
+                stats = summary['field_stats'][selected_field]
+                if stats['mean'] and stats['max']:
+                    row = {
+                        'Simulation': sim_name,
+                        'Type': 'Target' if sim_name == target_simulation else 'Comparison',
+                        'Energy (mJ)': summary['energy'],
+                        'Duration (ns)': summary['duration'],
+                        f'Mean {selected_field}': np.mean(stats['mean']),
+                        f'Max {selected_field}': np.max(stats['max']),
+                        f'Std Dev {selected_field}': np.mean(stats['std']) if stats['std'] else 0,
+                        'Peak Timestep': np.argmax(stats['max']) + 1 if stats['max'] else 0
+                    }
+                    stats_data.append(row)
+        
+        if stats_data:
+            df_stats = pd.DataFrame(stats_data)
+            def highlight_target(row):
+                return ['background-color: #ffcccc'] * len(row) if row['Type'] == 'Target' else [''] * len(row)
+            styled_df = df_stats.style.apply(highlight_target, axis=1)
+            format_dict = {}
+            for col in df_stats.columns:
+                if col not in ['Simulation', 'Type']:
+                    if 'Mean' in col or 'Max' in col or 'Std Dev' in col:
+                        format_dict[col] = "{:.3f}"
+                    elif 'Energy' in col or 'Duration' in col:
+                        format_dict[col] = "{:.2f}"
+            styled_df = styled_df.format(format_dict)
+            st.dataframe(styled_df, use_container_width=True)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                csv = df_stats.to_csv(index=False).encode('utf-8')
+                st.download_button(label="📥 Download Comparison as CSV", data=csv,
+                                 file_name=f"comparison_{selected_field}.csv",
+                                 mime="text/csv", use_container_width=True)
+            with col2:
+                with st.expander("💡 Analysis Insights"):
+                    if len(stats_data) > 1:
+                        target_data = [row for row in stats_data if row['Type'] == 'Target'][0]
+                        comp_data = [row for row in stats_data if row['Type'] == 'Comparison']
+                        if target_data and comp_data:
+                            st.write("**Target vs Comparison Simulations:**")
+                            for comp in comp_data:
+                                energy_diff = abs(target_data['Energy (mJ)'] - comp['Energy (mJ)']) / target_data['Energy (mJ)']
+                                duration_diff = abs(target_data['Duration (ns)'] - comp['Duration (ns)']) / target_data['Duration (ns)']
+                                field_diff = abs(target_data[f'Mean {selected_field}'] - comp[f'Mean {selected_field}']) / target_data[f'Mean {selected_field}']
+                                st.write(f"- **{comp['Simulation']}**: Energy diff: {energy_diff:.1%}, Duration diff: {duration_diff:.1%}, Field diff: {field_diff:.1%}")
+
+def render_stdgpa_analysis():
+    """Render comprehensive ST-DGPA analysis interface"""
+    st.markdown('<h2 class="sub-header">🔬 Spatio-Temporal Gated Physics Attention (ST-DGPA) Analysis</h2>', unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first to enable ST-DGPA analysis.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    st.markdown("""
+    <div class="stdgpa-box">
+    <h3>📚 ST-DGPA Theory & Implementation</h3>
+    **Spatio-Temporal Gated Physics Attention (ST-DGPA)** is an advanced interpolation method for laser FEA simulations that explicitly incorporates energy (E), pulse duration (τ), and time (t) similarity with heat transfer characterization.
+    
+    ### Core ST-DGPA Formula
+    For any field **F** (temperature, stress, displacement, etc.):
+    $$
+    \\boxed{\\mathbf{F}(\\boldsymbol{\\theta}^*) = \\sum_{i=1}^{N} w_i(\\boldsymbol{\\theta}^*) \\cdot \\mathbf{F}^{(i)}}
+    $$
+    where $w_i(\\boldsymbol{\\theta}^*)$ are ST-DGPA weights computed as:
+    $$
+    w_i(\\boldsymbol{\\theta}^*) = \\frac{
+    \\bar{\\alpha}_i(\\boldsymbol{\\theta}^*) \\cdot
+    \\exp\\left( -\\frac{\\phi_i^2}{2\\sigma_g^2} \\right)
+    }{
+    \\sum_{k=1}^{N} \\bar{\\alpha}_k(\\boldsymbol{\\theta}^*) \\cdot
+    \\exp\\left( -\\frac{\\phi_k^2}{2\\sigma_g^2} \\right)
+    }
+    $$
+    with the (E, τ, t) proximity kernel:
+    $$
+    \\phi_i = \\sqrt{
+    \\left( \\frac{E^* - E_i}{s_E} \\right)^2 +
+    \\left( \\frac{\\tau^* - \\tau_i}{s_\\tau} \\right)^2 +
+    \\left( \\frac{t^* - t_i}{s_t} \\right)^2
+    }
+    $$
+    
+    ### Key Components
+    1. **Physics Attention** ($\\bar{\\alpha}_i$): Multi-head transformer-inspired attention with enhanced physics-aware embeddings including heat transfer features
+    2. **(E, τ, t) Gating**: Gaussian kernel that ensures physically meaningful interpolation across time
+    3. **Heat Transfer Characterization**: Incorporates Fourier number ($Fo = \\alpha t / L^2$) and thermal penetration depth ($\\delta \\sim \\sqrt{\\alpha t}$)
+    4. **Temporal Weighting**: Explicit control over temporal similarity importance
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # ST-DGPA parameter exploration
+    st.markdown('<h3 class="sub-header">🔍 ST-DGPA Parameter Explorer</h3>', unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        explore_sigma_g = st.slider("Explore σ_g", min_value=0.05, max_value=1.0, value=0.20, step=0.05, key="explore_sigma_g")
+    with col2:
+        explore_s_E = st.slider("Explore s_E", min_value=0.1, max_value=50.0, value=10.0, step=0.5, key="explore_s_E")
+    with col3:
+        explore_s_tau = st.slider("Explore s_τ", min_value=0.1, max_value=20.0, value=5.0, step=0.5, key="explore_s_tau")
+    with col4:
+        explore_s_t = st.slider("Explore s_t", min_value=1.0, max_value=50.0, value=20.0, step=1.0, key="explore_s_t")
+    explore_temporal_weight = st.slider("Explore Temporal Weight", min_value=0.0, max_value=1.0, value=0.3, step=0.05, key="explore_temporal_weight")
+    
+    # Create visualization of ST-DGPA kernel
+    st.markdown("##### 📊 (E, τ, t) Gating Kernel Visualization")
+    if st.session_state.summaries:
+        energies = [s['energy'] for s in st.session_state.summaries]
+        durations = [s['duration'] for s in st.session_state.summaries]
+        
+        e_min, e_max = min(energies), max(energies)
+        d_min, d_max = min(durations), max(durations)
+        e_grid = np.linspace(e_min, e_max, 50)
+        d_grid = np.linspace(d_min, d_max, 50)
+        E_grid, D_grid = np.meshgrid(e_grid, d_grid)
+        
+        query_e = (e_min + e_max) / 2
+        query_d = (d_min + d_max) / 2
+        query_t = 10.0
+        
+        phi_squared = ((E_grid - query_e) / explore_s_E)**2 + ((D_grid - query_d) / explore_s_tau)**2
+        gating = np.exp(-phi_squared / (2 * explore_sigma_g**2))
+        
+        fig_kernel = go.Figure(data=go.Heatmap(
+            z=gating, x=e_grid, y=d_grid, colorscale='Viridis',
+            colorbar=dict(title="Gating Weight")
+        ))
+        
+        fig_kernel.add_trace(go.Scatter(
+            x=energies, y=durations, mode='markers',
+            marker=dict(size=8, color='red', symbol='circle', line=dict(width=2, color='white')),
+            name='Training Simulations'
+        ))
+        
+        fig_kernel.add_trace(go.Scatter(
+            x=[query_e], y=[query_d], mode='markers',
+            marker=dict(size=15, color='yellow', symbol='star'),
+            name='Query Point'
+        ))
+        
+        fig_kernel.update_layout(
+            title=f"(E, τ) Gating Kernel at t={query_t} ns (σ_g={explore_sigma_g:.2f}, s_E={explore_s_E:.1f}, s_τ={explore_s_tau:.1f}, s_t={explore_s_t:.1f})",
+            xaxis_title="Energy (mJ)", yaxis_title="Duration (ns)", height=500
+        )
+        st.plotly_chart(fig_kernel, use_container_width=True)
+        
+        st.markdown("##### 📈 Kernel Statistics")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1: st.metric("Max Gating", f"{np.max(gating):.3f}")
+        with col2: st.metric("Min Gating", f"{np.min(gating):.3f}")
+        with col3:
+            effective_mask = gating > 0.5
+            effective_area = np.sum(effective_mask) / gating.size * 100
+            st.metric("Effective Area", f"{effective_area:.1f}%")
+        with col4:
+            effective_points = sum(1 for e, d in zip(energies, durations)
+                                 if np.exp(-(((e - query_e)/explore_s_E)**2 + ((d - query_d)/explore_s_tau)**2)/(2*explore_sigma_g**2)) > 0.5)
+            st.metric("Effective Points", f"{effective_points}/{len(energies)}")
+    
+    # ST-DGPA vs baseline comparison
+    st.markdown('<h3 class="sub-header">⚖️ ST-DGPA vs DGPA Comparison</h3>', unsafe_allow_html=True)
+    if st.button("🧪 Run ST-DGPA vs DGPA Comparison", use_container_width=True):
+        with st.spinner("Running comparison analysis..."):
+            st.markdown("""
+            ### Conceptual Comparison
+            | Aspect | ST-DGPA (Extended) | DGPA (Original) |
+            |--------|-------------------|----------------|
+            | **Temporal sensitivity** | Explicit time gating | Implicit via embeddings |
+            | **Heat transfer physics** | Fourier number, penetration depth | Basic time features |
+            | **Temporal phases** | Heating/cooling phase detection | No phase distinction |
+            | **Temporal confidence** | Physics-based confidence scoring | Single confidence score |
+            | **Parameter tuning** | Time-specific scaling (s_t) | No time-specific scaling |
+            | **Computational cost** | Slightly higher (enhanced features) | Standard DGPA |
+            
+            ### Key Advantages of ST-DGPA
+            1. **Temporal interpretability**: Clear separation of temporal phases (heating vs cooling)
+            2. **Heat transfer awareness**: Incorporates diffusion physics via Fourier number
+            3. **Phase-appropriate gating**: Tighter temporal matching during heating, looser during cooling
+            4. **Enhanced embeddings**: Physics-aware temporal features improve attention quality
+            5. **Temporal confidence**: Separate confidence metric for time interpolation reliability
+            """)
+            
+            fig_compare = go.Figure()
+            n_sources = 20
+            physics_weights = np.random.dirichlet(np.ones(n_sources))
+            et_distances = np.abs(np.random.randn(n_sources))
+            time_distances = np.abs(np.random.randn(n_sources)) * 0.5
+            
+            sigma_g_dgpa = 0.2
+            dgpa_gating = np.exp(-et_distances**2 / (2 * sigma_g_dgpa**2))
+            dgpa_weights = (physics_weights * dgpa_gating)
+            dgpa_weights = dgpa_weights / np.sum(dgpa_weights)
+            
+            sigma_g_stdgpa = 0.2
+            stdgpa_distances = np.sqrt(et_distances**2 + (time_distances/explore_s_t)**2)
+            stdgpa_gating = np.exp(-stdgpa_distances**2 / (2 * sigma_g_stdgpa**2))
+            stdgpa_weights = (physics_weights * stdgpa_gating)
+            stdgpa_weights = stdgpa_weights / np.sum(stdgpa_weights)
+            
+            fig_compare.add_trace(go.Scatter(
+                x=list(range(n_sources)), y=physics_weights,
+                mode='lines+markers', name='Physics Attention Only',
+                line=dict(color='green', width=2)
+            ))
+            fig_compare.add_trace(go.Scatter(
+                x=list(range(n_sources)), y=dgpa_weights,
+                mode='lines+markers', name='DGPA (E, τ only)',
+                line=dict(color='blue', width=2, dash='dash')
+            ))
+            fig_compare.add_trace(go.Scatter(
+                x=list(range(n_sources)), y=stdgpa_weights,
+                mode='lines+markers', name='ST-DGPA (E, τ, t)',
+                line=dict(color='red', width=3)
+            ))
+            
+            fig_compare.update_layout(
+                title="ST-DGPA vs DGPA Weight Distribution",
+                xaxis_title="Source Index", yaxis_title="Weight",
+                height=400, showlegend=True
+            )
+            st.plotly_chart(fig_compare, use_container_width=True)
+            
+            dgpa_change = dgpa_weights - physics_weights
+            stdgpa_change = stdgpa_weights - physics_weights
+            st.info(f"**DGPA changes weights by ±{np.max(np.abs(dgpa_change)):.3f} (avg: {np.mean(np.abs(dgpa_change)):.3f})**")
+            st.info(f"**ST-DGPA changes weights by ±{np.max(np.abs(stdgpa_change)):.3f} (avg: {np.mean(np.abs(stdgpa_change)):.3f})**")
+    
+    # ST-DGPA applications guide
+    with st.expander("📖 ST-DGPA Applications & Best Practices", expanded=True):
+        st.markdown("""
+        ### 🎯 When to Use ST-DGPA
+        **Highly recommended for:**
+        - Laser processing with strong time-dependent effects
+        - Heat transfer-dominated simulations
+        - Interpolation across different temporal phases
+        - Conservative temporal extrapolation needs
+        
+        **Recommended for:**
+        - General laser FEA interpolation with time dependence
+        - Multi-phase physical processes
+        - Uncertainty quantification in time domain
+        
+        **Less suitable for:**
+        - Steady-state simulations (use DGPA)
+        - Very sparse temporal data (< 3 timesteps per simulation)
+        - Real-time applications requiring maximum speed
+        
+        ### ⚙️ Parameter Selection Guide
+        **Default values (laser FEA with heat transfer):**
+        - σ_g = 0.20 (moderate gating)
+        - s_E = 10.0 mJ (based on typical energy range)
+        - s_τ = 5.0 ns (based on typical duration range)
+        - s_t = 20.0 ns (balanced temporal matching)
+        - temporal_weight = 0.3 (moderate temporal emphasis)
+        
+        **Heat transfer-specific tuning:**
+        - **For conductive materials** (high α): Use smaller s_t (10-15 ns)
+        - **For diffusive regimes** (long times): Use larger s_t (25-40 ns)
+        - **For heating phase focus**: Increase temporal_weight (0.4-0.6)
+        - **For cooling phase focus**: Decrease temporal_weight (0.2-0.4)
+        
+        ### 🔬 Advanced Features
+        **Adaptive temporal scaling:**
+        ```python
+        # Auto-adjust s_t based on time relative to pulse duration
+        if time_query < duration_query:  # Heating phase
+            s_t_effective = s_t * 0.7  # Tighter matching
+        else:  # Cooling phase
+            s_t_effective = s_t * 1.3  # Looser matching
+        ```
+        
+        **Phase-aware gating:**
+        - Early heating (t < 0.3τ): Very tight gating (σ_g ≈ 0.15)
+        - Heating phase (0.3τ < t < τ): Moderate gating (σ_g ≈ 0.20)
+        - Cooling phase (τ < t < 2τ): Standard gating (σ_g ≈ 0.25)
+        - Diffusion phase (t > 2τ): Loose gating (σ_g ≈ 0.30)
+        
+        ### 📊 Validation Metrics for Temporal Interpolation
+        Monitor:
+        1. **Temporal confidence**: Should be > 0.7 for reliable interpolation
+        2. **Phase consistency**: Sources should be in similar temporal phases
+        3. **Fourier number spread**: Sources should have similar Fo (ΔFo < 0.5)
+        4. **Weight temporal coherence**: High weights should cluster in time
+        """)
+    
+    # ST-DGPA code example
+    with st.expander("💻 ST-DGPA Implementation Code", expanded=False):
+        st.code("""
+# ST-DGPA Implementation Snippet
+class SpatioTemporalGatedPhysicsAttentionExtrapolator:
+    def __init__(self, sigma_g=0.20, s_E=10.0, s_tau=5.0, s_t=20.0, temporal_weight=0.3):
+        self.sigma_g = sigma_g
+        self.s_E = s_E
+        self.s_tau = s_tau
+        self.s_t = s_t  # NEW: Time scaling factor
+        self.temporal_weight = temporal_weight  # NEW: Temporal weight
+    
+    def _compute_ett_gating(self, energy_query, duration_query, time_query):
+        \"\"\"Compute the (E, τ, t) gating kernel for ST-DGPA\"\"\"
+        phi = []
+        for meta in self.source_metadata:
+            de = (energy_query - meta['energy']) / self.s_E
+            dt = (duration_query - meta['duration']) / self.s_tau
+            dtime = (time_query - meta['time']) / self.s_t  # NEW: Time difference
+            phi.append(np.sqrt(de**2 + dt**2 + dtime**2))
+        phi = np.array(phi)
+        gating = np.exp(-phi**2 / (2 * self.sigma_g**2))
+        return gating / (gating.sum() + 1e-12)
+    
+    def _compute_temporal_similarity(self, query_meta, source_metas):
+        \"\"\"Compute temporal similarity with physics-aware weighting\"\"\"
+        similarities = []
+        for meta in source_metas:
+            time_diff = abs(query_meta['time'] - meta['time'])
+            if query_meta['time'] < query_meta['duration'] * 1.5:
+                temporal_tolerance = max(query_meta['duration'] * 0.1, 1.0)
+            else:
+                temporal_tolerance = max(query_meta['duration'] * 0.3, 3.0)
+            fourier_diff = abs(query_meta['fourier_number'] - meta['fourier_number'])
+            fourier_similarity = np.exp(-fourier_diff / 0.1)
+            time_similarity = np.exp(-time_diff / temporal_tolerance)
+            combined = (1 - self.temporal_weight) * time_similarity + self.temporal_weight * fourier_similarity
+            similarities.append(combined)
+        return np.array(similarities)
+    
+    def _multi_head_attention_with_gating(self, query_embedding, query_meta):
+        \"\"\"ST-DGPA: Combine physics attention with (E, τ, t) gating\"\"\"
+        physics_attention = self._compute_physics_attention(query_embedding, query_meta)
+        if self.temporal_weight > 0:
+            temporal_sim = self._compute_temporal_similarity(query_meta, self.source_metadata)
+            physics_attention = (1 - self.temporal_weight) * physics_attention + self.temporal_weight * temporal_sim
+        ett_gating = self._compute_ett_gating(query_meta['energy'], query_meta['duration'], query_meta['time'])
+        combined_weights = physics_attention * ett_gating
+        final_weights = combined_weights / (combined_weights.sum() + 1e-12)
+        return final_weights, physics_attention, ett_gating
+        """, language="python")
+
+def render_heat_transfer_analysis():
+    """Render heat transfer-specific analysis interface"""
+    st.markdown('<h2 class="sub-header">🔥 Heat Transfer Analysis</h2>', unsafe_allow_html=True)
+    
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="warning-box">
+        <h3>⚠️ No Data Loaded</h3>
+        <p>Please load simulations first to enable heat transfer analysis.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    st.markdown("""
+    <div class="heat-transfer-box">
+    <h3>🌡️ Heat Transfer Physics in Laser Processing</h3>
+    This analysis focuses on heat transfer characterization in laser FEA simulations using ST-DGPA.
+    
+    ### Key Heat Transfer Concepts
+    1. **Fourier Number** ($Fo = \\frac{\\alpha t}{L^2}$):
+       - Dimensionless time characterizing heat diffusion
+       - $Fo < 0.1$: Localized heating (conduction-limited)
+       - $Fo > 1$: Well-developed diffusion
+    
+    2. **Thermal Penetration Depth** ($\\delta \\sim \\sqrt{\\alpha t}$):
+       - Characteristic distance heat diffuses in time t
+       - Important for determining affected volume
+    
+    3. **Temporal Phases**:
+       - **Early Heating** ($t < 0.3\\tau$): Rapid temperature rise, minimal diffusion
+       - **Heating** ($0.3\\tau < t < \\tau$): Continued energy deposition
+       - **Early Cooling** ($\\tau < t < 2\\tau$): Rapid cooling, significant gradients
+       - **Diffusion Cooling** ($t > 2\\tau$): Slow thermal diffusion dominates
+    
+    4. **Dimensionless Groups**:
+       - **Energy Density**: $E/\\tau$ (W)
+       - **Normalized Time**: $t/\\tau$
+       - **Thermal Diffusion Ratio**: $\\sqrt{\\alpha\\tau}/L$
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Material properties
+    st.markdown('<h3 class="sub-header">📊 Material Properties</h3>', unsafe_allow_html=True)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        material_type = st.selectbox("Material Type", ["Steel", "Aluminum", "Copper", "Titanium", "Custom"],
+                                   index=0, key="material_type")
+    
+    material_props = {
+        "Steel": {"α": 1.2e-5, "k": 50, "ρ": 7850, "cp": 450},
+        "Aluminum": {"α": 8.4e-5, "k": 237, "ρ": 2700, "cp": 900},
+        "Copper": {"α": 1.1e-4, "k": 400, "ρ": 8960, "cp": 385},
+        "Titanium": {"α": 8.9e-6, "k": 21.9, "ρ": 4500, "cp": 520},
+        "Custom": {"α": 1e-5, "k": 50, "ρ": 5000, "cp": 500}
+    }
+    props = material_props[material_type]
+    
+    with col2:
+        thermal_diffusivity = st.number_input("Thermal Diffusivity (m²/s)", min_value=1e-7, max_value=1e-3,
+                                            value=props["α"], format="%.2e", key="ht_thermal_diffusivity",
+                                            help="α = k/(ρ·cp)")
+    with col3:
+        laser_radius = st.number_input("Laser Spot Radius (μm)", min_value=1.0, max_value=500.0, value=50.0,
+                                     key="ht_laser_radius")
+    
+    st.session_state.extrapolator.thermal_diffusivity = thermal_diffusivity
+    st.session_state.extrapolator.laser_spot_radius = laser_radius * 1e-6
+    st.session_state.extrapolator.characteristic_length = laser_radius * 2e-6
+    
+    # Heat transfer calculations
+    st.markdown('<h3 class="sub-header">🧮 Heat Transfer Calculations</h3>', unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        calc_time = st.number_input("Calculation Time (ns)", min_value=1, max_value=500, value=50, key="calc_time")
+    with col2:
+        calc_duration = st.number_input("Pulse Duration (ns)", min_value=1, max_value=100, value=10, key="calc_duration")
+    
+    fourier_number = st.session_state.extrapolator._compute_fourier_number(calc_time)
+    penetration_depth = st.session_state.extrapolator._compute_thermal_penetration(calc_time)
+    
+    if calc_time < calc_duration * 0.3:
+        phase = "Early Heating"
+    elif calc_time < calc_duration:
+        phase = "Heating"
+    elif calc_time < calc_duration * 2:
+        phase = "Early Cooling"
+    else:
+        phase = "Diffusion Cooling"
+    
+    st.markdown("##### 📈 Calculation Results")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1: st.metric("Fourier Number", f"{fourier_number:.4f}")
+    with col2: st.metric("Thermal Penetration", f"{penetration_depth:.1f} μm")
+    with col3: st.metric("Phase", phase)
+    with col4:
+        normalized_time = calc_time / calc_duration
+        st.metric("Normalized Time", f"{normalized_time:.2f}")
+    
+    st.markdown("##### 💡 Interpretation")
+    interpretation = []
+    if fourier_number < 0.1:
+        interpretation.append("**Conduction-limited regime**: Heat diffusion is minimal, temperature gradients are steep.")
+    elif fourier_number < 1.0:
+        interpretation.append("**Transition regime**: Diffusion is developing, gradients are moderating.")
+    else:
+        interpretation.append("**Diffusion-dominated regime**: Heat has spread significantly, temperature field is smoothing.")
+    
+    if phase == "Early Heating":
+        interpretation.append("**Phase**: Rapid heating with minimal diffusion - high interpolation uncertainty.")
+    elif phase == "Heating":
+        interpretation.append("**Phase**: Active energy deposition - moderate interpolation uncertainty.")
+    elif phase == "Early Cooling":
+        interpretation.append("**Phase**: Rapid cooling with developing gradients - good interpolation conditions.")
+    else:
+        interpretation.append("**Phase**: Slow diffusion cooling - excellent interpolation conditions.")
+    
+    for item in interpretation:
+        st.info(item)
+    
+    # Heat transfer visualization
+    st.markdown('<h3 class="sub-header">📊 Heat Transfer Visualization</h3>', unsafe_allow_html=True)
+    time_range = np.linspace(1, 200, 100)
+    fourier_evolution = [st.session_state.extrapolator._compute_fourier_number(t) for t in time_range]
+    penetration_evolution = [st.session_state.extrapolator._compute_thermal_penetration(t) for t in time_range]
+    
+    fig_evolution = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=["Fourier Number Evolution", "Thermal Penetration Evolution"],
+        vertical_spacing=0.15
+    )
+    
+    fig_evolution.add_trace(
+        go.Scatter(x=time_range, y=fourier_evolution, mode='lines',
+                 line=dict(color='blue', width=3), name='Fourier Number'),
+        row=1, col=1
+    )
+    
+    phase_boundaries = [calc_duration * 0.3, calc_duration, calc_duration * 2]
+    phase_colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4']
+    phase_labels = ['Early Heating', 'Heating', 'Early Cooling', 'Diffusion Cooling']
+    
+    for i in range(len(phase_boundaries) + 1):
+        if i == 0:
+            x0, x1 = 0, phase_boundaries[0]
+        elif i == len(phase_boundaries):
+            x0, x1 = phase_boundaries[-1], time_range[-1]
         else:
-            st.info("ℹ️ Please run an interpolation first (Tab 2) to enable export.")
+            x0, x1 = phase_boundaries[i-1], phase_boundaries[i]
+        fig_evolution.add_vrect(x0=x0, x1=x1, fillcolor=phase_colors[i], opacity=0.2,
+                              line_width=0, row=1, col=1)
+        fig_evolution.add_annotation(x=(x0 + x1) / 2, y=np.max(fourier_evolution) * 0.9,
+                                   text=phase_labels[i], showarrow=False, font=dict(size=10), row=1, col=1)
+    
+    fig_evolution.add_trace(
+        go.Scatter(x=time_range, y=penetration_evolution, mode='lines',
+                 line=dict(color='red', width=3), name='Penetration Depth'),
+        row=2, col=1
+    )
+    
+    fig_evolution.update_layout(
+        height=600,
+        title_text=f"Heat Transfer Evolution (α = {thermal_diffusivity:.2e} m²/s, Laser Radius = {laser_radius} μm)",
+        showlegend=True
+    )
+    fig_evolution.update_xaxes(title_text="Time (ns)", row=1, col=1)
+    fig_evolution.update_yaxes(title_text="Fourier Number", row=1, col=1)
+    fig_evolution.update_xaxes(title_text="Time (ns)", row=2, col=1)
+    fig_evolution.update_yaxes(title_text="Penetration Depth (μm)", row=2, col=1)
+    
+    st.plotly_chart(fig_evolution, use_container_width=True)
+    
+    # ST-DGPA for heat transfer
+    st.markdown('<h3 class="sub-header">🎯 ST-DGPA for Heat Transfer</h3>', unsafe_allow_html=True)
+    st.markdown("""
+    ### How ST-DGPA Enhances Heat Transfer Interpolation
+    1. **Phase-Aware Gating**:
+       - Tighter temporal matching during heating phases (smaller effective s_t)
+       - Looser matching during diffusion phases (larger effective s_t)
+       - Prevents mixing incompatible thermal regimes
+    
+    2. **Physics-Informed Similarity**:
+       - Uses Fourier number for dimensionless time comparison
+       - Considers thermal penetration depth for spatial scale
+       - Incorporates phase information in attention weights
+    
+    3. **Confidence Metrics**:
+       - Temporal confidence based on phase and Fourier number spread
+       - Source coherence assessment for temporal consistency
+       - Uncertainty quantification for time interpolation
+    
+    4. **Optimized Parameters**:
+    ```python
+    # Heat-transfer optimized ST-DGPA parameters
+    st_dgpa_heat = SpatioTemporalGatedPhysicsAttentionExtrapolator(
+        sigma_g=0.22,          # Slightly broader for thermal diffusion
+        s_E=10.0,             # Energy scaling (mJ)
+        s_tau=5.0,            # Duration scaling (ns)
+        s_t=25.0,             # Time scaling for diffusion (ns)
+        temporal_weight=0.4   # Enhanced temporal emphasis
+    )
+    ```
+    
+    ### Best Practices for Heat Transfer Applications
+    1. **Training Data Preparation**:
+       - Ensure sufficient temporal resolution (≥ 5 timesteps per simulation)
+       - Include simulations covering different phases
+       - Balance energy-duration combinations
+    
+    2. **Query Strategy**:
+       - For heating phase queries, prioritize simulations with similar t/τ
+       - For cooling phase, include broader temporal range
+       - Use Fourier number similarity for dimensionless comparison
+    
+    3. **Validation**:
+       - Check phase consistency of top-weighted sources
+       - Verify Fourier number spread is reasonable
+       - Validate against known physical limits (energy conservation, max temperature)
+    
+    4. **Troubleshooting**:
+       - **Low temporal confidence**: Increase s_t or check phase mismatch
+       - **Over-smoothing**: Decrease s_t or increase temporal_weight
+       - **Unphysical results**: Check source coherence and phase consistency
+    """)
+    
+    # Interactive heat transfer exploration
+    if st.button("🔬 Explore Heat Transfer with Current Data", use_container_width=True):
+        if st.session_state.summaries:
+            st.markdown("##### 📋 Simulation Heat Transfer Analysis")
+            analysis_data = []
+            for summary in st.session_state.summaries[:10]:
+                max_time = max(summary['timesteps']) if summary['timesteps'] else 0
+                max_fourier = st.session_state.extrapolator._compute_fourier_number(max_time)
+                max_penetration = st.session_state.extrapolator._compute_thermal_penetration(max_time)
+                
+                temp_stats = "N/A"
+                if 'temperature' in summary['field_stats']:
+                    stats = summary['field_stats']['temperature']
+                    if stats['max']:
+                        max_temp = np.max(stats['max'])
+                        temp_stats = f"{max_temp:.1f}°C"
+                
+                analysis_data.append({
+                    'Simulation': summary['name'],
+                    'Energy (mJ)': summary['energy'],
+                    'Duration (ns)': summary['duration'],
+                    'Max Time (ns)': max_time,
+                    'Max Fourier': f"{max_fourier:.3f}",
+                    'Max Penetration (μm)': f"{max_penetration:.1f}",
+                    'Max Temp': temp_stats,
+                    'Phase at Max': "Diffusion" if max_time > summary['duration'] * 2 else "Heating/Cooling"
+                })
+            
+            if analysis_data:
+                df_analysis = pd.DataFrame(analysis_data)
+                st.dataframe(df_analysis, use_container_width=True)
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    avg_fourier = np.mean([float(d['Max Fourier']) for d in analysis_data])
+                    st.metric("Avg Max Fourier", f"{avg_fourier:.3f}")
+                with col2:
+                    avg_penetration = np.mean([float(d['Max Penetration (μm)']) for d in analysis_data])
+                    st.metric("Avg Max Penetration", f"{avg_penetration:.1f} μm")
+                with col3:
+                    heating_sims = len([d for d in analysis_data if d['Phase at Max'] == "Heating/Cooling"])
+                    st.metric("Heating/Cooling Sims", f"{heating_sims}/{len(analysis_data)}")
 
 if __name__ == "__main__":
     main()
