@@ -8,6 +8,7 @@ ENHANCED FEA LASER SIMULATION PLATFORM WITH ST-DGPA & SANKEY DIAGRAM
 - 🔥 NEW: Physics-aware Sankey diagram for weight decomposition
 - 🔥 ENHANCED: Dynamic source simulation visualization with global IDs
 - 🔥 ENHANCED: Robust data loading pipeline with metadata preservation
+- 🔥 NEW: Comprehensive data visualization dashboard (time series, box plots, animations, slices)
 - Robust error handling & UI improvements
 """
 import streamlit as st
@@ -114,7 +115,7 @@ class CacheManager:
         if len(st.session_state.interpolation_field_history) > 10: st.session_state.interpolation_field_history.popitem(last=False)
 
 # =============================================
-# UNIFIED DATA LOADER - 🔥 ENHANCED FOR SANKEY SUPPORT
+# UNIFIED DATA LOADER - 🔥 ENHANCED FOR SANKEY SUPPORT & BUG FIXED
 # =============================================
 class UnifiedFEADataLoader:
     def __init__(self):
@@ -127,7 +128,9 @@ class UnifiedFEADataLoader:
         self.global_source_map = {}  # Maps (sim_name, timestep_idx) → global_source_id
     
     def parse_folder_name(self, folder: str):
-        match = re.match(r"q([\dp\.]+)mJ-delta([\dp\.]+)ns", folder)
+        # FIX: extract basename in case full path is passed
+        name = os.path.basename(folder)
+        match = re.match(r"q([\dp\.]+)mJ-delta([\dp\.]+)ns", name)
         if not match: return None, None
         e, d = match.groups()
         return float(e.replace("p", ".")), float(d.replace("p", "."))
@@ -154,9 +157,10 @@ class UnifiedFEADataLoader:
         
         for folder_idx, folder in enumerate(folders):
             name = os.path.basename(folder)
-            energy, duration = _self.parse_folder_name(folder)
+            # 🔥 CRITICAL FIX: use name (basename) instead of folder
+            energy, duration = _self.parse_folder_name(name)
             if energy is None: 
-                st.warning(f"⚠️ Could not parse folder name: {folder}")
+                st.warning(f"⚠️ Could not parse folder name: {name}")
                 continue
             
             vtu_files = sorted(glob.glob(os.path.join(folder, "a_t????.vtu")))
@@ -893,6 +897,119 @@ class EnhancedVisualizer:
         fig.update_layout(height=700, title_text="Temporal Analysis of Heat Transfer Characteristics", showlegend=False)
         return fig
 
+    # =============================================
+    # 🔥 NEW: Data Visualization Dashboard Components
+    # =============================================
+    @staticmethod
+    def create_field_time_series(summaries, field_name):
+        """Create line plots of field statistics over time for multiple simulations."""
+        if not summaries:
+            return None
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                            subplot_titles=[f"{field_name} - Mean", f"{field_name} - Max", f"{field_name} - Std"],
+                            vertical_spacing=0.1)
+        for summary in summaries:
+            if field_name not in summary['field_stats']:
+                continue
+            stats = summary['field_stats'][field_name]
+            time_vals = summary['timesteps']
+            name = summary['name'][:20]  # shorten for legend
+            fig.add_trace(go.Scatter(x=time_vals, y=stats['mean'], mode='lines+markers', name=f"{name} (mean)"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=time_vals, y=stats['max'], mode='lines+markers', name=f"{name} (max)"), row=2, col=2)
+            fig.add_trace(go.Scatter(x=time_vals, y=stats['std'], mode='lines+markers', name=f"{name} (std)"), row=3, col=3)
+        fig.update_layout(height=800, title_text=f"Time Evolution of {field_name}", showlegend=True)
+        return fig
+
+    @staticmethod
+    def create_field_boxplot(summaries, field_name):
+        """Create box plot of field values across timesteps for each simulation."""
+        data = []
+        for summary in summaries:
+            if field_name not in summary['field_stats']:
+                continue
+            # Use the 'mean' values across timesteps as distribution
+            values = summary['field_stats'][field_name]['mean']
+            if values:
+                data.append(go.Box(y=values, name=summary['name'][:30], boxmean='sd'))
+        if not data:
+            return None
+        fig = go.Figure(data=data)
+        fig.update_layout(title=f"Distribution of {field_name} Mean Across Timesteps", 
+                          yaxis_title=field_name, height=500)
+        return fig
+
+    @staticmethod
+    def create_2d_slice(points, values, plane='xy', z_value=None, resolution=100):
+        """Extract a 2D slice through the 3D scalar field on a specified plane."""
+        if points.shape[1] < 3:
+            return None
+        # Create regular grid on the plane
+        if plane == 'xy':
+            x_vals = np.linspace(points[:,0].min(), points[:,0].max(), resolution)
+            y_vals = np.linspace(points[:,1].min(), points[:,1].max(), resolution)
+            X, Y = np.meshgrid(x_vals, y_vals)
+            Z_target = z_value if z_value is not None else np.mean(points[:,2])
+            points_plane = np.column_stack([X.ravel(), Y.ravel(), np.full(X.size, Z_target)])
+        elif plane == 'xz':
+            x_vals = np.linspace(points[:,0].min(), points[:,0].max(), resolution)
+            z_vals = np.linspace(points[:,2].min(), points[:,2].max(), resolution)
+            X, Z = np.meshgrid(x_vals, z_vals)
+            Y_target = z_value if z_value is not None else np.mean(points[:,1])
+            points_plane = np.column_stack([X.ravel(), np.full(X.size, Y_target), Z.ravel()])
+        elif plane == 'yz':
+            y_vals = np.linspace(points[:,1].min(), points[:,1].max(), resolution)
+            z_vals = np.linspace(points[:,2].min(), points[:,2].max(), resolution)
+            Y, Z = np.meshgrid(y_vals, z_vals)
+            X_target = z_value if z_value is not None else np.mean(points[:,0])
+            points_plane = np.column_stack([np.full(Y.size, X_target), Y.ravel(), Z.ravel()])
+        else:
+            return None
+        
+        # Interpolate values on the slice
+        from scipy.interpolate import griddata
+        slice_vals = griddata(points, values, points_plane, method='linear')
+        slice_vals = slice_vals.reshape((resolution, resolution))
+        
+        if plane == 'xy':
+            fig = go.Figure(data=go.Heatmap(z=slice_vals, x=x_vals, y=y_vals, colorscale='Viridis'))
+            fig.update_layout(title=f"Slice at Z={Z_target:.3f}", xaxis_title="X", yaxis_title="Y")
+        elif plane == 'xz':
+            fig = go.Figure(data=go.Heatmap(z=slice_vals, x=x_vals, y=z_vals, colorscale='Viridis'))
+            fig.update_layout(title=f"Slice at Y={Y_target:.3f}", xaxis_title="X", yaxis_title="Z")
+        else:
+            fig = go.Figure(data=go.Heatmap(z=slice_vals, x=y_vals, y=z_vals, colorscale='Viridis'))
+            fig.update_layout(title=f"Slice at X={X_target:.3f}", xaxis_title="Y", yaxis_title="Z")
+        return fig
+
+    @staticmethod
+    def create_field_animation(sim_data, field_name):
+        """Create an animated 3D surface/point cloud over timesteps."""
+        if not sim_data.get('has_mesh', False) or field_name not in sim_data['fields']:
+            return None
+        frames = []
+        points = sim_data['points']
+        triangles = sim_data.get('triangles')
+        for t in range(sim_data['n_timesteps']):
+            values = sim_data['fields'][field_name][t]
+            if values.ndim > 1:
+                values = np.linalg.norm(values, axis=1)
+            if triangles is not None and len(triangles) > 0:
+                frame = go.Frame(data=[go.Mesh3d(x=points[:,0], y=points[:,1], z=points[:,2],
+                                                 i=triangles[:,0], j=triangles[:,1], k=triangles[:,2],
+                                                 intensity=values, colorscale='Viridis',
+                                                 name=f"t={t}")])
+            else:
+                frame = go.Frame(data=[go.Scatter3d(x=points[:,0], y=points[:,1], z=points[:,2],
+                                                   mode='markers', marker=dict(size=2, color=values, colorscale='Viridis'))])
+            frames.append(frame)
+        fig = go.Figure(data=frames[0].data, frames=frames)
+        fig.update_layout(
+            title=f"Animation of {field_name} over time",
+            updatemenus=[dict(type="buttons", buttons=[dict(label="Play", method="animate", args=[None])])],
+            scene=dict(aspectmode="data")
+        )
+        return fig
+
 # =============================================
 # UI RENDERING FUNCTIONS
 # =============================================
@@ -910,46 +1027,96 @@ def render_data_viewer():
     if not sim.get('has_mesh', False): 
         st.warning("No mesh data. Reload with 'Load Full Mesh'."); return
     
-    field = st.selectbox("Select Field", sorted(sim['field_info'].keys()), key="viewer_field_select")
-    timestep = st.slider("Timestep", 0, sim['n_timesteps'] - 1, 0, key="viewer_timestep_slider")
-    opacity = st.slider("Opacity", 0.0, 1.0, 0.9, 0.05, key="viewer_opacity")
+    tab1, tab2, tab3, tab4 = st.tabs(["3D Viewer", "Field Statistics", "2D Slice", "Animation"])
     
-    if 'points' in sim and 'fields' in sim and field in sim['fields']:
-        pts = sim['points']
-        kind, _ = sim['field_info'][field]
-        raw = sim['fields'][field][timestep]
+    with tab1:
+        field = st.selectbox("Select Field", sorted(sim['field_info'].keys()), key="viewer_field_select")
+        timestep = st.slider("Timestep", 0, sim['n_timesteps'] - 1, 0, key="viewer_timestep_slider")
+        opacity = st.slider("Opacity", 0.0, 1.0, 0.9, 0.05, key="viewer_opacity")
         
-        values = np.where(np.isnan(raw), 0, raw) if kind == "scalar" else np.where(np.isnan(np.linalg.norm(raw, axis=1)), 0, np.linalg.norm(raw, axis=1))
-        
-        if sim.get('triangles') is not None and len(sim['triangles']) > 0:
-            valid_triangles = [tri for tri in sim['triangles'] if all(idx < len(pts) for idx in tri)]
-            if valid_triangles: 
-                mesh_data = go.Mesh3d(
-                    x=pts[:,0], y=pts[:,1], z=pts[:,2], 
-                    i=np.array(valid_triangles)[:,0], j=np.array(valid_triangles)[:,1], k=np.array(valid_triangles)[:,2], 
-                    intensity=values, colorscale=st.session_state.selected_colormap, opacity=opacity, 
-                    hovertemplate='<b>Value:</b> %{intensity:.3f}<extra></extra>'
-                )
+        if 'points' in sim and 'fields' in sim and field in sim['fields']:
+            pts = sim['points']
+            kind, _ = sim['field_info'][field]
+            raw = sim['fields'][field][timestep]
+            
+            values = np.where(np.isnan(raw), 0, raw) if kind == "scalar" else np.where(np.isnan(np.linalg.norm(raw, axis=1)), 0, np.linalg.norm(raw, axis=1))
+            
+            if sim.get('triangles') is not None and len(sim['triangles']) > 0:
+                valid_triangles = [tri for tri in sim['triangles'] if all(idx < len(pts) for idx in tri)]
+                if valid_triangles: 
+                    mesh_data = go.Mesh3d(
+                        x=pts[:,0], y=pts[:,1], z=pts[:,2], 
+                        i=np.array(valid_triangles)[:,0], j=np.array(valid_triangles)[:,1], k=np.array(valid_triangles)[:,2], 
+                        intensity=values, colorscale=st.session_state.selected_colormap, opacity=opacity, 
+                        hovertemplate='<b>Value:</b> %{intensity:.3f}<extra></extra>'
+                    )
+                else: 
+                    mesh_data = go.Scatter3d(
+                        x=pts[:,0], y=pts[:,1], z=pts[:,2], mode='markers', 
+                        marker=dict(size=4, color=values, colorscale=st.session_state.selected_colormap, opacity=opacity), 
+                        hovertemplate='<b>Value:</b> %{marker.color:.3f}<extra></extra>'
+                    )
             else: 
                 mesh_data = go.Scatter3d(
                     x=pts[:,0], y=pts[:,1], z=pts[:,2], mode='markers', 
                     marker=dict(size=4, color=values, colorscale=st.session_state.selected_colormap, opacity=opacity), 
                     hovertemplate='<b>Value:</b> %{marker.color:.3f}<extra></extra>'
                 )
-        else: 
-            mesh_data = go.Scatter3d(
-                x=pts[:,0], y=pts[:,1], z=pts[:,2], mode='markers', 
-                marker=dict(size=4, color=values, colorscale=st.session_state.selected_colormap, opacity=opacity), 
-                hovertemplate='<b>Value:</b> %{marker.color:.3f}<extra></extra>'
+            
+            fig = go.Figure(data=mesh_data)
+            fig.update_layout(
+                title=dict(text=f"{field} at Timestep {timestep+1}<br><sub>{sim_name}</sub>", font=dict(size=20)), 
+                scene=dict(aspectmode="data"), 
+                height=700
             )
-        
-        fig = go.Figure(data=mesh_data)
-        fig.update_layout(
-            title=dict(text=f"{field} at Timestep {timestep+1}<br><sub>{sim_name}</sub>", font=dict(size=20)), 
-            scene=dict(aspectmode="data"), 
-            height=700
-        )
-        st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Export button
+            if st.button("📸 Export Current View as PNG", key="export_3d"):
+                img_bytes = fig.to_image(format="png", width=1200, height=800)
+                b64 = base64.b64encode(img_bytes).decode()
+                href = f'<a href="data:image/png;base64,{b64}" download="fea_plot.png">Download PNG</a>'
+                st.markdown(href, unsafe_allow_html=True)
+    
+    with tab2:
+        st.subheader("Field Statistics Overview")
+        field_stats = st.selectbox("Field for statistics", sorted(sim['field_info'].keys()), key="stats_field")
+        if field_stats in sim['fields']:
+            # Create time series plot
+            fig_ts = EnhancedVisualizer.create_field_time_series([st.session_state.summaries[sim_name]], field_stats)
+            if fig_ts:
+                st.plotly_chart(fig_ts, use_container_width=True)
+            # Box plot across timesteps
+            fig_box = EnhancedVisualizer.create_field_boxplot([st.session_state.summaries[sim_name]], field_stats)
+            if fig_box:
+                st.plotly_chart(fig_box, use_container_width=True)
+    
+    with tab3:
+        st.subheader("2D Slice Through 3D Field")
+        field_slice = st.selectbox("Field for slice", sorted(sim['field_info'].keys()), key="slice_field")
+        timestep_slice = st.slider("Timestep for slice", 0, sim['n_timesteps'] - 1, 0, key="slice_timestep")
+        plane = st.selectbox("Plane", ['xy', 'xz', 'yz'], key="slice_plane")
+        if field_slice in sim['fields']:
+            raw_slice = sim['fields'][field_slice][timestep_slice]
+            if raw_slice.ndim > 1:
+                values_slice = np.linalg.norm(raw_slice, axis=1)
+            else:
+                values_slice = raw_slice
+            fig_slice = EnhancedVisualizer.create_2d_slice(sim['points'], values_slice, plane=plane)
+            if fig_slice:
+                st.plotly_chart(fig_slice, use_container_width=True)
+            else:
+                st.warning("Could not create slice (insufficient points or invalid plane).")
+    
+    with tab4:
+        st.subheader("Animate Field Over Time")
+        field_anim = st.selectbox("Field for animation", sorted(sim['field_info'].keys()), key="anim_field")
+        if field_anim in sim['fields']:
+            fig_anim = EnhancedVisualizer.create_field_animation(sim, field_anim)
+            if fig_anim:
+                st.plotly_chart(fig_anim, use_container_width=True)
+            else:
+                st.warning("Animation not available for this field.")
 
 def render_interpolation_extrapolation():
     """Render interpolation/extrapolation engine with ST-DGPA prediction."""
