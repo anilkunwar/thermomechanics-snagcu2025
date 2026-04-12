@@ -566,7 +566,7 @@ class PolarRadarVisualizer:
         return fig
 
 # =============================================
-# 5. SANKEY VISUALIZER
+# 5. SANKEY VISUALIZER (FIXED: removed invalid hoverinfo)
 # =============================================
 class SankeyVisualizer:
     def __init__(self):
@@ -646,14 +646,26 @@ class SankeyVisualizer:
             l_colors.append('rgba(153,102,255,0.6)')
             h_texts.append(f"<b>Aggregation</b><br>{comp_labels[c]} → TARGET<br>Total: {flow_in:.3f}")
             
+        # ========== FIX: removed top-level hoverinfo='text' ==========
         fig = go.Figure(go.Sankey(
-            node=dict(pad=cfg['node_pad'], thickness=cfg['node_thickness'], line=dict(color="black", width=0.5),
-                     label=labels, color=node_colors, font=dict(family=cfg['font_family'], size=cfg['font_size']),
-                     hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'),
-            link=dict(source=s_idx, target=t_idx, value=vals, color=l_colors,
-                     hovertext=h_texts, hovertemplate='%{hovertext}<extra></extra>',
-                     line=dict(width=0.5, color='rgba(255,255,255,0.3)')),
-            hoverinfo='text'
+            node=dict(
+                pad=cfg['node_pad'],
+                thickness=cfg['node_thickness'],
+                line=dict(color="black", width=0.5),
+                label=labels,
+                color=node_colors,
+                font=dict(family=cfg['font_family'], size=cfg['font_size']),
+                hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'
+            ),
+            link=dict(
+                source=s_idx,
+                target=t_idx,
+                value=vals,
+                color=l_colors,
+                hovertext=h_texts,
+                hovertemplate='%{hovertext}<extra></extra>',
+                line=dict(width=0.5, color='rgba(255,255,255,0.3)')
+            )
         ))
         
         title_text = (f"<b>ST-DGPA Attention Flow</b><br>"
