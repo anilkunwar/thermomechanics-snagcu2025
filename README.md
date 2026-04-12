@@ -86,11 +86,11 @@
 
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/polardiagram-v7-brightgreen.svg)](https://thermomechanical-solutions-interpolation-visualization-r7.streamlit.app/) (Radar chart visualization for FEM simulations data,st-dgpa visualization is enhanced, radar chart is empty )
 
-    [![continuummodellaserprocessing3d](https://img.shields.io/badge/polardiagram-v8-brightgreen.svg)](https://thermomechanical-solutions-interpolation-visualization-r8.streamlit.app/) (Radar chart visualization for FEM simulations data,st-dgpa visualization is enhanced, radar chart is complete )
+    [![continuummodellaserprocessing3d](https://img.shields.io/badge/polardiagram-v8-brightgreen.svg)](https://thermomechanical-solutions-interpolation-visualization-r8.streamlit.app/) (Radar chart visualization for FEM simulations data,st-dgpa visualization is enhanced, radar chart is complete, normalized chart needs to be transformed to physics units )
 
-   [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankey-v9-brightgreen.svg)](https://thermomechanical-solutions-interpolation-sankey-visualization9.streamlit.app/) (Sankey visualization for FEM simulations data, incomplete, Random N (5<=N<=184 steady state simulations) weightage based most relevant source simulations are visualized from  the total 23*8 = 184 i.e. E tau steady state simulations * number of timesteps, Data viewer part needs improvement)
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankey-v9-brightgreen.svg)](https://thermomechanical-solutions-interpolation-sankey-visualization9.streamlit.app/) (Sankey visualization for FEM simulations data, incomplete, Random N (5<=N<=184 steady state simulations) weightage based most relevant source simulations are visualized from  the total 23*8 = 184 i.e. E tau steady state simulations * number of timesteps, Data viewer part needs improvement, contd from r4)
 
-   [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankey-v10-brightgreen.svg)](https://thermomechanical-solutions-interpolation-sankey-visualization10.streamlit.app/) (Sankey visualization for FEM simulations data, incomplete, Top N, Bottom N or Random N (5<=N<=184 steady state simulations) weightage based most relevant source simulations are visualized from  the total 23*8 = 184 i.e. E tau steady state simulations * number of timesteps, Data viewer part needs improvement)
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankey-v10-brightgreen.svg)](https://thermomechanical-solutions-interpolation-sankey-visualization10.streamlit.app/) (Sankey visualization for FEM simulations data, incomplete, Top N, Bottom N or Random N (5<=N<=184 steady state simulations) weightage based most relevant source simulations are visualized from  the total 23*8 = 184 i.e. E tau steady state simulations * number of timesteps, Data viewer part needs improvement, contd. from r4)
    
    
    
