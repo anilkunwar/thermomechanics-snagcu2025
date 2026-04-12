@@ -566,7 +566,7 @@ class PolarRadarVisualizer:
         return fig
 
 # =============================================
-# 5. SANKEY VISUALIZER (FIXED: removed invalid 'width' from link.line)
+# 5. SANKEY VISUALIZER (FIXED: removed invalid 'line' from link)
 # =============================================
 class SankeyVisualizer:
     def __init__(self):
@@ -646,7 +646,7 @@ class SankeyVisualizer:
             l_colors.append('rgba(153,102,255,0.6)')
             h_texts.append(f"<b>Aggregation</b><br>{comp_labels[c]} → TARGET<br>Total: {flow_in:.3f}")
             
-        # ========== FIX: removed 'width' from link.line (invalid in Sankey) ==========
+        # ========== FINAL FIX: removed 'line' from link (invalid in Sankey) ==========
         fig = go.Figure(go.Sankey(
             node=dict(
                 pad=cfg['node_pad'],
@@ -663,8 +663,8 @@ class SankeyVisualizer:
                 value=vals,
                 color=l_colors,
                 hovertext=h_texts,
-                hovertemplate='%{hovertext}<extra></extra>',
-                line=dict(color='rgba(255,255,255,0.3)')   # Only 'color' allowed, no 'width'
+                hovertemplate='%{hovertext}<extra></extra>'
+                # 'line' property is NOT allowed for Sankey links – removed
             )
         ))
         
