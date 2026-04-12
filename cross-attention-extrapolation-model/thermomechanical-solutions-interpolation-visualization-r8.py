@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ENHANCED LASER SOLDERING ST-DGPA PLATFORM WITH REPAIRED POLAR RADAR
-==================================================================
+ENHANCED LASER SOLDERING ST-DGPA PLATFORM WITH FULLY EXPANDED POLAR RADAR
+========================================================================
 Complete integrated application for:
 - FEA laser soldering simulation loading from VTU files
 - ST-DGPA (Spatio-Temporal Gated Physics Attention) interpolation/extrapolation
-- Polar Radar Charts with robust data handling, autoscaling, jitter, and full customization
+- ENHANCED Polar Radar Charts with robust data handling, autoscaling, jitter,
+  full customization, and multi-timestep comparison
 - 3D mesh visualization with caching
-- Export functionality
+- Export functionality (JSON, CSV, PNG, SVG, HTML)
 """
 
 import streamlit as st
@@ -589,147 +590,381 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         return results
 
 # =============================================
-# 4. POLAR RADAR VISUALIZER (REPAIRED & EXPANDED)
+# 4. POLAR RADAR VISUALIZER (FULLY EXPANDED - NO REDACTION)
 # =============================================
 class PolarRadarVisualizer:
+    """
+    Enhanced polar radar chart visualizer for laser soldering simulation data.
+    Features:
+    - Robust data validation and NaN/Inf handling
+    - Autoscaling energy axis with custom override options
+    - Angular jitter for overlapping data points
+    - Separate color normalization and radial axis controls
+    - Target query marker with colorscale-consistent coloring
+    - Multi-timestep comparison view
+    - Full styling customization (fonts, grids, margins, etc.)
+    """
+    
     def __init__(self):
+        """Initialize visualizer with default styling parameters."""
         self.color_scale_temp = 'Inferno'
         self.color_scale_stress = 'Plasma'
+        self.color_scale_default = 'Viridis'
         self.target_symbol = 'star-diamond'
         self.source_symbol = 'circle'
-
+        self.available_color_scales = [
+            'Inferno', 'Plasma', 'Viridis', 'Magma', 'Cividis',
+            'RdYlGn', 'RdYlBu', 'Spectral', 'Turbo', 'Rainbow'
+        ]
+    
     @staticmethod
-    def safe_normalize(values: np.ndarray, reference_max: Optional[float] = None) -> np.ndarray:
-        """Normalize values to [0,1] with robust edge-case handling."""
+    def safe_normalize(values: np.ndarray, reference_max: Optional[float] = None, 
+                      reference_min: Optional[float] = None) -> np.ndarray:
+        """
+        Normalize values to [0,1] with robust edge-case handling.
+        
+        Args:
+            values: Input array of numeric values
+            reference_max: Optional fixed maximum for normalization
+            reference_min: Optional fixed minimum for normalization
+            
+        Returns:
+            Normalized array with values clipped to [0,1]
+        """
         clean = np.asarray(values, dtype=float)
         clean = np.nan_to_num(clean, nan=0.0, posinf=0.0, neginf=0.0)
-
+        
+        # Use reference values if provided
+        if reference_max is not None and reference_min is not None:
+            range_val = reference_max - reference_min
+            if range_val > 1e-9:
+                normalized = (clean - reference_min) / range_val
+                return np.clip(normalized, 0, 1)
+            else:
+                return np.ones_like(clean) * 0.5
+        
         if reference_max is not None and reference_max > 0:
             return np.clip(clean / reference_max, 0, 1)
-
+        
+        # Auto-scale based on data
         c_min, c_max = np.min(clean), np.max(clean)
-        if c_max - c_min < 1e-9:  # All values identical
+        range_val = c_max - c_min
+        
+        if range_val < 1e-9:  # All values identical or near-identical
             return np.ones_like(clean) * 0.5
-        return (clean - c_min) / (c_max - c_min)
-
-    def create_polar_radar_chart(self, df: pd.DataFrame, field_type: str = 'temperature',
-                                query_params: Optional[Dict] = None,
-                                timestep: int = 1,
-                                width: int = 800, height: int = 700,
-                                show_legend: bool = True,
-                                marker_size_range: Tuple[int, int] = (10, 30),
-                                # ADDED customization parameters (original)
-                                radial_grid_width: float = 1.0,
-                                angular_grid_width: float = 1.0,
-                                radial_tick_font_size: int = 12,
-                                angular_tick_font_size: int = 12,
-                                title_font_size: int = 18,
-                                margin_pad: Dict[str, int] = None,
-                                energy_min: float = None,
-                                energy_max: float = None,
-                                target_peak_value: float = None,
-                                # NEW expansion parameters
-                                add_jitter: bool = True,
-                                jitter_amount: float = 2.0,
-                                normalize_colors: bool = True,
-                                color_reference_max: Optional[float] = None,
-                                radial_axis_max: Optional[float] = None,
-                                highlight_target: bool = True) -> go.Figure:
+        
+        normalized = (clean - c_min) / range_val
+        return np.clip(normalized, 0, 1)
+    
+    @staticmethod
+    def compute_energy_to_angle(energies: np.ndarray, e_min: float, e_max: float, 
+                               add_jitter: bool = False, jitter_amount: float = 2.0,
+                               seed: Optional[int] = 42) -> np.ndarray:
         """
-        Create enhanced polar radar chart with robust data handling and autoscaling.
+        Convert energy values to polar angles in degrees.
+        
+        Args:
+            energies: Array of energy values (mJ)
+            e_min: Minimum energy for angle mapping
+            e_max: Maximum energy for angle mapping
+            add_jitter: Whether to add random angular offset for overlapping points
+            jitter_amount: Maximum jitter in degrees (±)
+            seed: Random seed for reproducible jitter
+            
+        Returns:
+            Array of angles in degrees [0, 360)
         """
+        e_range = e_max - e_min
+        if e_range < 1e-6:
+            e_range = 1.0
+            e_min = e_min - 0.5
+        
+        # Map energy to angle: 0 mJ -> 0°, max mJ -> 360°
+        angles_rad = 2 * np.pi * (energies - e_min) / e_range
+        angles_deg = np.degrees(angles_rad) % 360
+        
+        # Add jitter to separate overlapping points
+        if add_jitter and len(angles_deg) > 1:
+            # Detect overlapping angles (within 0.1°)
+            rounded = np.round(angles_deg, 1)
+            unique, counts = np.unique(rounded, return_counts=True)
+            has_overlaps = np.any(counts > 1)
+            
+            if has_overlaps:
+                if seed is not None:
+                    np.random.seed(seed)
+                jitter = np.random.uniform(-jitter_amount, jitter_amount, size=len(angles_deg))
+                angles_deg = angles_deg + jitter
+                # Re-wrap to [0, 360)
+                angles_deg = angles_deg % 360
+        
+        return angles_deg
+    
+    @staticmethod
+    def generate_polar_ticks(e_min: float, e_max: float, n_ticks: int = 6) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Generate nice tick values for the angular (energy) axis.
+        
+        Returns:
+            Tuple of (tick_energy_values, tick_angle_degrees)
+        """
+        tick_energies = np.linspace(e_min, e_max, n_ticks)
+        e_range = e_max - e_min
+        if e_range < 1e-6:
+            e_range = 1.0
+        tick_angles_rad = 2 * np.pi * (tick_energies - e_min) / e_range
+        tick_angles_deg = np.degrees(tick_angles_rad) % 360
+        return tick_energies, tick_angles_deg
+    
+    def determine_colorscale(self, field_type: str) -> str:
+        """Select appropriate colorscale based on field type."""
+        field_lower = field_type.lower()
+        if any(kw in field_lower for kw in ['temp', 'heat', 'thermal']):
+            return self.color_scale_temp
+        elif any(kw in field_lower for kw in ['stress', 'strain', 'von', 'mises']):
+            return self.color_scale_stress
+        else:
+            return self.color_scale_default
+    
+    def determine_field_title(self, field_type: str) -> str:
+        """Generate human-readable title for the field."""
+        field_lower = field_type.lower()
+        if 'temp' in field_lower:
+            return "Peak Temperature (K)"
+        elif 'stress' in field_lower or 'von' in field_lower:
+            return "Peak von Mises Stress (MPa)"
+        elif 'strain' in field_lower:
+            return "Peak Strain"
+        elif 'displacement' in field_lower:
+            return "Peak Displacement (μm)"
+        else:
+            return f"Peak {field_type.replace('_', ' ').title()}"
+    
+    def create_polar_radar_chart(
+        self,
+        df: pd.DataFrame,
+        field_type: str = 'temperature',
+        query_params: Optional[Dict] = None,
+        timestep: int = 1,
+        width: int = 800,
+        height: int = 700,
+        show_legend: bool = True,
+        marker_size_range: Tuple[int, int] = (10, 30),
+        # === Original customization parameters ===
+        radial_grid_width: float = 1.0,
+        angular_grid_width: float = 1.0,
+        radial_tick_font_size: int = 12,
+        angular_tick_font_size: int = 12,
+        title_font_size: int = 18,
+        margin_pad: Optional[Dict[str, int]] = None,
+        energy_min: Optional[float] = None,
+        energy_max: Optional[float] = None,
+        target_peak_value: Optional[float] = None,
+        # === New expansion parameters ===
+        add_jitter: bool = True,
+        jitter_amount: float = 2.0,
+        normalize_colors: bool = True,
+        color_reference_max: Optional[float] = None,
+        color_reference_min: Optional[float] = None,
+        radial_axis_max: Optional[float] = None,
+        radial_axis_min: Optional[float] = None,
+        highlight_target: bool = True,
+        # === Additional advanced parameters ===
+        jitter_seed: Optional[int] = 42,
+        angle_offset_deg: float = 0.0,  # Rotate entire plot
+        show_grid: bool = True,
+        show_radial_labels: bool = True,
+        show_angular_labels: bool = True,
+        background_color: str = 'white',
+        polar_background_color: str = 'white',
+        source_marker_opacity: float = 0.85,
+        target_marker_size: int = 25,
+        target_marker_line_width: int = 3,
+        hover_template_source: Optional[str] = None,
+        hover_template_target: Optional[str] = None,
+        custom_colorscale: Optional[str] = None,
+        colorbar_title: Optional[str] = None,
+        colorbar_position_x: float = 1.02,
+        colorbar_thickness: int = 20,
+        enable_hover: bool = True,
+        hover_mode: str = 'closest'
+    ) -> go.Figure:
+        """
+        Create enhanced polar radar chart with comprehensive customization.
+        
+        Args:
+            df: DataFrame with required columns ['Name', 'Energy', 'Duration', 'Peak_Value']
+            field_type: Field identifier for colorscale selection
+            query_params: Dict with 'Energy' and 'Duration' for target marker
+            timestep: Current timestep for title and hover display
+            width/height: Figure dimensions in pixels
+            show_legend: Whether to display legend
+            marker_size_range: (min_size, max_size) for source markers based on value
+            radial_grid_width: Width of radial grid lines
+            angular_grid_width: Width of angular grid lines
+            radial_tick_font_size: Font size for radial axis ticks
+            angular_tick_font_size: Font size for angular axis ticks
+            title_font_size: Font size for main title
+            margin_pad: Dict with 'l', 'r', 't', 'b' for margins
+            energy_min/energy_max: Override auto-scaling for energy axis
+            target_peak_value: Predicted peak value for target marker coloring
+            add_jitter: Enable angular jitter for overlapping points
+            jitter_amount: Maximum jitter in degrees (±)
+            normalize_colors: Whether to normalize marker colors to [0,1]
+            color_reference_max/min: Fixed range for color normalization
+            radial_axis_max/min: Fixed range for radial (duration) axis
+            highlight_target: Whether to display target query marker
+            jitter_seed: Random seed for reproducible jitter
+            angle_offset_deg: Rotate entire polar plot by this angle
+            show_grid: Show polar grid lines
+            show_radial_labels: Show radial axis labels
+            show_angular_labels: Show angular axis labels
+            background_color: Figure background color
+            polar_background_color: Polar plot area background
+            source_marker_opacity: Opacity of source simulation markers
+            target_marker_size: Size of target query marker
+            target_marker_line_width: Border width of target marker
+            hover_template_source: Custom hover template for source points
+            hover_template_target: Custom hover template for target point
+            custom_colorscale: Override auto-selected colorscale
+            colorbar_title: Custom title for colorbar
+            colorbar_position_x: X-position of colorbar (1.0 = right edge)
+            colorbar_thickness: Thickness of colorbar in pixels
+            enable_hover: Enable hover interactions
+            hover_mode: Plotly hover mode ('closest', 'x', 'y', etc.)
+            
+        Returns:
+            Plotly Figure object configured for polar radar display
+        """
+        # Set default margin padding
         if margin_pad is None:
-            margin_pad = {'l': 60, 'r': 60, 't': 80, 'b': 60}
-
-        if df.empty:
+            margin_pad = {'l': 60, 'r': 80, 't': 80, 'b': 60}
+        
+        # Handle empty DataFrame
+        if df is None or df.empty:
             fig = go.Figure()
-            fig.update_layout(title="No data available", width=width, height=height)
+            fig.update_layout(
+                title="No data available for radar visualization",
+                width=width,
+                height=height,
+                margin=margin_pad
+            )
             return fig
-
-        # Extract and validate data with explicit numeric coercion
+        
+        # === DATA EXTRACTION AND VALIDATION ===
+        # Coerce columns to numeric with error handling
         energies = pd.to_numeric(df['Energy'], errors='coerce').values
         durations = pd.to_numeric(df['Duration'], errors='coerce').values
         peak_values = pd.to_numeric(df['Peak_Value'], errors='coerce').values
-        sim_names = df.get('Name', [f"Sim {i}" for i in range(len(df))]).tolist()
-
-        # Filter out invalid rows (NaN, Inf, negative durations)
+        sim_names = df.get('Name', [f"Simulation_{i}" for i in range(len(df))]).tolist()
+        
+        # Create validation mask for finite, non-negative duration values
         valid_mask = (
-            np.isfinite(energies) &
-            np.isfinite(durations) &
+            np.isfinite(energies) & 
+            np.isfinite(durations) & 
             np.isfinite(peak_values) &
             (durations >= 0)
         )
-
+        
+        # Handle case where no valid data remains
         if not np.any(valid_mask):
             fig = go.Figure()
-            fig.update_layout(title="No valid numeric data", width=width, height=height)
+            fig.update_layout(
+                title="⚠️ No valid numeric data after filtering",
+                annotations=[dict(
+                    text="All data points contained NaN, Inf, or invalid values",
+                    x=0.5, y=0.5, xref='paper', yref='paper',
+                    showarrow=False, font=dict(size=14)
+                )],
+                width=width,
+                height=height,
+                margin=margin_pad
+            )
             return fig
-
+        
+        # Filter to valid data only
         energies = energies[valid_mask]
         durations = durations[valid_mask]
         peak_values = peak_values[valid_mask]
         sim_names = np.array(sim_names)[valid_mask].tolist()
-
-        # --- IMPROVED ENERGY TO ANGLE MAPPING (AUTOSCALING) ---
-        e_min_data = np.nanmin(energies)
-        e_max_data = np.nanmax(energies)
-
-        # Use custom values if provided, otherwise auto-scale
-        if energy_min is not None:
+        n_points = len(energies)
+        
+        # === ENERGY AXIS (ANGULAR) SCALING ===
+        e_min_data = float(np.nanmin(energies))
+        e_max_data = float(np.nanmax(energies))
+        
+        # Apply custom bounds or auto-scale with padding
+        if energy_min is not None and np.isfinite(energy_min):
             e_min = energy_min
         else:
             e_min = e_min_data
-
-        if energy_max is not None and energy_max > e_max_data * 1.1:
+        
+        if energy_max is not None and np.isfinite(energy_max) and energy_max > e_max_data * 1.05:
             e_max = energy_max
         else:
-            e_max = e_max_data * 1.05  # Add 5% padding
-
-        e_range = e_max - e_min
-        if e_range < 1e-6:  # Handle single-value case
-            e_range = 1.0
-            e_min = e_min - 0.5
-
-        # Compute angles in degrees
-        angles_rad = 2 * np.pi * (energies - e_min) / e_range
-        angles_deg = np.degrees(angles_rad)
-
-        # Add jitter to separate overlapping points (identical energies)
-        if add_jitter and len(angles_deg) > 1:
-            unique_angles = np.unique(np.round(angles_deg, 1))
-            if len(unique_angles) < len(angles_deg):
-                np.random.seed(42)  # Reproducible jitter
-                jitter = np.random.uniform(-jitter_amount, jitter_amount, size=len(angles_deg))
-                angles_deg = angles_deg + jitter
-
-        # Generate nice tick values for angular axis
-        tick_energies = np.linspace(e_min, e_max, 6)
-        tick_angles_deg = np.degrees([2 * np.pi * (e - e_min) / e_range for e in tick_energies])
-
-        # --- SAFE NORMALIZATION ---
-        if normalize_colors and color_reference_max is not None:
-            norm_peak = self.safe_normalize(peak_values, color_reference_max)
+            e_max = e_max_data * 1.05  # 5% padding for visual clarity
+        
+        # Compute angles with optional jitter
+        angles_deg = self.compute_energy_to_angle(
+            energies, e_min, e_max,
+            add_jitter=add_jitter,
+            jitter_amount=jitter_amount,
+            seed=jitter_seed
+        )
+        # Apply global rotation offset
+        angles_deg = (angles_deg + angle_offset_deg) % 360
+        
+        # Generate axis ticks
+        tick_energies, tick_angles_deg = self.generate_polar_ticks(e_min, e_max, n_ticks=6)
+        tick_angles_deg = (tick_angles_deg + angle_offset_deg) % 360
+        
+        # === VALUE NORMALIZATION FOR COLORING ===
+        if normalize_colors:
+            norm_peak = self.safe_normalize(
+                peak_values, 
+                reference_max=color_reference_max,
+                reference_min=color_reference_min
+            )
         else:
-            norm_peak = self.safe_normalize(peak_values, None)
-
-        # Radial axis range (for duration)
-        if radial_axis_max is not None:
-            r_range = (0, radial_axis_max)
+            norm_peak = peak_values.copy()  # Use raw values
+        
+        # === RADIAL AXIS (DURATION) SCALING ===
+        if radial_axis_min is not None and np.isfinite(radial_axis_min):
+            r_min = radial_axis_min
         else:
-            max_dur = np.max(durations) if len(durations) > 0 else 1
-            r_range = (0, max_dur * 1.1 if max_dur > 0 else 1.2)
-
-        # Determine colorscale based on field type
-        is_temp = 'temp' in field_type.lower()
-        c_scale = self.color_scale_temp if is_temp else self.color_scale_stress
-        title_field = "Peak Temperature (K)" if is_temp else "Peak von Mises Stress (MPa)"
-
-        # Create Figure
+            r_min = 0
+        
+        if radial_axis_max is not None and np.isfinite(radial_axis_max):
+            r_max = radial_axis_max
+        else:
+            max_dur = float(np.max(durations)) if n_points > 0 else 1.0
+            r_max = max_dur * 1.1 if max_dur > 0 else 1.2
+        
+        # === COLORSCALE AND LABELS ===
+        colorscale = custom_colorscale if custom_colorscale else self.determine_colorscale(field_type)
+        field_title = colorbar_title if colorbar_title else self.determine_field_title(field_type)
+        
+        # === CREATE PLOTLY FIGURE ===
         fig = go.Figure()
-
-        # --- SOURCE SIMULATIONS SCATTER ---
-        marker_sizes = marker_size_range[0] + (marker_size_range[1] - marker_size_range[0]) * norm_peak
-
+        
+        # Compute marker sizes based on normalized values
+        size_min, size_max = marker_size_range
+        marker_sizes = size_min + (size_max - size_min) * norm_peak
+        
+        # === SOURCE SIMULATIONS TRACE ===
+        # Build hover text for source points
+        if hover_template_source is None:
+            hover_texts = [
+                f"<b>{name}</b><br>"
+                f"Timestep: {timestep}<br>"
+                f"Energy: {e:.2f} mJ<br>"
+                f"Duration: {d:.2f} ns<br>"
+                f"Peak Value: {p:.4f}"
+                for name, e, d, p in zip(sim_names, energies, durations, peak_values)
+            ]
+        else:
+            hover_texts = None  # Use custom template
+        
         fig.add_trace(go.Scatterpolar(
             r=durations,
             theta=angles_deg,
@@ -737,127 +972,290 @@ class PolarRadarVisualizer:
             marker=dict(
                 size=marker_sizes,
                 color=norm_peak if normalize_colors else peak_values,
-                colorscale=c_scale,
-                colorbar=dict(title=title_field, thickness=20, x=1.02),
+                colorscale=colorscale,
+                colorbar=dict(
+                    title=field_title,
+                    thickness=colorbar_thickness,
+                    x=colorbar_position_x,
+                    len=0.5,
+                    y=0.5,
+                    yanchor='middle'
+                ) if show_legend else None,
                 line=dict(width=2, color='white'),
                 symbol=self.source_symbol,
-                showscale=True
+                showscale=show_legend
             ),
-            text=[f"<b>{name}</b><br>Timestep: {timestep}<br>Energy: {e:.2f} mJ<br>Duration: {d:.2f} ns<br>Peak: {p:.3f}"
-                  for name, e, d, p in zip(sim_names, energies, durations, peak_values)],
-            hoverinfo='text',
+            text=hover_texts,
+            hoverinfo='text' if enable_hover else 'skip',
+            hovertemplate=hover_template_source,
             name='Source Simulations',
-            opacity=0.85
+            opacity=source_marker_opacity
         ))
-
-        # --- TARGET QUERY POINT (REPAIRED COLOR HANDLING) ---
+        
+        # === TARGET QUERY MARKER (if applicable) ===
         if query_params and highlight_target:
             q_e = query_params.get('Energy')
             q_d = query_params.get('Duration')
-            if q_e is not None and q_d is not None and np.isfinite(q_e) and np.isfinite(q_d):
-                q_angle_deg = np.degrees(2 * np.pi * (q_e - e_min) / e_range)
-
-                # REPAIR: Properly determine target color from colorscale using target_peak_value
+            
+            if (q_e is not None and q_d is not None and 
+                np.isfinite(q_e) and np.isfinite(q_d)):
+                
+                # Compute target angle with same scaling as sources
+                q_angle_deg = self.compute_energy_to_angle(
+                    np.array([q_e]), e_min, e_max,
+                    add_jitter=False  # No jitter for target
+                )[0]
+                q_angle_deg = (q_angle_deg + angle_offset_deg) % 360
+                
+                # Determine target marker color
                 if target_peak_value is not None and np.isfinite(target_peak_value):
-                    if normalize_colors and color_reference_max is not None:
-                        norm_target = target_peak_value / color_reference_max
+                    if normalize_colors:
+                        norm_target = self.safe_normalize(
+                            np.array([target_peak_value]),
+                            reference_max=color_reference_max,
+                            reference_min=color_reference_min
+                        )[0]
                     else:
-                        norm_target = target_peak_value / (np.max(peak_values) + 1e-9)
+                        # Scale relative to source data range
+                        p_min = np.min(peak_values)
+                        p_max = np.max(peak_values)
+                        p_range = p_max - p_min
+                        if p_range > 1e-9:
+                            norm_target = (target_peak_value - p_min) / p_range
+                        else:
+                            norm_target = 0.5
                     norm_target = np.clip(norm_target, 0, 1)
-                    # Sample from same colorscale for consistency
-                    target_color = px.colors.sample_colorscale(c_scale, [norm_target])[0]
+                    target_color = px.colors.sample_colorscale(colorscale, [norm_target])[0]
                 else:
-                    # Fallback to distinct color if no peak value available
-                    target_color = '#FF0000'  # Red
-
+                    target_color = '#FF0000'  # Fallback: bright red
+                
+                # Build target hover template
+                if hover_template_target is None:
+                    peak_display = f"{target_peak_value:.4f}" if target_peak_value is not None else "N/A"
+                    hover_template_target = (
+                        f"<b>Target Query</b><br>"
+                        f"Energy: {q_e:.2f} mJ<br>"
+                        f"Duration: {q_d:.2f} ns<br>"
+                        f"Predicted Peak: {peak_display}<extra></extra>"
+                    )
+                
                 fig.add_trace(go.Scatterpolar(
                     r=[q_d],
                     theta=[q_angle_deg],
                     mode='markers',
                     marker=dict(
-                        size=25,
+                        size=target_marker_size,
                         color=target_color,
                         symbol=self.target_symbol,
-                        line=dict(width=3, color='black')
+                        line=dict(width=target_marker_line_width, color='black'),
+                        showscale=False
                     ),
                     name='Target Query',
-                    hovertemplate=f"<b>Target Query</b><br>Energy: {q_e:.2f} mJ<br>Duration: {q_d:.2f} ns<br>Peak: {target_peak_value:.3f if target_peak_value else 'N/A'}<extra></extra>"
+                    hovertemplate=hover_template_target if enable_hover else None,
+                    hoverinfo='text' if enable_hover else 'skip'
                 ))
-
-        # --- POLAR LAYOUT WITH FULL CUSTOMIZATION ---
-        polar_layout = dict(
+        
+        # === POLAR LAYOUT CONFIGURATION ===
+        polar_config = dict(
+            bgcolor=polar_background_color,
             radialaxis=dict(
-                visible=True,
+                visible=show_radial_labels,
                 title="Pulse Duration (ns)",
-                range=r_range,
-                gridcolor="lightgray",
-                gridwidth=radial_grid_width,
+                range=[r_min, r_max],
+                gridcolor="lightgray" if show_grid else "rgba(0,0,0,0)",
+                gridwidth=radial_grid_width if show_grid else 0,
                 tickfont=dict(size=radial_tick_font_size),
-                title_font=dict(size=radial_tick_font_size + 2)
+                title_font=dict(size=radial_tick_font_size + 2),
+                showticklabels=show_radial_labels
             ),
             angularaxis=dict(
-                visible=True,
+                visible=show_angular_labels,
                 direction="clockwise",
-                rotation=90,
-                gridcolor="lightgray",
-                gridwidth=angular_grid_width,
+                rotation=90 - angle_offset_deg,  # Compensate for manual offset
+                gridcolor="lightgray" if show_grid else "rgba(0,0,0,0)",
+                gridwidth=angular_grid_width if show_grid else 0,
                 tickfont=dict(size=angular_tick_font_size),
                 tickmode='array',
                 tickvals=tick_angles_deg,
                 ticktext=[f"{e:.1f}" for e in tick_energies],
-                thetaunit="degrees"
-            ),
-            bgcolor="white"
+                thetaunit="degrees",
+                showticklabels=show_angular_labels
+            )
         )
-
+        
+        # === MAIN LAYOUT ===
         fig.update_layout(
             title=dict(
-                text=f"Polar Radar: {title_field} at t={timestep} ns<br>"
-                     f"<span style='font-size:{title_font_size-4}px; color:gray;'>"
-                     f"Energy range: {e_min:.2f} – {e_max:.2f} mJ • Radial: Pulse Duration (ns)</span>",
-                font=dict(size=title_font_size),
+                text=(
+                    f"Polar Radar: {field_title} at t={timestep} ns<br>"
+                    f"<span style='font-size:{max(12, title_font_size-4)}px; color:gray;'>"
+                    f"Energy: {e_min:.2f} – {e_max:.2f} mJ • Duration: {r_min:.1f} – {r_max:.1f} ns"
+                    f"</span>"
+                ),
+                font=dict(size=title_font_size, family="Arial, sans-serif"),
                 x=0.5,
-                xanchor='center'
+                xanchor='center',
+                pad=dict(t=10)
             ),
-            polar=polar_layout,
+            polar=polar_config,
             width=width,
             height=height,
             showlegend=show_legend,
             margin=margin_pad,
-            hovermode='closest'
+            hovermode=hover_mode if enable_hover else False,
+            plot_bgcolor=background_color,
+            paper_bgcolor=background_color,
+            font=dict(family="Arial, sans-serif", size=12)
         )
-
+        
         return fig
-
-    def create_multi_timestep_radar(self, summaries: List[Dict], field_type: str,
-                                   query_params: Optional[Dict],
-                                   timesteps: List[int],
-                                   width: int = 350, height: int = 350,
-                                   **kwargs) -> List[Tuple[go.Figure, int]]:
-        """Create multiple radar charts for different timesteps."""
+    
+    def create_multi_timestep_radar(
+        self,
+        summaries: List[Dict],
+        field_type: str,
+        query_params: Optional[Dict],
+        timesteps: List[int],
+        width: int = 350,
+        height: int = 350,
+        shared_colorscale: bool = True,
+        shared_radial_range: bool = True,
+        **kwargs
+    ) -> List[Tuple[go.Figure, int, Dict]]:
+        """
+        Create multiple synchronized radar charts for timestep comparison.
+        
+        Args:
+            summaries: List of simulation summary dictionaries
+            field_type: Field to visualize
+            query_params: Target query parameters
+            timesteps: List of timestep indices to render
+            width/height: Dimensions for each subplot
+            shared_colorscale: Use same color normalization across all timesteps
+            shared_radial_range: Use same radial axis range across all timesteps
+            **kwargs: Additional parameters passed to create_polar_radar_chart
+            
+        Returns:
+            List of tuples: (figure, timestep_index, metadata_dict)
+        """
         figures = []
+        
+        # Pre-compute global ranges if sharing is enabled
+        global_peak_min, global_peak_max = None, None
+        global_dur_max = None
+        
+        if shared_colorscale or shared_radial_range:
+            all_peaks = []
+            all_durations = []
+            for s in summaries:
+                field_stats = s.get('field_stats', {}).get(field_type, {})
+                peak_list = field_stats.get('max', [])
+                dur = s.get('duration', 0)
+                for p in peak_list:
+                    if np.isfinite(p):
+                        all_peaks.append(p)
+                if np.isfinite(dur):
+                    all_durations.append(dur)
+            
+            if shared_colorscale and all_peaks:
+                global_peak_min = float(np.min(all_peaks))
+                global_peak_max = float(np.max(all_peaks))
+            
+            if shared_radial_range and all_durations:
+                global_dur_max = float(np.max(all_durations)) * 1.1
+        
         for t in timesteps:
+            # Collect data for this timestep
             rows = []
             for s in summaries:
                 if t <= len(s.get('timesteps', [])):
-                    peak_list = s['field_stats'].get(field_type, {}).get('max', [0])
-                    if t-1 < len(peak_list):
+                    field_stats = s.get('field_stats', {}).get(field_type, {})
+                    peak_list = field_stats.get('max', [0])
+                    if t - 1 < len(peak_list):
+                        peak_val = peak_list[t - 1]
+                        if not np.isfinite(peak_val):
+                            peak_val = 0.0
                         rows.append({
                             'Name': s['name'],
                             'Energy': s['energy'],
                             'Duration': s['duration'],
-                            'Peak_Value': peak_list[t-1]
+                            'Peak_Value': float(peak_val)
                         })
-            if rows:
-                df_t = pd.DataFrame(rows)
-                fig = self.create_polar_radar_chart(
-                    df_t, field_type, query_params, timestep=t,
-                    width=width, height=height, show_legend=(t == timesteps[0]),
-                    marker_size_range=(8, 20),
-                    **kwargs
-                )
-                figures.append((fig, t))
+            
+            if not rows:
+                continue
+            
+            df_t = pd.DataFrame(rows)
+            
+            # Prepare timestep-specific parameters
+            ts_kwargs = kwargs.copy()
+            
+            if shared_colorscale and global_peak_max is not None:
+                ts_kwargs['color_reference_max'] = global_peak_max
+                ts_kwargs['color_reference_min'] = global_peak_min
+            
+            if shared_radial_range and global_dur_max is not None:
+                ts_kwargs['radial_axis_max'] = global_dur_max
+            
+            # Get target value for this timestep if available
+            target_val = None
+            if query_params and 'interpolation_results' in kwargs.get('metadata', {}):
+                results = kwargs['metadata']['interpolation_results']
+                if field_type in results.get('field_predictions', {}):
+                    preds = results['field_predictions'][field_type]
+                    if 'max' in preds and t - 1 < len(preds['max']):
+                        target_val = preds['max'][t - 1]
+                ts_kwargs['target_peak_value'] = target_val
+            
+            # Create chart
+            fig = self.create_polar_radar_chart(
+                df_t,
+                field_type=field_type,
+                query_params=query_params,
+                timestep=t,
+                width=width,
+                height=height,
+                show_legend=(t == timesteps[0]),  # Only first shows legend
+                marker_size_range=(8, 20),  # Smaller for subplots
+                title_font_size=kwargs.get('title_font_size', 14) - 2,
+                radial_tick_font_size=kwargs.get('radial_tick_font_size', 10) - 1,
+                angular_tick_font_size=kwargs.get('angular_tick_font_size', 10) - 1,
+                **ts_kwargs
+            )
+            
+            # Metadata for downstream use
+            metadata = {
+                'timestep': t,
+                'n_points': len(df_t),
+                'energy_range': (df_t['Energy'].min(), df_t['Energy'].max()),
+                'duration_range': (df_t['Duration'].min(), df_t['Duration'].max()),
+                'peak_range': (df_t['Peak_Value'].min(), df_t['Peak_Value'].max()),
+                'target_value': target_val
+            }
+            
+            figures.append((fig, t, metadata))
+        
         return figures
+    
+    def export_figure_data(self, fig: go.Figure, format: str = 'json') -> Union[str, bytes]:
+        """
+        Export figure configuration for external use.
+        
+        Args:
+            fig: Plotly Figure object
+            format: Export format ('json', 'plotly', 'html')
+            
+        Returns:
+            Serialized figure data
+        """
+        if format == 'json':
+            return fig.to_json()
+        elif format == 'plotly':
+            return fig.to_plotly_json()
+        elif format == 'html':
+            return fig.to_html(include_plotlyjs='cdn')
+        else:
+            raise ValueError(f"Unsupported export format: {format}")
 
 # =============================================
 # 5. ENHANCED VISUALIZER
@@ -1099,172 +1497,479 @@ def main():
                     fig_conf = st.session_state.enhanced_viz.create_confidence_plot(results, params['time_points'])
                     st.plotly_chart(fig_conf, use_container_width=True)
 
-    # --- TAB 3: Polar Radar (REPAIRED & EXPANDED) ---
+    # --- TAB 3: Polar Radar (FULLY EXPANDED) ---
     with tabs[2]:
         st.subheader("🎯 Polar Radar Visualization")
+        st.markdown("""
+        *Visualize simulation results in polar coordinates:*
+        - **Angular axis (θ)**: Laser Energy (mJ) — clockwise from top
+        - **Radial axis (r)**: Pulse Duration (ns) — outward from center  
+        - **Marker color**: Peak field value (temperature/stress)
+        - **Marker size**: Scaled by peak value for visual emphasis
+        - **Target marker**: Predicted query point (★) with colorscale-matched color
+        """)
+        
+        # === FIELD AND TIMESTEP SELECTION ===
         all_fields = set()
-        for s in st.session_state.summaries: all_fields.update(s['field_stats'].keys())
-        col1, col2 = st.columns(2)
-        with col1: field_type = st.selectbox("Field Type", sorted(all_fields), key="polar_field")
-        with col2:
-            max_possible_t = max((len(s.get('timesteps', [])) for s in st.session_state.summaries), default=1)
-            t_step = st.number_input("Timestep Index", 1, max_possible_t, 1, key="polar_timestep")
-
-        # --- ROBUST DATA COLLECTION (permissive extraction with warnings) ---
-        rows = []
-        warnings_found = []
         for s in st.session_state.summaries:
-            field_stats = s['field_stats'].get(field_type, {})
-            peak_list = field_stats.get('max', [0])
-            idx = t_step - 1
-            if idx >= len(peak_list):
-                warnings_found.append(f"Timestep {t_step} not available in {s['name']} (only {len(peak_list)} steps)")
-                continue
-            peak_val = peak_list[idx]
-            if not np.isfinite(peak_val):
-                peak_val = 0.0
-            rows.append({
-                'Name': s['name'],
-                'Energy': s['energy'],
-                'Duration': s['duration'],
-                'Peak_Value': float(peak_val)
-            })
-        df_polar = pd.DataFrame(rows)
-
-        if df_polar.empty:
-            st.error(f"❌ No valid data for **{field_type}** at timestep **{t_step}**")
-            if warnings_found:
-                with st.expander("🔍 Why is data missing?"):
-                    for w in warnings_found[:10]:
-                        st.caption(w)
+            all_fields.update(s.get('field_stats', {}).keys())
+        
+        if not all_fields:
+            st.warning("⚠️ No fields available. Please load simulation data first.")
         else:
-            st.success(f"✅ Loaded {len(df_polar)} simulations for radar")
-            st.caption(f"Data range: Energy {df_polar['Energy'].min():.2f}–{df_polar['Energy'].max():.2f} mJ | "
-                      f"Duration {df_polar['Duration'].min():.2f}–{df_polar['Duration'].max():.2f} ns")
-
-            # Styling expanders (full customization)
-            with st.expander("🎨 Radar Chart Styling Options", expanded=True):
-                colA, colB, colC, colD = st.columns(4)
-                with colA:
-                    st.markdown("**Title & Text**")
-                    title_font_size = st.slider("Title Font Size", 12, 30, 18, key="radar_title_font")
-                    title_font_family = st.selectbox("Title Font", ["Arial, sans-serif", "Courier New, monospace", "Times New Roman, serif"], index=0)
-                    title_padding = st.slider("Title Padding", 20, 100, 40)
-                with colB:
-                    st.markdown("**Ticks & Labels**")
-                    radial_tick_font = st.slider("Radial Tick Size", 8, 20, 12)
-                    angular_tick_font = st.slider("Angular Tick Size", 8, 20, 12)
-                    label_font_size = st.slider("Label Size", 8, 20, 12)
-                with colC:
-                    st.markdown("**Grid Lines**")
-                    radial_grid_width = st.slider("Radial Grid Width", 0.5, 3.0, 1.0, 0.1)
-                    angular_grid_width = st.slider("Angular Grid Width", 0.5, 3.0, 1.0, 0.1)
-                    grid_color = st.color_picker("Grid Color", "#d3d3d3")
-                with colD:
-                    st.markdown("**Target Marker**")
-                    highlight_target = st.checkbox("Show Target", value=True)
-                    target_marker_size = st.slider("Target Size", 10, 40, 25)
-                    use_colorbar_for_target = st.checkbox("Color Target by Value", value=True)
-
-            with st.expander("📐 Data Processing & Scaling", expanded=False):
-                colE, colF = st.columns(2)
-                with colE:
-                    st.markdown("**Energy Axis (Angular)**")
-                    e_max_data = df_polar['Energy'].max()
-                    use_custom_energy_max = st.checkbox("Set Custom Energy Max", value=True)
-                    if use_custom_energy_max:
-                        custom_energy_max = st.number_input("Max Energy (mJ)", 0.0, float(e_max_data*2), float(e_max_data*1.2))
-                    else:
-                        custom_energy_max = None
-                    use_custom_energy_min = st.checkbox("Set Custom Energy Min", value=False)
-                    if use_custom_energy_min:
-                        custom_energy_min = st.number_input("Min Energy (mJ)", 0.0, float(e_max_data), 0.0)
-                    else:
-                        custom_energy_min = None
-                    add_jitter = st.checkbox("Add Jitter for Overlapping Points", value=True)
-                    jitter_amount = st.slider("Jitter (±degrees)", 0.5, 5.0, 2.0)
-                with colF:
-                    st.markdown("**Value Scaling**")
-                    normalize_colors = st.checkbox("Normalize Colors", value=True)
-                    if normalize_colors:
-                        max_ref = st.number_input("Color Scale Max", value=float(df_polar['Peak_Value'].max() * 1.2))
-                    else:
-                        max_ref = None
-                    radial_auto = st.checkbox("Auto Radial Range", value=True)
-                    if not radial_auto:
-                        radial_max = st.number_input("Max Duration (ns)", value=float(df_polar['Duration'].max() * 1.1))
-                    else:
-                        radial_max = None
-
-            # Get target query parameters
-            query_params = None
-            target_peak = None
-            if st.session_state.get('polar_query') and st.session_state.get('interpolation_results'):
-                query_params = st.session_state.polar_query
-                results = st.session_state.interpolation_results
-                if field_type in results['field_predictions']:
-                    t_idx = t_step - 1
-                    if t_idx < len(results['field_predictions'][field_type]['max']):
-                        target_peak = results['field_predictions'][field_type]['max'][t_idx]
-                        st.info(f"🎯 Target predicted peak: {target_peak:.3f}")
-
-            # Create radar chart with all parameters
-            fig_polar = st.session_state.polar_viz.create_polar_radar_chart(
-                df_polar, field_type=field_type, query_params=query_params, timestep=t_step,
-                show_legend=True, width=900, height=750,
-                radial_grid_width=radial_grid_width, angular_grid_width=angular_grid_width,
-                radial_tick_font_size=radial_tick_font, angular_tick_font_size=angular_tick_font,
-                title_font_size=title_font_size,
-                margin_pad={'l': 60, 'r': 60, 't': 80, 'b': 60},
-                energy_min=custom_energy_min, energy_max=custom_energy_max,
-                target_peak_value=target_peak if use_colorbar_for_target else None,
-                add_jitter=add_jitter, jitter_amount=jitter_amount,
-                normalize_colors=normalize_colors, color_reference_max=max_ref,
-                radial_axis_max=radial_max, highlight_target=highlight_target
-            )
-            st.plotly_chart(fig_polar, use_container_width=True)
-
-            # Multi-timestep comparison
-            if st.checkbox("📊 Show Multi-Timestep Comparison", key="polar_multi"):
-                st.markdown("##### Compare Multiple Timesteps")
-                available_ts = list(range(1, min(max_possible_t+1, 6)))
-                selected_ts = st.multiselect("Select Timesteps", available_ts, default=[1, min(3, max_possible_t), min(5, max_possible_t)])
-                if selected_ts:
-                    cols = st.columns(len(selected_ts))
-                    for col, ts in zip(cols, selected_ts):
-                        rows_ts = []
-                        for s in st.session_state.summaries:
-                            if ts <= len(s['timesteps']):
-                                peak_ts = s['field_stats'].get(field_type, {}).get('max', [0])
-                                if ts-1 < len(peak_ts):
-                                    rows_ts.append({
-                                        'Name': s['name'],
-                                        'Energy': s['energy'],
-                                        'Duration': s['duration'],
-                                        'Peak_Value': peak_ts[ts-1]
-                                    })
-                        target_val_ts = None
-                        if st.session_state.get('interpolation_results'):
-                            res = st.session_state.interpolation_results
-                            if field_type in res['field_predictions'] and ts-1 < len(res['field_predictions'][field_type]['max']):
-                                target_val_ts = res['field_predictions'][field_type]['max'][ts-1]
-                        if rows_ts:
-                            df_ts = pd.DataFrame(rows_ts)
-                            fig_ts = st.session_state.polar_viz.create_polar_radar_chart(
-                                df_ts, field_type, query_params, timestep=ts,
-                                width=350, height=350, show_legend=(ts == selected_ts[0]),
-                                marker_size_range=(8, 20),
-                                title_font_size=title_font_size-4,
-                                radial_tick_font_size=radial_tick_font-2, angular_tick_font_size=angular_tick_font-2,
-                                energy_min=custom_energy_min, energy_max=custom_energy_max,
-                                target_peak_value=target_val_ts if use_colorbar_for_target else None,
-                                add_jitter=add_jitter, jitter_amount=jitter_amount*0.8,
-                                normalize_colors=normalize_colors, color_reference_max=max_ref,
-                                highlight_target=highlight_target
+            col1, col2 = st.columns(2)
+            with col1:
+                field_type = st.selectbox(
+                    "Field Type", 
+                    sorted(all_fields), 
+                    key="polar_field_select",
+                    help="Select the physical field to visualize"
+                )
+            with col2:
+                max_timestep = max(
+                    (len(s.get('timesteps', [1])) for s in st.session_state.summaries), 
+                    default=1
+                )
+                t_step = st.number_input(
+                    "Timestep Index", 
+                    min_value=1, 
+                    max_value=max_timestep, 
+                    value=1, 
+                    step=1,
+                    key="polar_timestep_select",
+                    help="Select which simulation timestep to visualize"
+                )
+            
+            # === ROBUST DATA COLLECTION WITH WARNINGS ===
+            rows = []
+            warnings_found = []
+            missing_field_count = 0
+            
+            for s in st.session_state.summaries:
+                field_stats = s.get('field_stats', {}).get(field_type, {})
+                peak_list = field_stats.get('max', [])
+                
+                idx = t_step - 1
+                if idx >= len(peak_list):
+                    warnings_found.append(
+                        f"• {s['name']}: Timestep {t_step} not available "
+                        f"(only {len(peak_list)} timesteps recorded)"
+                    )
+                    continue
+                
+                peak_val = peak_list[idx]
+                if not np.isfinite(peak_val):
+                    peak_val = 0.0
+                    warnings_found.append(
+                        f"• {s['name']}: Peak value at t={t_step} was non-finite, set to 0"
+                    )
+                
+                if field_type not in s.get('field_stats', {}):
+                    missing_field_count += 1
+                
+                rows.append({
+                    'Name': s['name'],
+                    'Energy': float(s['energy']),
+                    'Duration': float(s['duration']),
+                    'Peak_Value': float(peak_val)
+                })
+            
+            df_polar = pd.DataFrame(rows) if rows else pd.DataFrame(columns=['Name', 'Energy', 'Duration', 'Peak_Value'])
+            
+            # === DATA AVAILABILITY FEEDBACK ===
+            if df_polar.empty:
+                st.error(f"❌ No valid data for **`{field_type}`** at timestep **{t_step}**")
+                if warnings_found or missing_field_count > 0:
+                    with st.expander("🔍 Diagnostic Information", expanded=True):
+                        if missing_field_count > 0:
+                            st.warning(f"⚠️ `{field_type}` field not found in {missing_field_count} simulations")
+                        if warnings_found:
+                            st.markdown("**Data collection warnings:**")
+                            for w in warnings_found[:15]:
+                                st.caption(w)
+                            if len(warnings_found) > 15:
+                                st.caption(f"... and {len(warnings_found) - 15} more warnings")
+            else:
+                st.success(f"✅ Loaded **{len(df_polar)}** simulations for radar visualization")
+                st.caption(
+                    f"📊 Data ranges: "
+                    f"Energy {df_polar['Energy'].min():.2f}–{df_polar['Energy'].max():.2f} mJ | "
+                    f"Duration {df_polar['Duration'].min():.2f}–{df_polar['Duration'].max():.2f} ns | "
+                    f"Peak {df_polar['Peak_Value'].min():.3f}–{df_polar['Peak_Value'].max():.3f}"
+                )
+                
+                # === STYLING EXPANDER ===
+                with st.expander("🎨 Chart Styling Options", expanded=True):
+                    colA, colB, colC, colD = st.columns(4)
+                    
+                    with colA:
+                        st.markdown("**📝 Title & Text**")
+                        title_font_size = st.slider(
+                            "Title Font Size", 12, 30, 18, key="radar_title_font_size"
+                        )
+                        margin_top = st.slider("Top Margin (px)", 40, 120, 80, key="radar_margin_t")
+                    
+                    with colB:
+                        st.markdown("**🔢 Axis Ticks**")
+                        radial_tick_font = st.slider(
+                            "Radial Tick Size", 8, 20, 12, key="radar_radial_tick_font"
+                        )
+                        angular_tick_font = st.slider(
+                            "Angular Tick Size", 8, 20, 12, key="radar_angular_tick_font"
+                        )
+                    
+                    with colC:
+                        st.markdown("**⊞ Grid Lines**")
+                        radial_grid_width = st.slider(
+                            "Radial Grid Width", 0.0, 3.0, 1.0, 0.1, key="radar_radial_grid_w"
+                        )
+                        angular_grid_width = st.slider(
+                            "Angular Grid Width", 0.0, 3.0, 1.0, 0.1, key="radar_angular_grid_w"
+                        )
+                        grid_color = st.color_picker("Grid Color", "#d3d3d3", key="radar_grid_color")
+                        show_grid = st.checkbox("Show Grid", value=True, key="radar_show_grid")
+                    
+                    with colD:
+                        st.markdown("**🎯 Target Marker**")
+                        highlight_target = st.checkbox(
+                            "Show Target Query", value=True, key="radar_show_target"
+                        )
+                        target_size = st.slider("Target Size", 10, 40, 25, key="radar_target_size")
+                        target_line_width = st.slider(
+                            "Target Border Width", 1, 5, 3, key="radar_target_line_w"
+                        )
+                        color_target_by_value = st.checkbox(
+                            "Color Target by Value", value=True, key="radar_color_target"
+                        )
+                
+                # === DATA PROCESSING EXPANDER ===
+                with st.expander("📐 Data Processing & Scaling", expanded=False):
+                    colE, colF = st.columns(2)
+                    
+                    with colE:
+                        st.markdown("**🌀 Energy Axis (Angular)**")
+                        e_max_data = float(df_polar['Energy'].max())
+                        e_min_data = float(df_polar['Energy'].min())
+                        
+                        use_custom_e_max = st.checkbox(
+                            "Custom Energy Max", value=False, key="radar_custom_e_max"
+                        )
+                        custom_energy_max = st.number_input(
+                            "Max Energy (mJ)", 
+                            min_value=e_min_data, 
+                            max_value=e_max_data * 3.0, 
+                            value=float(e_max_data * 1.2),
+                            step=0.1,
+                            key="radar_e_max_input",
+                            disabled=not use_custom_e_max
+                        ) if use_custom_e_max else None
+                        
+                        use_custom_e_min = st.checkbox(
+                            "Custom Energy Min", value=False, key="radar_custom_e_min"
+                        )
+                        custom_energy_min = st.number_input(
+                            "Min Energy (mJ)",
+                            min_value=0.0,
+                            max_value=e_max_data,
+                            value=float(max(0, e_min_data * 0.8)),
+                            step=0.1,
+                            key="radar_e_min_input",
+                            disabled=not use_custom_e_min
+                        ) if use_custom_e_min else None
+                        
+                        add_jitter = st.checkbox(
+                            "Add Jitter for Overlaps", value=True, key="radar_add_jitter"
+                        )
+                        jitter_amount = st.slider(
+                            "Jitter Amount (±degrees)", 0.1, 10.0, 2.0, 0.1, key="radar_jitter_amt"
+                        ) if add_jitter else 0.0
+                        jitter_seed = st.number_input(
+                            "Jitter Seed", min_value=0, max_value=9999, value=42, key="radar_jitter_seed"
+                        ) if add_jitter else None
+                    
+                    with colF:
+                        st.markdown("**🎨 Value Scaling**")
+                        normalize_colors = st.checkbox(
+                            "Normalize Colors to [0,1]", value=True, key="radar_norm_colors"
+                        )
+                        
+                        if normalize_colors:
+                            p_max_data = float(df_polar['Peak_Value'].max())
+                            p_min_data = float(df_polar['Peak_Value'].min())
+                            
+                            use_custom_c_max = st.checkbox(
+                                "Custom Color Max", value=False, key="radar_custom_c_max"
                             )
-                            with col:
-                                st.plotly_chart(fig_ts, use_container_width=True)
-                                st.caption(f"Timestep {ts}")
+                            color_ref_max = st.number_input(
+                                "Color Scale Max",
+                                min_value=p_min_data,
+                                max_value=p_max_data * 5.0,
+                                value=float(p_max_data * 1.2),
+                                step=0.01,
+                                key="radar_c_max_input",
+                                disabled=not use_custom_c_max
+                            ) if use_custom_c_max else None
+                            
+                            use_custom_c_min = st.checkbox(
+                                "Custom Color Min", value=False, key="radar_custom_c_min"
+                            )
+                            color_ref_min = st.number_input(
+                                "Color Scale Min",
+                                min_value=0.0,
+                                max_value=p_max_data,
+                                value=float(max(0, p_min_data * 0.8)),
+                                step=0.01,
+                                key="radar_c_min_input",
+                                disabled=not use_custom_c_min
+                            ) if use_custom_c_min else None
+                        else:
+                            color_ref_max = None
+                            color_ref_min = None
+                        
+                        radial_auto = st.checkbox(
+                            "Auto Radial Range", value=True, key="radar_radial_auto"
+                        )
+                        radial_axis_max = st.number_input(
+                            "Max Duration (ns)",
+                            min_value=0.1,
+                            value=float(df_polar['Duration'].max() * 1.1),
+                            step=0.1,
+                            key="radar_r_max_input",
+                            disabled=radial_auto
+                        ) if not radial_auto else None
+                
+                # === ADVANCED OPTIONS EXPANDER ===
+                with st.expander("⚙️ Advanced Options", expanded=False):
+                    colG, colH = st.columns(2)
+                    
+                    with colG:
+                        st.markdown("**🔄 Plot Orientation**")
+                        angle_offset = st.slider(
+                            "Rotation Offset (degrees)", -180, 180, 0, 5, key="radar_angle_offset"
+                        )
+                        st.markdown("**🖼️ Background**")
+                        bg_color = st.color_picker("Figure Background", "#ffffff", key="radar_bg")
+                        polar_bg = st.color_picker("Polar Area Background", "#ffffff", key="radar_polar_bg")
+                    
+                    with colH:
+                        st.markdown("**👆 Interactions**")
+                        enable_hover = st.checkbox("Enable Hover", value=True, key="radar_enable_hover")
+                        hover_mode = st.selectbox(
+                            "Hover Mode",
+                            ["closest", "x", "y", "x unified", "y unified"],
+                            index=0,
+                            key="radar_hover_mode"
+                        ) if enable_hover else "closest"
+                
+                # === TARGET QUERY INTEGRATION ===
+                query_params = None
+                target_peak = None
+                
+                if st.session_state.get('polar_query') and st.session_state.get('interpolation_results'):
+                    query_params = st.session_state.polar_query
+                    results = st.session_state.interpolation_results
+                    if field_type in results.get('field_predictions', {}):
+                        preds = results['field_predictions'][field_type]
+                        t_idx = t_step - 1
+                        if 'max' in preds and t_idx < len(preds['max']):
+                            target_peak = float(preds['max'][t_idx])
+                            st.info(f"🎯 Target predicted peak for `{field_type}`: **{target_peak:.4f}**")
+                
+                # === CREATE AND DISPLAY CHART ===
+                viz = st.session_state.polar_viz
+                
+                fig_polar = viz.create_polar_radar_chart(
+                    df=df_polar,
+                    field_type=field_type,
+                    query_params=query_params if highlight_target else None,
+                    timestep=t_step,
+                    width=900,
+                    height=750,
+                    show_legend=True,
+                    marker_size_range=(10, 30),
+                    # Styling
+                    radial_grid_width=radial_grid_width if show_grid else 0,
+                    angular_grid_width=angular_grid_width if show_grid else 0,
+                    radial_tick_font_size=radial_tick_font,
+                    angular_tick_font_size=angular_tick_font,
+                    title_font_size=title_font_size,
+                    margin_pad={'l': 60, 'r': 80, 't': margin_top, 'b': 60},
+                    # Scaling
+                    energy_min=custom_energy_min,
+                    energy_max=custom_energy_max,
+                    target_peak_value=target_peak if (highlight_target and color_target_by_value) else None,
+                    # Processing
+                    add_jitter=add_jitter,
+                    jitter_amount=jitter_amount,
+                    jitter_seed=jitter_seed,
+                    normalize_colors=normalize_colors,
+                    color_reference_max=color_ref_max,
+                    color_reference_min=color_ref_min,
+                    radial_axis_max=radial_axis_max,
+                    # Advanced
+                    angle_offset_deg=angle_offset,
+                    background_color=bg_color,
+                    polar_background_color=polar_bg,
+                    enable_hover=enable_hover,
+                    hover_mode=hover_mode,
+                    target_marker_size=target_size,
+                    target_marker_line_width=target_line_width,
+                    highlight_target=highlight_target,
+                    show_grid=show_grid,
+                    show_radial_labels=True,
+                    show_angular_labels=True
+                )
+                
+                st.plotly_chart(fig_polar, use_container_width=True)
+                
+                # === MULTI-TIMESTEP COMPARISON ===
+                if st.checkbox("📊 Enable Multi-Timestep Comparison", key="polar_enable_multi"):
+                    st.markdown("##### Compare Evolution Across Timesteps")
+                    
+                    available_ts = list(range(1, min(max_timestep + 1, 7)))
+                    selected_ts = st.multiselect(
+                        "Select Timesteps",
+                        available_ts,
+                        default=[1, min(3, max_timestep), min(5, max_timestep)] if max_timestep >= 3 else available_ts[:min(3, len(available_ts))],
+                        key="polar_multi_ts_select"
+                    )
+                    
+                    if selected_ts:
+                        n_cols = min(len(selected_ts), 3)
+                        rows = (len(selected_ts) + n_cols - 1) // n_cols
+                        
+                        for row in range(rows):
+                            cols = st.columns(n_cols)
+                            for col_idx in range(n_cols):
+                                ts_idx = row * n_cols + col_idx
+                                if ts_idx >= len(selected_ts):
+                                    break
+                                
+                                ts = selected_ts[ts_idx]
+                                
+                                # Build data for this timestep
+                                rows_ts = []
+                                for s in st.session_state.summaries:
+                                    if ts <= len(s.get('timesteps', [])):
+                                        field_stats = s.get('field_stats', {}).get(field_type, {})
+                                        peak_list = field_stats.get('max', [0])
+                                        if ts - 1 < len(peak_list):
+                                            pv = peak_list[ts - 1]
+                                            rows_ts.append({
+                                                'Name': s['name'],
+                                                'Energy': s['energy'],
+                                                'Duration': s['duration'],
+                                                'Peak_Value': float(pv) if np.isfinite(pv) else 0.0
+                                            })
+                                
+                                if not rows_ts:
+                                    with cols[col_idx]:
+                                        st.caption(f"Timestep {ts}: No data")
+                                    continue
+                                
+                                df_ts = pd.DataFrame(rows_ts)
+                                
+                                # Get target value for this timestep
+                                target_val_ts = None
+                                if query_params and st.session_state.interpolation_results:
+                                    res = st.session_state.interpolation_results
+                                    if field_type in res.get('field_predictions', {}):
+                                        preds = res['field_predictions'][field_type]
+                                        if 'max' in preds and ts - 1 < len(preds['max']):
+                                            target_val_ts = float(preds['max'][ts - 1])
+                                
+                                # Create subplot
+                                fig_ts = viz.create_polar_radar_chart(
+                                    df_ts, field_type, 
+                                    query_params=query_params if highlight_target else None,
+                                    timestep=ts,
+                                    width=320,
+                                    height=320,
+                                    show_legend=(ts == selected_ts[0]),
+                                    marker_size_range=(8, 20),
+                                    title_font_size=14,
+                                    radial_tick_font_size=10,
+                                    angular_tick_font_size=10,
+                                    energy_min=custom_energy_min,
+                                    energy_max=custom_energy_max,
+                                    target_peak_value=target_val_ts if (highlight_target and color_target_by_value) else None,
+                                    add_jitter=add_jitter,
+                                    jitter_amount=jitter_amount * 0.7,
+                                    jitter_seed=jitter_seed,
+                                    normalize_colors=normalize_colors,
+                                    color_reference_max=color_ref_max,
+                                    color_reference_min=color_ref_min,
+                                    radial_axis_max=radial_axis_max,
+                                    angle_offset_deg=angle_offset,
+                                    background_color=bg_color,
+                                    polar_background_color=polar_bg,
+                                    enable_hover=enable_hover,
+                                    hover_mode=hover_mode,
+                                    target_marker_size=target_size,
+                                    target_marker_line_width=target_line_width,
+                                    highlight_target=highlight_target,
+                                    show_grid=show_grid
+                                )
+                                
+                                with cols[col_idx]:
+                                    st.plotly_chart(fig_ts, use_container_width=True)
+                                    st.caption(f"**t = {ts}** • {len(df_ts)} sims")
+                
+                # === EXPORT BUTTONS ===
+                with st.expander("💾 Export Chart", expanded=False):
+                    colX, colY = st.columns(2)
+                    export_format = st.selectbox(
+                        "Export Format",
+                        ["PNG", "SVG", "HTML", "JSON"],
+                        index=0,
+                        key="radar_export_fmt"
+                    )
+                    
+                    with colX:
+                        if st.button(f"Export as {export_format}", key="radar_export_btn"):
+                            try:
+                                if export_format == "PNG":
+                                    img_bytes = fig_polar.to_image(format="png", width=1200, height=900, scale=2)
+                                    st.download_button(
+                                        label="⬇️ Download PNG",
+                                        data=img_bytes,
+                                        file_name=f"polar_radar_{field_type}_t{t_step}.png",
+                                        mime="image/png"
+                                    )
+                                elif export_format == "SVG":
+                                    svg_bytes = fig_polar.to_image(format="svg", width=1200, height=900)
+                                    st.download_button(
+                                        label="⬇️ Download SVG",
+                                        data=svg_bytes,
+                                        file_name=f"polar_radar_{field_type}_t{t_step}.svg",
+                                        mime="image/svg+xml"
+                                    )
+                                elif export_format == "HTML":
+                                    html_str = fig_polar.to_html(include_plotlyjs='cdn')
+                                    st.download_button(
+                                        label="⬇️ Download HTML",
+                                        data=html_str,
+                                        file_name=f"polar_radar_{field_type}_t{t_step}.html",
+                                        mime="text/html"
+                                    )
+                                elif export_format == "JSON":
+                                    json_str = fig_polar.to_json()
+                                    st.download_button(
+                                        label="⬇️ Download JSON",
+                                        data=json_str,
+                                        file_name=f"polar_radar_{field_type}_t{t_step}.json",
+                                        mime="application/json"
+                                    )
+                                st.success("✅ Export ready!")
+                            except Exception as e:
+                                st.error(f"❌ Export failed: {e}")
+                                st.info("💡 Tip: Install `kaleido` for image export: `pip install -U kaleido`")
+                    
+                    with colY:
+                        if st.button("Copy Plotly Config", key="radar_copy_config"):
+                            config_json = fig_polar.to_plotly_json()
+                            st.code(json.dumps(config_json, indent=2)[:500] + "...", language="json")
+                            st.caption("↑ First 500 chars of Plotly figure config (copied to clipboard manually)")
 
     # --- TAB 4: ST-DGPA Analysis ---
     with tabs[3]:
