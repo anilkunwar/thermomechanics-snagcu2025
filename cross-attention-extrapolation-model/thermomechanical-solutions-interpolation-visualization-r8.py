@@ -791,50 +791,6 @@ class PolarRadarVisualizer:
     ) -> go.Figure:
         """
         Create enhanced polar radar chart with comprehensive customization.
-        
-        Args:
-            df: DataFrame with required columns ['Name', 'Energy', 'Duration', 'Peak_Value']
-            field_type: Field identifier for colorscale selection
-            query_params: Dict with 'Energy' and 'Duration' for target marker
-            timestep: Current timestep for title and hover display
-            width/height: Figure dimensions in pixels
-            show_legend: Whether to display legend
-            marker_size_range: (min_size, max_size) for source markers based on value
-            radial_grid_width: Width of radial grid lines
-            angular_grid_width: Width of angular grid lines
-            radial_tick_font_size: Font size for radial axis ticks
-            angular_tick_font_size: Font size for angular axis ticks
-            title_font_size: Font size for main title
-            margin_pad: Dict with 'l', 'r', 't', 'b' for margins
-            energy_min/energy_max: Override auto-scaling for energy axis
-            target_peak_value: Predicted peak value for target marker coloring
-            add_jitter: Enable angular jitter for overlapping points
-            jitter_amount: Maximum jitter in degrees (±)
-            normalize_colors: Whether to normalize marker colors to [0,1]
-            color_reference_max/min: Fixed range for color normalization
-            radial_axis_max/min: Fixed range for radial (duration) axis
-            highlight_target: Whether to display target query marker
-            jitter_seed: Random seed for reproducible jitter
-            angle_offset_deg: Rotate entire polar plot by this angle
-            show_grid: Show polar grid lines
-            show_radial_labels: Show radial axis labels
-            show_angular_labels: Show angular axis labels
-            background_color: Figure background color
-            polar_background_color: Polar plot area background
-            source_marker_opacity: Opacity of source simulation markers
-            target_marker_size: Size of target query marker
-            target_marker_line_width: Border width of target marker
-            hover_template_source: Custom hover template for source points
-            hover_template_target: Custom hover template for target point
-            custom_colorscale: Override auto-selected colorscale
-            colorbar_title: Custom title for colorbar
-            colorbar_position_x: X-position of colorbar (1.0 = right edge)
-            colorbar_thickness: Thickness of colorbar in pixels
-            enable_hover: Enable hover interactions
-            hover_mode: Plotly hover mode ('closest', 'x', 'y', etc.)
-            
-        Returns:
-            Plotly Figure object configured for polar radar display
         """
         # Set default margin padding
         if margin_pad is None:
@@ -1323,6 +1279,9 @@ class ExportManager:
         if filename is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f"stdgpa_export_{timestamp}.csv"
+        # Guard against empty DataFrame
+        if df is None or df.empty:
+            return "", filename
         csv_str = df.to_csv(index=False)
         return csv_str, filename
 
@@ -2018,12 +1977,22 @@ def main():
                     if csv_data:
                         df_csv = pd.DataFrame(csv_data)
                         csv_str, csv_name = st.session_state.export_manager.export_to_csv(df_csv)
-                        st.download_button(label="📥 Download as CSV", data=csv_str, file_name=csv_name, mime="text/csv", use_container_width=True)
+                        if csv_str:
+                            st.download_button(label="📥 Download as CSV", data=csv_str, file_name=csv_name, mime="text/csv", use_container_width=True)
+                        else:
+                            st.warning("⚠️ No valid CSV data to export.")
+                    else:
+                        st.info("ℹ️ No prediction data available for CSV export.")
             with col3:
                 if results['attention_maps']:
                     attention_df = pd.DataFrame(results['attention_maps'])
                     att_csv, att_name = st.session_state.export_manager.export_to_csv(attention_df, filename="attention_weights.csv")
-                    st.download_button(label="📥 Download Attention Weights", data=att_csv, file_name=att_name, mime="text/csv", use_container_width=True)
+                    if att_csv:
+                        st.download_button(label="📥 Download Attention Weights", data=att_csv, file_name=att_name, mime="text/csv", use_container_width=True)
+                    else:
+                        st.warning("⚠️ No attention weights to export.")
+                else:
+                    st.info("ℹ️ No attention maps available.")
         else:
             st.info("ℹ️ Please run an interpolation first (Tab 2) to enable export.")
 
