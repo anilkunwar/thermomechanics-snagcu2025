@@ -5,9 +5,9 @@ ENHANCED FEA LASER SIMULATION PLATFORM WITH ST-DGPA & SANKEY DIAGRAM
 ====================================================================
 - Full ST-DGPA interpolation/extrapolation
 - Advanced 3D field rendering with caching
-- 🔥 NEW: Physics-aware Sankey diagram for weight decomposition
-- 🔥 ENHANCED: Dynamic source simulation visualization with global IDs
-- Robust error handling & UI improvements
+- 🔥 Physics-aware Sankey diagram with global simulation IDs
+- 🔥 Robust data loading with memory safeguards
+- Interactive top‑k control for Sankey (show all sources)
 """
 import streamlit as st
 import os
@@ -110,7 +110,7 @@ class CacheManager:
         if len(st.session_state.interpolation_field_history) > 10: st.session_state.interpolation_field_history.popitem(last=False)
 
 # =============================================
-# UNIFIED DATA LOADER
+# UNIFIED DATA LOADER (FIXED)
 # =============================================
 class UnifiedFEADataLoader:
     def __init__(self):
@@ -125,29 +125,58 @@ class UnifiedFEADataLoader:
         e, d = match.groups()
         return float(e.replace("p", ".")), float(d.replace("p", "."))
     
+    @staticmethod
     @st.cache_data(show_spinner="Loading simulation data...")
-    def load_all_simulations(_self, load_full_mesh=True):
+    def _load_simulations_cached(load_full_mesh: bool):
+        """Static cached method to avoid self issues."""
+        loader = UnifiedFEADataLoader()  # temporary instance for helpers
         simulations, summaries = {}, []
         folders = glob.glob(os.path.join(FEA_SOLUTIONS_DIR, "q*mJ-delta*ns"))
         if not folders:
             st.warning(f"No simulation folders found in {FEA_SOLUTIONS_DIR}")
             return simulations, summaries
+        
+        # Memory warning
+        if load_full_mesh:
+            st.info("Loading full mesh data. This may use significant RAM (>500MB).")
+        
         progress_bar = st.progress(0)
         for folder_idx, folder in enumerate(folders):
             name = os.path.basename(folder)
-            energy, duration = _self.parse_folder_name(folder)
-            if energy is None: continue
-            vtu_files = sorted(glob.glob(os.path.join(folder, "a_t????.vtu")))
-            if not vtu_files: continue
+            energy, duration = loader.parse_folder_name(folder)
+            if energy is None:
+                st.warning(f"Skipping folder with unexpected name: {name}")
+                continue
+            
+            # Look for VTU files (flexible pattern: a_t*.vtu)
+            vtu_files = sorted(glob.glob(os.path.join(folder, "a_t*.vtu")))
+            if not vtu_files:
+                st.warning(f"No VTU files found in {name}")
+                continue
+            
             try:
                 mesh0 = meshio.read(vtu_files[0])
-                if not mesh0.point_data: continue
-                sim_data = {'name': name, 'energy_mJ': energy, 'duration_ns': duration, 'n_timesteps': len(vtu_files), 'vtu_files': vtu_files, 'field_info': {}, 'has_mesh': False}
+                if not mesh0.point_data:
+                    st.warning(f"No point data in {vtu_files[0]}")
+                    continue
+                
+                sim_data = {
+                    'name': name,
+                    'energy_mJ': energy,
+                    'duration_ns': duration,
+                    'n_timesteps': len(vtu_files),
+                    'vtu_files': vtu_files,
+                    'field_info': {},
+                    'has_mesh': False
+                }
+                
                 if load_full_mesh:
                     points = mesh0.points.astype(np.float32)
                     triangles = None
                     for cell_block in mesh0.cells:
-                        if cell_block.type == "triangle": triangles = cell_block.data.astype(np.int32); break
+                        if cell_block.type == "triangle":
+                            triangles = cell_block.data.astype(np.int32)
+                            break
                     fields = {}
                     for key in mesh0.point_data.keys():
                         arr = mesh0.point_data[key].astype(np.float32)
@@ -155,23 +184,35 @@ class UnifiedFEADataLoader:
                         shape = (len(vtu_files), len(points)) if arr.ndim == 1 else (len(vtu_files), len(points), arr.shape[1])
                         fields[key] = np.full(shape, np.nan, dtype=np.float32)
                         fields[key][0] = arr
-                        _self.available_fields.add(key)
+                        loader.available_fields.add(key)
                     for t in range(1, len(vtu_files)):
                         try:
                             mesh = meshio.read(vtu_files[t])
                             for key in sim_data['field_info']:
-                                if key in mesh.point_data: fields[key][t] = mesh.point_data[key].astype(np.float32)
-                        except Exception: pass
+                                if key in mesh.point_data:
+                                    fields[key][t] = mesh.point_data[key].astype(np.float32)
+                        except Exception as e:
+                            st.warning(f"Could not read timestep {t} of {name}: {str(e)[:100]}")
                     sim_data.update({'points': points, 'fields': fields, 'triangles': triangles, 'has_mesh': True})
-                summaries.append(_self.extract_summary_statistics(vtu_files, energy, duration, name))
+                
+                # Extract summary statistics (always)
+                summary = loader._extract_summary_statistics(vtu_files, energy, duration, name)
+                summaries.append(summary)
                 simulations[name] = sim_data
-            except Exception: continue
+                
+            except Exception as e:
+                st.error(f"Failed to load {name}: {str(e)}")
+                continue
+            
             progress_bar.progress((folder_idx + 1) / len(folders))
         progress_bar.empty()
-        if simulations: st.success(f"✅ Loaded {len(simulations)} simulations with {len(_self.available_fields)} unique fields")
+        
+        if simulations:
+            st.success(f"✅ Loaded {len(simulations)} simulations with {len(loader.available_fields)} unique fields")
         return simulations, summaries
     
-    def extract_summary_statistics(self, vtu_files, energy, duration, name):
+    def _extract_summary_statistics(self, vtu_files, energy, duration, name):
+        """Extract statistics without loading full mesh."""
         summary = {'name': name, 'energy': energy, 'duration': duration, 'timesteps': [], 'field_stats': {}}
         for idx, vtu_file in enumerate(vtu_files):
             try:
@@ -181,16 +222,34 @@ class UnifiedFEADataLoader:
                     data = mesh.point_data[field_name]
                     if field_name not in summary['field_stats']:
                         summary['field_stats'][field_name] = {'min': [], 'max': [], 'mean': [], 'std': [], 'q25': [], 'q50': [], 'q75': [], 'percentiles': []}
-                    if data.ndim == 1: clean_data = data[~np.isnan(data)]
-                    else: clean_data = np.linalg.norm(data, axis=1)[~np.isnan(np.linalg.norm(data, axis=1))]
+                    if data.ndim == 1:
+                        clean_data = data[~np.isnan(data)]
+                    else:
+                        clean_data = np.linalg.norm(data, axis=1)[~np.isnan(np.linalg.norm(data, axis=1))]
                     if clean_data.size > 0:
-                        for key in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']: summary['field_stats'][field_name][key].append(float(eval(f"np.{key}(clean_data)")))
+                        for key in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']:
+                            summary['field_stats'][field_name][key].append(float(eval(f"np.{key}(clean_data)")))
                         summary['field_stats'][field_name]['percentiles'].append(np.percentile(clean_data, [10, 25, 50, 75, 90]))
                     else:
-                        for key in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']: summary['field_stats'][field_name][key].append(0.0)
+                        for key in ['min', 'max', 'mean', 'std', 'q25', 'q50', 'q75']:
+                            summary['field_stats'][field_name][key].append(0.0)
                         summary['field_stats'][field_name]['percentiles'].append(np.zeros(5))
-            except Exception: continue
+            except Exception as e:
+                st.warning(f"Error reading {vtu_file} for stats: {str(e)[:100]}")
+                continue
         return summary
+    
+    def load_all_simulations(self, load_full_mesh=False):
+        """Public method that calls the cached static method."""
+        sims, summaries = UnifiedFEADataLoader._load_simulations_cached(load_full_mesh)
+        self.simulations = sims
+        self.summaries = summaries
+        # Rebuild available_fields from summaries if full mesh not loaded
+        if not load_full_mesh and summaries:
+            self.available_fields = set()
+            for s in summaries:
+                self.available_fields.update(s['field_stats'].keys())
+        return sims, summaries
 
 # =============================================
 # SPATIO-TEMPORAL GATED PHYSICS ATTENTION (ST-DGPA)
@@ -221,30 +280,51 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
                 field_vals = []
                 for field in sorted(summary['field_stats'].keys()):
                     stats = summary['field_stats'][field]
-                    if timestep_idx < len(stats['mean']): field_vals.extend([stats['mean'][timestep_idx], stats['max'][timestep_idx], stats['std'][timestep_idx]])
-                    else: field_vals.extend([0.0, 0.0, 0.0])
+                    if timestep_idx < len(stats['mean']):
+                        field_vals.extend([stats['mean'][timestep_idx], stats['max'][timestep_idx], stats['std'][timestep_idx]])
+                    else:
+                        field_vals.extend([0.0, 0.0, 0.0])
                 all_values.append(field_vals)
-                metadata.append({'summary_idx': summary_idx, 'timestep_idx': timestep_idx, 'energy': summary['energy'], 'duration': summary['duration'], 'time': t, 'name': summary['name'], 'fourier_number': self._compute_fourier_number(t), 'thermal_penetration': self._compute_thermal_penetration(t)})
+                metadata.append({
+                    'summary_idx': summary_idx, 'timestep_idx': timestep_idx,
+                    'energy': summary['energy'], 'duration': summary['duration'],
+                    'time': t, 'name': summary['name'],
+                    'fourier_number': self._compute_fourier_number(t),
+                    'thermal_penetration': self._compute_thermal_penetration(t)
+                })
         if all_embeddings and all_values:
             all_embeddings, all_values = np.array(all_embeddings), np.array(all_values)
-            self.embedding_scaler.fit(all_embeddings); self.source_embeddings = self.embedding_scaler.transform(all_embeddings)
-            self.value_scaler.fit(all_values); self.source_values = all_values
-            self.source_metadata = metadata; self.fitted = True
+            self.embedding_scaler.fit(all_embeddings)
+            self.source_embeddings = self.embedding_scaler.transform(all_embeddings)
+            self.value_scaler.fit(all_values)
+            self.source_values = all_values
+            self.source_metadata = metadata
+            self.fitted = True
             st.info(f"✅ Prepared {len(all_embeddings)} embeddings with {all_embeddings.shape[1]} features")
     
-    def _compute_fourier_number(self, time_ns): return self.thermal_diffusivity * (time_ns * 1e-9) / (self.characteristic_length ** 2)
-    def _compute_thermal_penetration(self, time_ns): return np.sqrt(self.thermal_diffusivity * (time_ns * 1e-9)) * 1e6
+    def _compute_fourier_number(self, time_ns):
+        return self.thermal_diffusivity * (time_ns * 1e-9) / (self.characteristic_length ** 2)
+    
+    def _compute_thermal_penetration(self, time_ns):
+        return np.sqrt(self.thermal_diffusivity * (time_ns * 1e-9)) * 1e6
     
     def _compute_enhanced_physics_embedding(self, energy, duration, time):
-        logE = np.log1p(energy); power = energy / max(duration, 1e-6)
-        time_ratio = time / max(duration, 1e-3); fourier_number = self._compute_fourier_number(time)
+        logE = np.log1p(energy)
+        power = energy / max(duration, 1e-6)
+        time_ratio = time / max(duration, 1e-3)
+        fourier_number = self._compute_fourier_number(time)
         thermal_penetration = self._compute_thermal_penetration(time)
-        return np.array([logE, duration, time, power, time_ratio, fourier_number, thermal_penetration,
-                        1.0 if time < duration else 0.0, 1.0 if time >= duration else 0.0,
-                        np.log1p(power), np.log1p(time), np.sqrt(time)], dtype=np.float32)
+        return np.array([
+            logE, duration, time, power, time_ratio,
+            fourier_number, thermal_penetration,
+            1.0 if time < duration else 0.0,
+            1.0 if time >= duration else 0.0,
+            np.log1p(power), np.log1p(time), np.sqrt(time)
+        ], dtype=np.float32)
     
     def _compute_ett_gating(self, energy_query, duration_query, time_query, source_metadata=None):
-        if source_metadata is None: source_metadata = self.source_metadata
+        if source_metadata is None:
+            source_metadata = self.source_metadata
         phi_squared = []
         for meta in source_metadata:
             de = (energy_query - meta['energy']) / self.s_E
@@ -263,10 +343,14 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         similarities = []
         for meta in source_metas:
             time_diff = abs(query_meta['time'] - meta['time'])
-            if query_meta['time'] < query_meta['duration'] * 1.5: temporal_tolerance = max(query_meta['duration'] * 0.1, 1.0)
-            else: temporal_tolerance = max(query_meta['duration'] * 0.3, 3.0)
-            if 'fourier_number' in meta and 'fourier_number' in query_meta: fourier_similarity = np.exp(-abs(query_meta['fourier_number'] - meta['fourier_number']) / 0.1)
-            else: fourier_similarity = 1.0
+            if query_meta['time'] < query_meta['duration'] * 1.5:
+                temporal_tolerance = max(query_meta['duration'] * 0.1, 1.0)
+            else:
+                temporal_tolerance = max(query_meta['duration'] * 0.3, 3.0)
+            if 'fourier_number' in meta and 'fourier_number' in query_meta:
+                fourier_similarity = np.exp(-abs(query_meta['fourier_number'] - meta['fourier_number']) / 0.1)
+            else:
+                fourier_similarity = 1.0
             time_similarity = np.exp(-time_diff / temporal_tolerance)
             similarities.append((1 - self.temporal_weight) * time_similarity + self.temporal_weight * fourier_similarity)
         return np.array(similarities)
@@ -280,7 +364,8 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         return np.array(similarities)
     
     def _multi_head_attention_with_gating(self, query_embedding, query_meta):
-        if not self.fitted or len(self.source_embeddings) == 0: return None, None, None, None
+        if not self.fitted or len(self.source_embeddings) == 0:
+            return None, None, None, None
         query_norm = self.embedding_scaler.transform([query_embedding])[0]
         n_sources = len(self.source_embeddings)
         head_weights = np.zeros((self.n_heads, n_sources))
@@ -300,7 +385,8 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
                 scores = (1 - self.temporal_weight) * scores + self.temporal_weight * temporal_sim
             head_weights[head] = scores
         avg_weights = np.mean(head_weights, axis=0)
-        if self.temperature != 1.0: avg_weights = avg_weights ** (1.0 / self.temperature)
+        if self.temperature != 1.0:
+            avg_weights = avg_weights ** (1.0 / self.temperature)
         max_weight = np.max(avg_weights)
         exp_weights = np.exp(avg_weights - max_weight)
         physics_attention = exp_weights / (np.sum(exp_weights) + 1e-12)
@@ -314,15 +400,31 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
     def predict_field_statistics(self, energy_query, duration_query, time_query):
         if not self.fitted: return None
         query_embedding = self._compute_enhanced_physics_embedding(energy_query, duration_query, time_query)
-        query_meta = {'energy': energy_query, 'duration': duration_query, 'time': time_query, 'fourier_number': self._compute_fourier_number(time_query), 'thermal_penetration': self._compute_thermal_penetration(time_query)}
+        query_meta = {
+            'energy': energy_query, 'duration': duration_query, 'time': time_query,
+            'fourier_number': self._compute_fourier_number(time_query),
+            'thermal_penetration': self._compute_thermal_penetration(time_query)
+        }
         prediction, final_weights, physics_attention, ett_gating = self._multi_head_attention_with_gating(query_embedding, query_meta)
         if prediction is None: return None
-        result = {'prediction': prediction, 'attention_weights': final_weights, 'physics_attention': physics_attention, 'ett_gating': ett_gating, 'confidence': float(np.max(final_weights)) if len(final_weights) > 0 else 0.0, 'temporal_confidence': self._compute_temporal_confidence(time_query, duration_query), 'heat_transfer_indicators': self._compute_heat_transfer_indicators(energy_query, duration_query, time_query), 'field_predictions': {}}
+        result = {
+            'prediction': prediction, 'attention_weights': final_weights,
+            'physics_attention': physics_attention, 'ett_gating': ett_gating,
+            'confidence': float(np.max(final_weights)) if len(final_weights) > 0 else 0.0,
+            'temporal_confidence': self._compute_temporal_confidence(time_query, duration_query),
+            'heat_transfer_indicators': self._compute_heat_transfer_indicators(energy_query, duration_query, time_query),
+            'field_predictions': {}
+        }
         if self.source_db:
             field_order = sorted(self.source_db[0]['field_stats'].keys())
             for i, field in enumerate(field_order):
                 start_idx = i * 3
-                if start_idx + 2 < len(prediction): result['field_predictions'][field] = {'mean': float(prediction[start_idx]), 'max': float(prediction[start_idx + 1]), 'std': float(prediction[start_idx + 2])}
+                if start_idx + 2 < len(prediction):
+                    result['field_predictions'][field] = {
+                        'mean': float(prediction[start_idx]),
+                        'max': float(prediction[start_idx + 1]),
+                        'std': float(prediction[start_idx + 2])
+                    }
         return result
     
     def _compute_temporal_confidence(self, time_query, duration_query):
@@ -333,25 +435,55 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
     def _compute_heat_transfer_indicators(self, energy, duration, time):
         fourier_number = self._compute_fourier_number(time)
         thermal_penetration = self._compute_thermal_penetration(time)
-        if time < duration * 0.3: phase, regime = "Early Heating", "Adiabatic-like"
-        elif time < duration: phase, regime = "Heating", "Conduction-dominated"
-        elif time < duration * 2: phase, regime = "Early Cooling", "Mixed conduction"
-        else: phase, regime = "Diffusion Cooling", "Thermal diffusion"
-        return {'phase': phase, 'regime': regime, 'fourier_number': fourier_number, 'thermal_penetration_um': thermal_penetration, 'normalized_time': time / max(duration, 1e-6), 'energy_density': energy / duration}
+        if time < duration * 0.3:
+            phase, regime = "Early Heating", "Adiabatic-like"
+        elif time < duration:
+            phase, regime = "Heating", "Conduction-dominated"
+        elif time < duration * 2:
+            phase, regime = "Early Cooling", "Mixed conduction"
+        else:
+            phase, regime = "Diffusion Cooling", "Thermal diffusion"
+        return {
+            'phase': phase, 'regime': regime, 'fourier_number': fourier_number,
+            'thermal_penetration_um': thermal_penetration,
+            'normalized_time': time / max(duration, 1e-6),
+            'energy_density': energy / duration
+        }
     
     def predict_time_series(self, energy_query, duration_query, time_points):
-        results = {'time_points': time_points, 'field_predictions': {}, 'attention_maps': [], 'physics_attention_maps': [], 'ett_gating_maps': [], 'confidence_scores': [], 'temporal_confidences': [], 'heat_transfer_indicators': []}
+        results = {
+            'time_points': time_points, 'field_predictions': {},
+            'attention_maps': [], 'physics_attention_maps': [], 'ett_gating_maps': [],
+            'confidence_scores': [], 'temporal_confidences': [], 'heat_transfer_indicators': []
+        }
         if self.source_db:
-            for field in set(f for s in self.source_db for f in s['field_stats'].keys()): results['field_predictions'][field] = {'mean': [], 'max': [], 'std': []}
+            for field in set(f for s in self.source_db for f in s['field_stats'].keys()):
+                results['field_predictions'][field] = {'mean': [], 'max': [], 'std': []}
         for t in time_points:
             pred = self.predict_field_statistics(energy_query, duration_query, t)
             if pred and 'field_predictions' in pred:
                 for field in pred['field_predictions']:
-                    if field in results['field_predictions']: results['field_predictions'][field]['mean'].append(pred['field_predictions'][field]['mean']); results['field_predictions'][field]['max'].append(pred['field_predictions'][field]['max']); results['field_predictions'][field]['std'].append(pred['field_predictions'][field]['std'])
-                results['attention_maps'].append(pred['attention_weights']); results['physics_attention_maps'].append(pred['physics_attention']); results['ett_gating_maps'].append(pred['ett_gating']); results['confidence_scores'].append(pred['confidence']); results['temporal_confidences'].append(pred['temporal_confidence']); results['heat_transfer_indicators'].append(pred['heat_transfer_indicators'])
+                    if field in results['field_predictions']:
+                        results['field_predictions'][field]['mean'].append(pred['field_predictions'][field]['mean'])
+                        results['field_predictions'][field]['max'].append(pred['field_predictions'][field]['max'])
+                        results['field_predictions'][field]['std'].append(pred['field_predictions'][field]['std'])
+                results['attention_maps'].append(pred['attention_weights'])
+                results['physics_attention_maps'].append(pred['physics_attention'])
+                results['ett_gating_maps'].append(pred['ett_gating'])
+                results['confidence_scores'].append(pred['confidence'])
+                results['temporal_confidences'].append(pred['temporal_confidence'])
+                results['heat_transfer_indicators'].append(pred['heat_transfer_indicators'])
             else:
-                for field in results['field_predictions']: results['field_predictions'][field]['mean'].append(np.nan); results['field_predictions'][field]['max'].append(np.nan); results['field_predictions'][field]['std'].append(np.nan)
-                results['attention_maps'].append(np.array([])); results['physics_attention_maps'].append(np.array([])); results['ett_gating_maps'].append(np.array([])); results['confidence_scores'].append(0.0); results['temporal_confidences'].append(0.0); results['heat_transfer_indicators'].append({})
+                for field in results['field_predictions']:
+                    results['field_predictions'][field]['mean'].append(np.nan)
+                    results['field_predictions'][field]['max'].append(np.nan)
+                    results['field_predictions'][field]['std'].append(np.nan)
+                results['attention_maps'].append(np.array([]))
+                results['physics_attention_maps'].append(np.array([]))
+                results['ett_gating_maps'].append(np.array([]))
+                results['confidence_scores'].append(0.0)
+                results['temporal_confidences'].append(0.0)
+                results['heat_transfer_indicators'].append({})
         return results
     
     def interpolate_full_field(self, field_name, attention_weights, source_metadata, simulations):
@@ -366,96 +498,48 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
             meta = source_metadata[idx]
             if meta['name'] in simulations and field_name in simulations[meta['name']]['fields']:
                 interpolated_field += weight * simulations[meta['name']]['fields'][field_name][meta['timestep_idx']]
-                total_weight += weight; n_sources_used += 1
+                total_weight += weight
+                n_sources_used += 1
         return interpolated_field / total_weight if total_weight > 0 else None
-    
-    def _assess_temporal_coherence(self, source_metadata, attention_weights):
-        if len(source_metadata) == 0 or len(attention_weights) == 0: return 0.0
-        times = np.array([meta['time'] for meta in source_metadata])
-        weighted_times = times * attention_weights
-        mean_time = np.sum(weighted_times) / np.sum(attention_weights)
-        time_diff = times - mean_time
-        weighted_variance = np.sum(attention_weights * time_diff**2) / np.sum(attention_weights)
-        temporal_spread = np.sqrt(weighted_variance)
-        avg_duration = np.mean([meta['duration'] for meta in source_metadata])
-        return float(np.exp(-temporal_spread / max(avg_duration, 1e-6)))
-    
-    def export_interpolated_vtu(self, field_name, interpolated_values, simulations, output_path):
-        if interpolated_values is None or len(simulations) == 0: return False
-        try:
-            first_sim = next(iter(simulations.values())); points = first_sim['points']; cells = None
-            if 'triangles' in first_sim and first_sim['triangles'] is not None: cells = [("triangle", first_sim['triangles'])]
-            mesh = meshio.Mesh(points, cells, point_data={field_name: interpolated_values})
-            mesh.write(output_path); return True
-        except Exception as e: st.error(f"Error exporting VTU: {str(e)}"); return False
 
 # =============================================
 # ADVANCED VISUALIZATION COMPONENTS
 # =============================================
 class EnhancedVisualizer:
-    COLORSCALES = {'temperature': ['#2c0078', '#4402a7', '#5e04d1', '#7b0ef6', '#9a38ff', '#b966ff', '#d691ff', '#f2bcff'], 'stress': ['#003f5c', '#2f4b7c', '#665191', '#a05195', '#d45087', '#f95d6a', '#ff7c43', '#ffa600'], 'displacement': ['#004c6d', '#346888', '#5886a5', '#7aa6c2', '#9dc6e0', '#c1e7ff'], 'default': ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']}
+    COLORSCALES = {
+        'temperature': ['#2c0078', '#4402a7', '#5e04d1', '#7b0ef6', '#9a38ff', '#b966ff', '#d691ff', '#f2bcff'],
+        'stress': ['#003f5c', '#2f4b7c', '#665191', '#a05195', '#d45087', '#f95d6a', '#ff7c43', '#ffa600'],
+        'displacement': ['#004c6d', '#346888', '#5886a5', '#7aa6c2', '#9dc6e0', '#c1e7ff'],
+        'default': ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+    }
     EXTENDED_COLORMAPS = ['Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis', 'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland', 'Bluered', 'Electric', 'Thermal', 'Balance', 'Brwnyl', 'Darkmint', 'Emrld', 'Mint', 'Oranges', 'Purp', 'Purples', 'Sunset', 'Sunsetdark', 'Teal', 'Tealgrn', 'Twilight', 'Burg', 'Burgyl']
-
-    @staticmethod
-    def create_stdgpa_analysis(results, energy_query, duration_query, time_points):
-        if not results or 'attention_maps' not in results or len(results['attention_maps']) == 0: return None
-        timestep_idx = len(time_points) // 2; time = time_points[timestep_idx]
-        fig = make_subplots(rows=3, cols=3, subplot_titles=["ST-DGPA Final Weights", "Physics Attention Only", "(E, τ, t) Gating Only", "ST-DGPA vs Physics Attention", "Temporal Coherence Analysis", "Heat Transfer Phase", "Parameter Space 3D", "Attention Network", "Weight Evolution"], vertical_spacing=0.12, horizontal_spacing=0.12, specs=[[{'type': 'xy'}, {'type': 'xy'}, {'type': 'xy'}], [{'type': 'xy'}, {'type': 'xy'}, {'type': 'polar'}], [{'type': 'scene'}, {'type': 'xy'}, {'type': 'xy'}]])
-        final_weights = results['attention_maps'][timestep_idx]; physics_attention = results['physics_attention_maps'][timestep_idx]; ett_gating = results['ett_gating_maps'][timestep_idx]
-        fig.add_trace(go.Bar(x=list(range(len(final_weights))), y=final_weights, name='ST-DGPA Weights', marker_color='blue', showlegend=False), row=1, col=1)
-        fig.add_trace(go.Bar(x=list(range(len(physics_attention))), y=physics_attention, name='Physics Attention', marker_color='green', showlegend=False), row=1, col=2)
-        fig.add_trace(go.Bar(x=list(range(len(ett_gating))), y=ett_gating, name='(E, τ, t) Gating', marker_color='red', showlegend=False), row=1, col=3)
-        fig.add_trace(go.Scatter(x=list(range(len(final_weights))), y=final_weights, mode='lines+markers', name='ST-DGPA Weights', line=dict(color='blue', width=3)), row=2, col=1)
-        fig.add_trace(go.Scatter(x=list(range(len(physics_attention))), y=physics_attention, mode='lines+markers', name='Physics Attention', line=dict(color='green', width=2, dash='dash')), row=2, col=1)
-        if st.session_state.get('summaries') and hasattr(st.session_state.extrapolator, 'source_metadata'):
-            times, weights = [], []
-            for i, weight in enumerate(final_weights):
-                if weight > 0.01 and i < len(st.session_state.extrapolator.source_metadata): times.append(st.session_state.extrapolator.source_metadata[i]['time']); weights.append(weight)
-            if times and weights: fig.add_trace(go.Scatter(x=times, y=weights, mode='markers', marker=dict(size=np.array(weights)*50, color=weights, colorscale='Viridis', showscale=False)), row=2, col=2); fig.add_vline(x=time, line_dash="dash", line_color="red", row=2, col=2)
-        if 'heat_transfer_indicators' in results and results['heat_transfer_indicators']:
-            indicators = results['heat_transfer_indicators'][timestep_idx]
-            if indicators:
-                phase = indicators.get('phase', 'Unknown')
-                val_map = {'Early Heating': [0.9, 0.3, 0.2, 0.1], 'Heating': [0.9, 0.3, 0.2, 0.1], 'Early Cooling': [0.4, 0.8, 0.3, 0.1], 'Diffusion Cooling': [0.2, 0.5, 0.9, 0.2]}
-                values = val_map.get(phase, [0.7, 0.5, 0.3, 0.2])
-                values_closed = values + [values[0]]; categories = ['Heating', 'Cooling', 'Diffusion', 'Adiabatic']; categories_closed = categories + [categories[0]]
-                fig.add_trace(go.Scatterpolar(r=values_closed, theta=categories_closed, fill='toself', fillcolor='rgba(243, 156, 18, 0.35)', line=dict(color='#f39c12', width=3), showlegend=False), row=2, col=3)
-        fig.update_layout(height=1000, title_text=f"ST-DGPA Analysis at t={time} ns (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)", showlegend=True, legend=dict(x=1.05, y=1)); fig.update_polars(radialaxis=dict(visible=True, range=[0, 1]), angularaxis=dict(direction="clockwise"), row=2, col=3)
-        return fig
 
     def create_stdgpa_sankey(self, results, energy_query, duration_query, selected_time,
                             source_metadata, attention_weights, physics_attention,
                             ett_gating, temporal_sim=None, top_k=12):
         """
         Creates a Sankey diagram showing ST-DGPA weight decomposition.
-        
-        Enhanced: 
-        - Shows all sources if top_k >= total sources
-        - Uses global IDs (simulation name) in labels
-        - Improved hover and readability
+        - Shows all sources if top_k == -1 or >= total sources
+        - Uses simulation name (global ID) in labels
         """
         if len(attention_weights) == 0:
             return go.Figure()
         
         total_sources = len(attention_weights)
-        # If top_k is set to show all or larger than total, show all
         if top_k == -1 or top_k >= total_sources:
             top_k = total_sources
         
-        # Sort by final attention weights descending
         top_indices = np.argsort(attention_weights)[-top_k:][::-1]
         top_weights = attention_weights[top_indices]
         top_physics = physics_attention[top_indices]
         top_gating = ett_gating[top_indices]
         top_temporal = temporal_sim[top_indices] if temporal_sim is not None else np.ones_like(top_weights) * 0.5
         
-        # Build labels with simulation name (global ID) and parameters
+        # Labels with global simulation ID (folder name)
         labels = ["🔮 Target Query"]
         for i, idx in enumerate(top_indices):
             meta = source_metadata[idx]
-            # Use simulation name as global ID, plus energy, duration, time
             sim_name = meta['name']
-            # Shorten if too long, but keep readable
             if len(sim_name) > 25:
                 sim_name = sim_name[:22] + "..."
             label = f"<b>{sim_name}</b><br>E={meta['energy']:.1f}mJ, τ={meta['duration']:.1f}ns<br>t={meta['time']:.1f}ns"
@@ -466,43 +550,31 @@ class EnhancedVisualizer:
         
         source_idx, target_idx, values, link_colors = [], [], [], []
         
-        # Connect each source node to the four component nodes
         for i, src_idx in enumerate(top_indices):
             s_node = i + 1
-            # Physics attention
             source_idx.append(s_node); target_idx.append(component_start); values.append(top_physics[i] * 100); link_colors.append("rgba(46, 204, 113, 0.85)")
-            # Gating
             source_idx.append(s_node); target_idx.append(component_start + 1); values.append(top_gating[i] * 100); link_colors.append("rgba(231, 76, 60, 0.85)")
-            # Temporal similarity
             source_idx.append(s_node); target_idx.append(component_start + 2); values.append(top_temporal[i] * 100); link_colors.append("rgba(52, 152, 219, 0.85)")
-            # Final ST-DGPA weight
             source_idx.append(s_node); target_idx.append(component_start + 3); values.append(top_weights[i] * 100); link_colors.append("rgba(155, 89, 182, 0.9)")
 
-        # Connect component nodes to the target query node (aggregated flows)
         for c in range(4):
             comp_node = component_start + c
             agg_value = sum(v for s, t, v in zip(source_idx, target_idx, values) if t == comp_node)
             if agg_value > 0:
                 source_idx.append(comp_node); target_idx.append(0)
-                # Scale down for visual balance
                 values.append(agg_value * 0.6); link_colors.append("rgba(149, 165, 166, 0.7)")
 
         node_colors = ["#FF6B6B"] + ["rgba(155, 89, 182, 0.9)"] * len(top_indices) + ["#2ecc71", "#e74c3c", "#3498db", "#9b59b6"]
         
         fig = go.Figure(data=[go.Sankey(
             node=dict(
-                pad=20,
-                thickness=30,
+                pad=20, thickness=30,
                 line=dict(color="black", width=1),
-                label=labels,
-                color=node_colors,
+                label=labels, color=node_colors,
                 hovertemplate='<b>%{label}</b><br>Total weight: %{value:.2f}<extra></extra>'
             ),
             link=dict(
-                source=source_idx,
-                target=target_idx,
-                value=values,
-                color=link_colors,
+                source=source_idx, target=target_idx, value=values, color=link_colors,
                 hovertemplate='<b>%{source.label}</b> → <b>%{target.label}</b><br>Flow: %{value:.2f}%<extra></extra>'
             )
         )])
@@ -510,12 +582,10 @@ class EnhancedVisualizer:
         fig.update_layout(
             title=dict(
                 text=f"<b>ST-DGPA Weight Decomposition</b><br>Query: E={energy_query:.1f} mJ, τ={duration_query:.1f} ns, t={selected_time:.1f} ns<br>(Showing top {top_k} of {total_sources} source entries)",
-                font=dict(size=22, family="Arial", color="#2c3e50"),
-                x=0.5, y=0.95
+                font=dict(size=22, family="Arial", color="#2c3e50"), x=0.5, y=0.95
             ),
             font=dict(family="Arial", size=14),
-            width=1350,
-            height=850,
+            width=1350, height=850,
             plot_bgcolor='rgba(248, 249, 250, 0.95)',
             paper_bgcolor='white',
             margin=dict(t=120, l=50, r=50, b=50)
@@ -523,19 +593,80 @@ class EnhancedVisualizer:
         return fig
 
     @staticmethod
+    def create_stdgpa_analysis(results, energy_query, duration_query, time_points):
+        if not results or 'attention_maps' not in results or len(results['attention_maps']) == 0:
+            return None
+        timestep_idx = len(time_points) // 2
+        time = time_points[timestep_idx]
+        fig = make_subplots(rows=3, cols=3, subplot_titles=[
+            "ST-DGPA Final Weights", "Physics Attention Only", "(E, τ, t) Gating Only",
+            "ST-DGPA vs Physics Attention", "Temporal Coherence Analysis", "Heat Transfer Phase",
+            "Parameter Space 3D", "Attention Network", "Weight Evolution"
+        ], vertical_spacing=0.12, horizontal_spacing=0.12,
+        specs=[[{'type': 'xy'}, {'type': 'xy'}, {'type': 'xy'}],
+               [{'type': 'xy'}, {'type': 'xy'}, {'type': 'polar'}],
+               [{'type': 'scene'}, {'type': 'xy'}, {'type': 'xy'}]])
+        
+        final_weights = results['attention_maps'][timestep_idx]
+        physics_attention = results['physics_attention_maps'][timestep_idx]
+        ett_gating = results['ett_gating_maps'][timestep_idx]
+        
+        fig.add_trace(go.Bar(x=list(range(len(final_weights))), y=final_weights, name='ST-DGPA Weights', marker_color='blue', showlegend=False), row=1, col=1)
+        fig.add_trace(go.Bar(x=list(range(len(physics_attention))), y=physics_attention, name='Physics Attention', marker_color='green', showlegend=False), row=1, col=2)
+        fig.add_trace(go.Bar(x=list(range(len(ett_gating))), y=ett_gating, name='(E, τ, t) Gating', marker_color='red', showlegend=False), row=1, col=3)
+        fig.add_trace(go.Scatter(x=list(range(len(final_weights))), y=final_weights, mode='lines+markers', name='ST-DGPA Weights', line=dict(color='blue', width=3)), row=2, col=1)
+        fig.add_trace(go.Scatter(x=list(range(len(physics_attention))), y=physics_attention, mode='lines+markers', name='Physics Attention', line=dict(color='green', width=2, dash='dash')), row=2, col=1)
+        
+        if st.session_state.get('summaries') and hasattr(st.session_state.extrapolator, 'source_metadata'):
+            times, weights = [], []
+            for i, weight in enumerate(final_weights):
+                if weight > 0.01 and i < len(st.session_state.extrapolator.source_metadata):
+                    times.append(st.session_state.extrapolator.source_metadata[i]['time'])
+                    weights.append(weight)
+            if times and weights:
+                fig.add_trace(go.Scatter(x=times, y=weights, mode='markers', marker=dict(size=np.array(weights)*50, color=weights, colorscale='Viridis', showscale=False)), row=2, col=2)
+                fig.add_vline(x=time, line_dash="dash", line_color="red", row=2, col=2)
+        
+        if 'heat_transfer_indicators' in results and results['heat_transfer_indicators']:
+            indicators = results['heat_transfer_indicators'][timestep_idx]
+            if indicators:
+                phase = indicators.get('phase', 'Unknown')
+                val_map = {'Early Heating': [0.9, 0.3, 0.2, 0.1], 'Heating': [0.9, 0.3, 0.2, 0.1],
+                           'Early Cooling': [0.4, 0.8, 0.3, 0.1], 'Diffusion Cooling': [0.2, 0.5, 0.9, 0.2]}
+                values = val_map.get(phase, [0.7, 0.5, 0.3, 0.2])
+                values_closed = values + [values[0]]
+                categories = ['Heating', 'Cooling', 'Diffusion', 'Adiabatic']
+                categories_closed = categories + [categories[0]]
+                fig.add_trace(go.Scatterpolar(r=values_closed, theta=categories_closed, fill='toself',
+                                             fillcolor='rgba(243, 156, 18, 0.35)',
+                                             line=dict(color='#f39c12', width=3), showlegend=False), row=2, col=3)
+        
+        fig.update_layout(height=1000, title_text=f"ST-DGPA Analysis at t={time} ns (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)",
+                         showlegend=True, legend=dict(x=1.05, y=1))
+        fig.update_polars(radialaxis=dict(visible=True, range=[0, 1]), angularaxis=dict(direction="clockwise"), row=2, col=3)
+        return fig
+
+    @staticmethod
     def create_temporal_analysis(results, time_points):
         if not results or 'heat_transfer_indicators' not in results: return None
-        fig = make_subplots(rows=2, cols=2, subplot_titles=["Heat Transfer Phase Evolution", "Fourier Number Evolution", "Temporal Confidence", "Thermal Penetration Depth"], vertical_spacing=0.15, horizontal_spacing=0.15)
+        fig = make_subplots(rows=2, cols=2, subplot_titles=["Heat Transfer Phase Evolution", "Fourier Number Evolution",
+                                                            "Temporal Confidence", "Thermal Penetration Depth"],
+                           vertical_spacing=0.15, horizontal_spacing=0.15)
         phases = [ind.get('phase', 'Unknown') for ind in results['heat_transfer_indicators'] if ind]
         phase_mapping = {'Early Heating': 0, 'Heating': 1, 'Early Cooling': 2, 'Diffusion Cooling': 3}
         phase_values = [phase_mapping.get(p, 0) for p in phases]
         fig.add_trace(go.Scatter(x=time_points[:len(phase_values)], y=phase_values, mode='lines+markers', line=dict(color='red', width=3)), row=1, col=1)
-        for phase_name, phase_val in phase_mapping.items(): fig.add_hline(y=phase_val, line_dash="dot", line_color="gray", annotation_text=phase_name, row=1, col=1)
+        for phase_name, phase_val in phase_mapping.items():
+            fig.add_hline(y=phase_val, line_dash="dot", line_color="gray", annotation_text=phase_name, row=1, col=1)
         fourier_numbers = [ind.get('fourier_number', 0) for ind in results['heat_transfer_indicators'] if ind]
-        if fourier_numbers: fig.add_trace(go.Scatter(x=time_points[:len(fourier_numbers)], y=fourier_numbers, mode='lines+markers', line=dict(color='blue', width=3)), row=1, col=2)
-        if 'temporal_confidences' in results: fig.add_trace(go.Scatter(x=time_points[:len(results['temporal_confidences'])], y=results['temporal_confidences'], mode='lines+markers', line=dict(color='green', width=3), fill='tozeroy', fillcolor='rgba(0, 255, 0, 0.2)'), row=2, col=1)
+        if fourier_numbers:
+            fig.add_trace(go.Scatter(x=time_points[:len(fourier_numbers)], y=fourier_numbers, mode='lines+markers', line=dict(color='blue', width=3)), row=1, col=2)
+        if 'temporal_confidences' in results:
+            fig.add_trace(go.Scatter(x=time_points[:len(results['temporal_confidences'])], y=results['temporal_confidences'],
+                                    mode='lines+markers', line=dict(color='green', width=3), fill='tozeroy', fillcolor='rgba(0, 255, 0, 0.2)'), row=2, col=1)
         penetration_depths = [ind.get('thermal_penetration_um', 0) for ind in results['heat_transfer_indicators'] if ind]
-        if penetration_depths: fig.add_trace(go.Scatter(x=time_points[:len(penetration_depths)], y=penetration_depths, mode='lines+markers', line=dict(color='orange', width=3)), row=2, col=2)
+        if penetration_depths:
+            fig.add_trace(go.Scatter(x=time_points[:len(penetration_depths)], y=penetration_depths, mode='lines+markers', line=dict(color='orange', width=3)), row=2, col=2)
         fig.update_layout(height=700, title_text="Temporal Analysis of Heat Transfer Characteristics", showlegend=False)
         return fig
 
@@ -549,36 +680,65 @@ def render_data_viewer():
         return
     sim_name = st.selectbox("Select Simulation", sorted(st.session_state.simulations.keys()), key="viewer_sim_select")
     sim = st.session_state.simulations[sim_name]
-    if not sim.get('has_mesh', False): st.warning("No mesh data. Reload with 'Load Full Mesh'."); return
+    if not sim.get('has_mesh', False):
+        st.warning("Full mesh not loaded. Go to sidebar and reload with 'Load Full Mesh' enabled.")
+        return
     field = st.selectbox("Select Field", sorted(sim['field_info'].keys()), key="viewer_field_select")
     timestep = st.slider("Timestep", 0, sim['n_timesteps'] - 1, 0, key="viewer_timestep_slider")
     opacity = st.slider("Opacity", 0.0, 1.0, 0.9, 0.05, key="viewer_opacity")
     if 'points' in sim and 'fields' in sim and field in sim['fields']:
-        pts = sim['points']; kind, _ = sim['field_info'][field]; raw = sim['fields'][field][timestep]
-        values = np.where(np.isnan(raw), 0, raw) if kind == "scalar" else np.where(np.isnan(np.linalg.norm(raw, axis=1)), 0, np.linalg.norm(raw, axis=1))
+        pts = sim['points']
+        kind, _ = sim['field_info'][field]
+        raw = sim['fields'][field][timestep]
+        if kind == "scalar":
+            values = np.where(np.isnan(raw), 0, raw)
+        else:
+            values = np.where(np.isnan(np.linalg.norm(raw, axis=1)), 0, np.linalg.norm(raw, axis=1))
         if sim.get('triangles') is not None and len(sim['triangles']) > 0:
             valid_triangles = [tri for tri in sim['triangles'] if all(idx < len(pts) for idx in tri)]
-            if valid_triangles: mesh_data = go.Mesh3d(x=pts[:,0], y=pts[:,1], z=pts[:,2], i=np.array(valid_triangles)[:,0], j=np.array(valid_triangles)[:,1], k=np.array(valid_triangles)[:,2], intensity=values, colorscale=st.session_state.selected_colormap, opacity=opacity, hovertemplate='<b>Value:</b> %{intensity:.3f}<extra></extra>')
-            else: mesh_data = go.Scatter3d(x=pts[:,0], y=pts[:,1], z=pts[:,2], mode='markers', marker=dict(size=4, color=values, colorscale=st.session_state.selected_colormap, opacity=opacity), hovertemplate='<b>Value:</b> %{marker.color:.3f}<extra></extra>')
-        else: mesh_data = go.Scatter3d(x=pts[:,0], y=pts[:,1], z=pts[:,2], mode='markers', marker=dict(size=4, color=values, colorscale=st.session_state.selected_colormap, opacity=opacity), hovertemplate='<b>Value:</b> %{marker.color:.3f}<extra></extra>')
-        fig = go.Figure(data=mesh_data); fig.update_layout(title=dict(text=f"{field} at Timestep {timestep+1}<br><sub>{sim_name}</sub>", font=dict(size=20)), scene=dict(aspectmode="data"), height=700); st.plotly_chart(fig, use_container_width=True)
+            if valid_triangles:
+                mesh_data = go.Mesh3d(x=pts[:,0], y=pts[:,1], z=pts[:,2],
+                                     i=np.array(valid_triangles)[:,0], j=np.array(valid_triangles)[:,1], k=np.array(valid_triangles)[:,2],
+                                     intensity=values, colorscale=st.session_state.selected_colormap, opacity=opacity,
+                                     hovertemplate='<b>Value:</b> %{intensity:.3f}<extra></extra>')
+            else:
+                mesh_data = go.Scatter3d(x=pts[:,0], y=pts[:,1], z=pts[:,2], mode='markers',
+                                        marker=dict(size=4, color=values, colorscale=st.session_state.selected_colormap, opacity=opacity),
+                                        hovertemplate='<b>Value:</b> %{marker.color:.3f}<extra></extra>')
+        else:
+            mesh_data = go.Scatter3d(x=pts[:,0], y=pts[:,1], z=pts[:,2], mode='markers',
+                                    marker=dict(size=4, color=values, colorscale=st.session_state.selected_colormap, opacity=opacity),
+                                    hovertemplate='<b>Value:</b> %{marker.color:.3f}<extra></extra>')
+        fig = go.Figure(data=mesh_data)
+        fig.update_layout(title=dict(text=f"{field} at Timestep {timestep+1}<br><sub>{sim_name}</sub>", font=dict(size=20)),
+                         scene=dict(aspectmode="data"), height=700)
+        st.plotly_chart(fig, use_container_width=True)
 
 def render_interpolation_extrapolation():
     st.markdown('<h2 class="sub-header">🔮 Interpolation/Extrapolation Engine</h2>', unsafe_allow_html=True)
-    if not st.session_state.data_loaded: st.markdown('<div class="warning-box"><h3>⚠️ No Data Loaded</h3></div>', unsafe_allow_html=True); return
+    if not st.session_state.data_loaded:
+        st.markdown('<div class="warning-box"><h3>⚠️ No Data Loaded</h3></div>', unsafe_allow_html=True)
+        return
     with st.expander("📋 Loaded Simulations Summary", expanded=True):
         if st.session_state.summaries:
             df_summary = pd.DataFrame([{'Simulation': s['name'], 'Energy (mJ)': s['energy'], 'Duration (ns)': s['duration'], 'Timesteps': len(s['timesteps'])} for s in st.session_state.summaries])
             st.dataframe(df_summary, use_container_width=True)
     col1, col2, col3 = st.columns(3)
-    with col1: energy_query = st.number_input("Energy (mJ)", 0.1, 20.0, 3.5, 0.1, key="interp_energy")
-    with col2: duration_query = st.number_input("Duration (ns)", 0.1, 20.0, 4.2, 0.1, key="interp_duration")
-    with col3: max_time = st.number_input("Max Prediction Time (ns)", 1, 200, 50, 1, key="interp_maxtime")
+    with col1:
+        energy_query = st.number_input("Energy (mJ)", 0.1, 20.0, 3.5, 0.1, key="interp_energy")
+    with col2:
+        duration_query = st.number_input("Duration (ns)", 0.1, 20.0, 4.2, 0.1, key="interp_duration")
+    with col3:
+        max_time = st.number_input("Max Prediction Time (ns)", 1, 200, 50, 1, key="interp_maxtime")
     time_points = np.arange(1, max_time + 1, 2)
     sigma_g = st.slider("Gating Width (σ_g)", 0.05, 1.0, 0.20, 0.05, key="interp_sigma_g")
     s_E, s_tau, s_t = 10.0, 5.0, 20.0
     temporal_weight = st.slider("Temporal Weight", 0.0, 1.0, 0.3, 0.05, key="interp_temporal_weight")
-    st.session_state.extrapolator.sigma_g = sigma_g; st.session_state.extrapolator.s_E = s_E; st.session_state.extrapolator.s_tau = s_tau; st.session_state.extrapolator.s_t = s_t; st.session_state.extrapolator.temporal_weight = temporal_weight
+    st.session_state.extrapolator.sigma_g = sigma_g
+    st.session_state.extrapolator.s_E = s_E
+    st.session_state.extrapolator.s_tau = s_tau
+    st.session_state.extrapolator.s_t = s_t
+    st.session_state.extrapolator.temporal_weight = temporal_weight
     
     if st.button("🚀 Run ST-DGPA Prediction", type="primary", use_container_width=True):
         with st.spinner("Computing ST-DGPA..."):
@@ -586,38 +746,60 @@ def render_interpolation_extrapolation():
             results = st.session_state.extrapolator.predict_time_series(energy_query, duration_query, time_points)
             if results and 'field_predictions' in results and results['field_predictions']:
                 st.session_state.interpolation_results = results
-                st.session_state.interpolation_params = {'energy_query': energy_query, 'duration_query': duration_query, 'time_points': time_points, 'sigma_g': sigma_g, 'temporal_weight': temporal_weight}
+                st.session_state.interpolation_params = {'energy_query': energy_query, 'duration_query': duration_query,
+                                                         'time_points': time_points, 'sigma_g': sigma_g, 'temporal_weight': temporal_weight}
                 st.markdown('<div class="success-box"><h3>✅ Prediction Successful</h3></div>', unsafe_allow_html=True)
                 tab1, tab2, tab3, tab4 = st.tabs(["📈 Predictions", "🧠 ST-DGPA Analysis & Sankey", "⏱️ Temporal Analysis", "🌐 3D Analysis"])
-                with tab1: render_prediction_results(results, time_points, energy_query, duration_query)
-                with tab2: render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points)
-                with tab3: render_temporal_analysis(results, time_points, energy_query, duration_query)
-                with tab4: render_3d_analysis(results, time_points, energy_query, duration_query)
-            else: st.error("Prediction failed.")
+                with tab1:
+                    render_prediction_results(results, time_points, energy_query, duration_query)
+                with tab2:
+                    render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points)
+                with tab3:
+                    render_temporal_analysis(results, time_points, energy_query, duration_query)
+                with tab4:
+                    render_3d_analysis(results, time_points, energy_query, duration_query)
+            else:
+                st.error("Prediction failed.")
     elif st.session_state.interpolation_results is not None:
         params = st.session_state.interpolation_params or {}
-        energy_query = params.get('energy_query', 0); duration_query = params.get('duration_query', 0); time_points = params.get('time_points', [])
+        energy_query = params.get('energy_query', 0)
+        duration_query = params.get('duration_query', 0)
+        time_points = params.get('time_points', [])
         results = st.session_state.interpolation_results
         tab1, tab2, tab3, tab4 = st.tabs(["📈 Predictions", "🧠 ST-DGPA Analysis & Sankey", "⏱️ Temporal Analysis", "🌐 3D Analysis"])
-        with tab1: render_prediction_results(results, time_points, energy_query, duration_query)
-        with tab2: render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points)
-        with tab3: render_temporal_analysis(results, time_points, energy_query, duration_query)
-        with tab4: render_3d_analysis(results, time_points, energy_query, duration_query)
+        with tab1:
+            render_prediction_results(results, time_points, energy_query, duration_query)
+        with tab2:
+            render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points)
+        with tab3:
+            render_temporal_analysis(results, time_points, energy_query, duration_query)
+        with tab4:
+            render_3d_analysis(results, time_points, energy_query, duration_query)
 
 def render_prediction_results(results, time_points, energy_query, duration_query):
     available_fields = list(results['field_predictions'].keys())
-    if not available_fields: st.warning("No field predictions."); return
+    if not available_fields:
+        st.warning("No field predictions.")
+        return
     n_fields = min(len(available_fields), 4)
-    fig = make_subplots(rows=n_fields, cols=1, subplot_titles=[f"Predicted {field}" for field in available_fields[:n_fields]], vertical_spacing=0.1, shared_xaxes=True)
+    fig = make_subplots(rows=n_fields, cols=1, subplot_titles=[f"Predicted {field}" for field in available_fields[:n_fields]],
+                       vertical_spacing=0.1, shared_xaxes=True)
     for idx, field in enumerate(available_fields[:n_fields]):
         row = idx + 1
-        if results['field_predictions'][field]['mean']: fig.add_trace(go.Scatter(x=time_points, y=results['field_predictions'][field]['mean'], mode='lines', name=f'{field} (mean)', line=dict(width=3, color='blue')), row=row, col=1)
-    fig.update_layout(height=300 * n_fields, title_text=f"Field Predictions (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)"); st.plotly_chart(fig, use_container_width=True)
+        if results['field_predictions'][field]['mean']:
+            fig.add_trace(go.Scatter(x=time_points, y=results['field_predictions'][field]['mean'], mode='lines',
+                                    name=f'{field} (mean)', line=dict(width=3, color='blue')), row=row, col=1)
+    fig.update_layout(height=300 * n_fields, title_text=f"Field Predictions (E={energy_query:.1f} mJ, τ={duration_query:.1f} ns)")
+    st.plotly_chart(fig, use_container_width=True)
     if results['confidence_scores']:
-        fig_conf = go.Figure(); fig_conf.add_trace(go.Scatter(x=time_points, y=results['confidence_scores'], mode='lines+markers', line=dict(color='orange', width=3), fill='tozeroy', fillcolor='rgba(255, 165, 0, 0.2)')); fig_conf.update_layout(title="Prediction Confidence Over Time", height=400, yaxis_range=[0, 1]); st.plotly_chart(fig_conf, use_container_width=True)
+        fig_conf = go.Figure()
+        fig_conf.add_trace(go.Scatter(x=time_points, y=results['confidence_scores'], mode='lines+markers',
+                                     line=dict(color='orange', width=3), fill='tozeroy', fillcolor='rgba(255, 165, 0, 0.2)'))
+        fig_conf.update_layout(title="Prediction Confidence Over Time", height=400, yaxis_range=[0, 1])
+        st.plotly_chart(fig_conf, use_container_width=True)
 
 def render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points):
-    """Render ST-DGPA analysis with integrated Sankey diagram - Enhanced with dynamic controls."""
+    """Render ST-DGPA analysis with integrated Sankey diagram - Dynamic top-k and global IDs."""
     if not results.get('physics_attention_maps') or len(results['physics_attention_maps'][0]) == 0:
         st.info("No ST-DGPA attention data.")
         return
@@ -625,42 +807,34 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
     
     col_timestep, col_topk = st.columns([2, 1])
     with col_timestep:
-        selected_timestep_idx = st.slider(
-            "Select timestep for ST-DGPA analysis",
-            0, len(time_points) - 1, len(time_points) // 2,
-            key="stdgpa_timestep"
-        )
+        selected_timestep_idx = st.slider("Select timestep for ST-DGPA analysis", 0, len(time_points) - 1,
+                                         len(time_points) // 2, key="stdgpa_timestep")
     with col_topk:
         total_sources = len(results['attention_maps'][selected_timestep_idx])
-        max_topk = total_sources
-        top_k = st.slider(
-            "Number of source entries to show in Sankey",
-            min_value=5, max_value=max_topk, value=min(15, max_topk),
-            help="Show top N source entries by final attention weight. Set to max to show all.",
-            key="stdgpa_topk"
-        )
+        top_k = st.slider("Number of source entries to show in Sankey", 5, max(total_sources, 5),
+                         value=min(15, total_sources), key="stdgpa_topk",
+                         help="Set to max value to show ALL source entries.")
     
     final_weights = results['attention_maps'][selected_timestep_idx]
     physics_attention = results['physics_attention_maps'][selected_timestep_idx]
     ett_gating = results['ett_gating_maps'][selected_timestep_idx]
     selected_time = time_points[selected_timestep_idx]
     
-    # Compute temporal similarity for Sankey if needed
     temporal_sim = None
     if st.session_state.extrapolator.temporal_weight > 0 and hasattr(st.session_state.extrapolator, 'source_metadata'):
-        query_meta = {'time': selected_time, 'duration': duration_query, 'fourier_number': st.session_state.extrapolator._compute_fourier_number(selected_time)}
+        query_meta = {'time': selected_time, 'duration': duration_query,
+                     'fourier_number': st.session_state.extrapolator._compute_fourier_number(selected_time)}
         temporal_sim = st.session_state.extrapolator._compute_temporal_similarity(query_meta, st.session_state.extrapolator.source_metadata)
-
+    
     sankey_fig = st.session_state.visualizer.create_stdgpa_sankey(
         results=results, energy_query=energy_query, duration_query=duration_query, selected_time=selected_time,
         source_metadata=st.session_state.extrapolator.source_metadata, attention_weights=final_weights,
         physics_attention=physics_attention, ett_gating=ett_gating, temporal_sim=temporal_sim, top_k=top_k
     )
     st.plotly_chart(sankey_fig, use_container_width=True)
-
+    
     st.markdown("##### 📊 ST-DGPA Weight Analysis (Top Sources)")
     if len(final_weights) > 0:
-        # Show top 10 sources with their global IDs
         top_indices = np.argsort(final_weights)[-min(10, len(final_weights)):][::-1]
         comparison_data = []
         for i, idx in enumerate(top_indices):
@@ -675,33 +849,46 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
                 'ST-DGPA Final': f"{final_weights[idx]:.4f}"
             })
         st.dataframe(pd.DataFrame(comparison_data), use_container_width=True)
-        
-        # Optionally show summary statistics
         st.markdown(f"**Total source entries:** {len(final_weights)} | **Top {top_k} shown in Sankey**")
 
 def render_temporal_analysis(results, time_points, energy_query, duration_query):
-    if not results or 'heat_transfer_indicators' not in results: st.info("No temporal data."); return
+    if not results or 'heat_transfer_indicators' not in results:
+        st.info("No temporal data.")
+        return
     fig = st.session_state.visualizer.create_temporal_analysis(results, time_points)
-    if fig: st.plotly_chart(fig, use_container_width=True)
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
 
 def render_3d_analysis(results, time_points, energy_query, duration_query):
     st.markdown('<h4 class="sub-header">🌐 3D Parameter Space</h4>', unsafe_allow_html=True)
-    if not st.session_state.summaries: return
+    if not st.session_state.summaries:
+        return
     train_energies = [s['energy'] for s in st.session_state.summaries]
     train_durations = [s['duration'] for s in st.session_state.summaries]
-    train_max_temps = [np.max(s['field_stats'].get('temperature', {}).get('max', [0])) if s['field_stats'].get('temperature') else 0 for s in st.session_state.summaries]
+    train_max_temps = []
+    for s in st.session_state.summaries:
+        if s['field_stats'].get('temperature'):
+            max_vals = s['field_stats']['temperature'].get('max', [0])
+            train_max_temps.append(np.max(max_vals) if max_vals else 0)
+        else:
+            train_max_temps.append(0)
     query_max_temp = np.max(results['field_predictions'].get('temperature', {}).get('max', [0]))
     fig_temp = go.Figure()
-    fig_temp.add_trace(go.Scatter3d(x=train_energies, y=train_durations, z=train_max_temps, mode='markers', marker=dict(size=8, color=train_max_temps, colorscale='Viridis'), name='Training'))
-    fig_temp.add_trace(go.Scatter3d(x=[energy_query], y=[duration_query], z=[query_max_temp], mode='markers', marker=dict(size=12, color='red', symbol='diamond'), name='Query'))
-    fig_temp.update_layout(title="Parameter Space - Max Temperature", scene=dict(xaxis_title="Energy (mJ)", yaxis_title="Duration (ns)", zaxis_title="Max Temp"), height=500)
+    fig_temp.add_trace(go.Scatter3d(x=train_energies, y=train_durations, z=train_max_temps, mode='markers',
+                                   marker=dict(size=8, color=train_max_temps, colorscale='Viridis'), name='Training'))
+    fig_temp.add_trace(go.Scatter3d(x=[energy_query], y=[duration_query], z=[query_max_temp], mode='markers',
+                                   marker=dict(size=12, color='red', symbol='diamond'), name='Query'))
+    fig_temp.update_layout(title="Parameter Space - Max Temperature",
+                          scene=dict(xaxis_title="Energy (mJ)", yaxis_title="Duration (ns)", zaxis_title="Max Temp"),
+                          height=500)
     st.plotly_chart(fig_temp, use_container_width=True)
 
 # =============================================
 # MAIN APPLICATION
 # =============================================
 def main():
-    st.set_page_config(page_title="Enhanced FEA Laser Platform with ST-DGPA", layout="wide", initial_sidebar_state="expanded", page_icon="🔬")
+    st.set_page_config(page_title="Enhanced FEA Laser Platform with ST-DGPA", layout="wide",
+                      initial_sidebar_state="expanded", page_icon="🔬")
     st.markdown("""
     <style>
     .main-header { font-size: 3rem; background: linear-gradient(90deg, #1E88E5, #4A00E0); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 1.5rem; font-weight: 800; }
@@ -712,29 +899,49 @@ def main():
     """, unsafe_allow_html=True)
     st.markdown('<h1 class="main-header">🔬 Enhanced FEA Laser Simulation Platform</h1>', unsafe_allow_html=True)
     
-    if 'data_loader' not in st.session_state: st.session_state.data_loader = UnifiedFEADataLoader()
-    if 'extrapolator' not in st.session_state: st.session_state.extrapolator = SpatioTemporalGatedPhysicsAttentionExtrapolator()
-    if 'visualizer' not in st.session_state: st.session_state.visualizer = EnhancedVisualizer()
-    if 'data_loaded' not in st.session_state: st.session_state.data_loaded = False
-    if 'interpolation_results' not in st.session_state: st.session_state.interpolation_results = None
-    if 'interpolation_3d_cache' not in st.session_state: st.session_state.interpolation_3d_cache = {}
-    if 'selected_colormap' not in st.session_state: st.session_state.selected_colormap = 'Viridis'
+    # Initialize session state objects only once
+    if 'data_loader' not in st.session_state:
+        st.session_state.data_loader = UnifiedFEADataLoader()
+    if 'extrapolator' not in st.session_state:
+        st.session_state.extrapolator = SpatioTemporalGatedPhysicsAttentionExtrapolator()
+    if 'visualizer' not in st.session_state:
+        st.session_state.visualizer = EnhancedVisualizer()
+    if 'data_loaded' not in st.session_state:
+        st.session_state.data_loaded = False
+    if 'interpolation_results' not in st.session_state:
+        st.session_state.interpolation_results = None
+    if 'interpolation_3d_cache' not in st.session_state:
+        st.session_state.interpolation_3d_cache = {}
+    if 'selected_colormap' not in st.session_state:
+        st.session_state.selected_colormap = 'Viridis'
     
     with st.sidebar:
         st.markdown("### ⚙️ Navigation")
         app_mode = st.radio("Select Mode", ["Data Viewer", "Interpolation/Extrapolation"], key="nav_mode")
         st.markdown("---")
+        
+        # Load data with option to enable full mesh (memory heavy)
+        load_full_mesh = st.checkbox("Load full mesh for 3D viewer (uses more RAM)", value=False)
         if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
-            with st.spinner("Loading..."):
-                sims, summaries = st.session_state.data_loader.load_all_simulations(load_full_mesh=True)
-                st.session_state.simulations = sims; st.session_state.summaries = summaries
-                if sims and summaries: st.session_state.extrapolator.load_summaries(summaries); st.session_state.data_loaded = True
+            with st.spinner("Loading simulation data..."):
+                sims, summaries = st.session_state.data_loader.load_all_simulations(load_full_mesh=load_full_mesh)
+                st.session_state.simulations = sims
+                st.session_state.summaries = summaries
+                if sims and summaries:
+                    st.session_state.extrapolator.load_summaries(summaries)
+                    st.session_state.data_loaded = True
+                    st.success(f"Loaded {len(sims)} simulations.")
+                else:
+                    st.error("No simulations loaded. Check folder structure and file names.")
+        
         st.markdown("---")
         st.markdown("### 🎨 Visualization Settings")
         st.session_state.selected_colormap = st.selectbox("Colormap", EnhancedVisualizer.EXTENDED_COLORMAPS, index=0)
     
-    if app_mode == "Data Viewer": render_data_viewer()
-    elif app_mode == "Interpolation/Extrapolation": render_interpolation_extrapolation()
+    if app_mode == "Data Viewer":
+        render_data_viewer()
+    elif app_mode == "Interpolation/Extrapolation":
+        render_interpolation_extrapolation()
 
 if __name__ == "__main__":
     main()
