@@ -33,6 +33,7 @@ from io import BytesIO   # optional but safe
 import traceback         # optional
 import tempfile          # optional
 from scipy.interpolate import griddata, RBFInterpolator  # optional
+from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings('ignore')
 
