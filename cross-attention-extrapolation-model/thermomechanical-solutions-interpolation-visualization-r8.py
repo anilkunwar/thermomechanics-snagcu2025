@@ -120,7 +120,7 @@ class CacheManager:
             st.session_state.interpolation_field_history.popitem(last=False)
 
 # =============================================
-# 2. UNIFIED DATA LOADER (unchanged)
+# 2. UNIFIED DATA LOADER
 # =============================================
 class UnifiedFEADataLoader:
     def __init__(self):
@@ -288,7 +288,7 @@ class UnifiedFEADataLoader:
         return summary
 
 # =============================================
-# 3. ST-DGPA EXTRAPOLATOR (unchanged, same as original)
+# 3. ST-DGPA EXTRAPOLATOR
 # =============================================
 class SpatioTemporalGatedPhysicsAttentionExtrapolator:
     def __init__(self, sigma_param: float = 0.3, spatial_weight: float = 0.5,
@@ -676,7 +676,7 @@ class PolarRadarVisualizer:
         peak_values = pd.to_numeric(df['Peak_Value'], errors='coerce').values
         sim_names = df.get('Name', [f"Sim {i}" for i in range(len(df))]).tolist()
         
-        # Filter out invalid rows
+        # Filter out invalid rows (but allow zero values)
         valid_mask = (
             np.isfinite(energies) & 
             np.isfinite(durations) & 
@@ -874,7 +874,7 @@ class PolarRadarVisualizer:
         return fig
 
 # =============================================
-# 5. ENHANCED VISUALIZER (unchanged)
+# 5. ENHANCED VISUALIZER
 # =============================================
 class EnhancedVisualizer:
     @staticmethod
@@ -916,7 +916,7 @@ class EnhancedVisualizer:
         return fig
 
 # =============================================
-# 6. EXPORT UTILITIES (unchanged)
+# 6. EXPORT UTILITIES
 # =============================================
 class ExportManager:
     @staticmethod
@@ -1026,7 +1026,7 @@ def main():
                 cache_size = len(st.session_state.interpolation_3d_cache)
                 st.caption(f"Cache size: {cache_size}/20 entries")
 
-    # Main Tabs (Sankey removed)
+    # Main Tabs
     tabs = st.tabs(["📊 Data Overview", "🔮 Interpolation", "🎯 Polar Radar", "🧠 ST-DGPA Analysis", "💾 Export"])
     if not st.session_state.get('data_loaded') or not st.session_state.get('summaries'):
         st.info("👈 Please load simulations using the sidebar to begin analysis.")
@@ -1041,7 +1041,7 @@ def main():
             """)
         return
 
-    # --- TAB 1: Data Overview (unchanged) ---
+    # --- TAB 1: Data Overview ---
     with tabs[0]:
         st.subheader("Loaded Simulations Summary")
         df_summary = pd.DataFrame([{'Name': s['name'], 'Energy (mJ)': s['energy'], 'Duration (ns)': s['duration'], 'Timesteps': len(s['timesteps']), 'Fields': ', '.join(sorted(s['field_stats'].keys())[:3]) + ('...' if len(s['field_stats']) > 3 else '')} for s in st.session_state.summaries])
@@ -1065,7 +1065,7 @@ def main():
                 fig.update_layout(scene=dict(aspectmode="data"), title=f"{field} at Timestep {timestep+1}", height=600)
                 st.plotly_chart(fig, use_container_width=True)
 
-    # --- TAB 2: Interpolation (unchanged) ---
+    # --- TAB 2: Interpolation ---
     with tabs[1]:
         st.subheader("Run ST-DGPA Interpolation")
         c1, c2, c3 = st.columns(3)
@@ -1120,44 +1120,52 @@ def main():
         for s in st.session_state.summaries: all_fields.update(s['field_stats'].keys())
         col1, col2 = st.columns(2)
         with col1: field_type = st.selectbox("Field Type", sorted(all_fields), key="polar_field")
-        with col2: max_timestep = max(s.get('timesteps', [1])[-1] for s in st.session_state.summaries); t_step = st.number_input("Timestep Index", 1, max_timestep, 1, key="polar_timestep")
+        with col2:
+            # Determine the maximum available timestep across all simulations
+            max_possible_t = max((len(s.get('timesteps', [])) for s in st.session_state.summaries), default=1)
+            t_step = st.number_input("Timestep Index", 1, max_possible_t, 1, key="polar_timestep")
 
-        # Build DataFrame with validation
+        # --- ROBUST DATA COLLECTION ---
         rows = []
+        warnings_found = []
+
         for s in st.session_state.summaries:
-            if t_step > len(s['timesteps']):
-                st.warning(f"⚠️ {s['name']}: timestep {t_step} not available (max {len(s['timesteps'])})")
-                continue
-            
             field_stats = s['field_stats'].get(field_type)
             if not field_stats or 'max' not in field_stats:
-                st.warning(f"⚠️ {s['name']}: field '{field_type}' not found")
+                warnings_found.append(f"Field '{field_type}' missing in {s['name']}")
                 continue
-                
+
             idx = t_step - 1
             peak_list = field_stats['max']
-            
+
             if idx >= len(peak_list):
-                st.warning(f"⚠️ {s['name']}: insufficient data for timestep {t_step}")
+                warnings_found.append(f"Timestep {t_step} not available in {s['name']} (only {len(peak_list)} steps)")
                 continue
-                
+
             peak_val = peak_list[idx]
             if not np.isfinite(peak_val):
-                st.warning(f"⚠️ {s['name']}: invalid peak value {peak_val}")
-                continue
-                
+                # Allow zero values (early timesteps may be zero)
+                peak_val = 0.0
+
             rows.append({
                 'Name': s['name'],
                 'Energy': s['energy'],
-                'Duration': s['duration'], 
+                'Duration': s['duration'],
                 'Peak_Value': float(peak_val)
             })
-        
+
         df_polar = pd.DataFrame(rows)
+
         if df_polar.empty:
-            st.error(f"❌ No valid data for field='{field_type}' at timestep={t_step}")
-            st.info("💡 Try: (1) different field, (2) lower timestep, (3) reload simulations")
+            st.error(f"❌ No valid data for **{field_type}** at timestep **{t_step}**")
+            if warnings_found:
+                with st.expander("🔍 Why is data missing?"):
+                    for w in warnings_found[:10]:
+                        st.caption(w)
         else:
+            st.success(f"✅ Loaded {len(df_polar)} simulations for radar")
+            st.caption(f"DataFrame shape: {df_polar.shape} | Energy range: {df_polar['Energy'].min():.2f} – {df_polar['Energy'].max():.2f} mJ")
+
             e_max_data = df_polar['Energy'].max()
             
             # Styling controls
@@ -1264,7 +1272,7 @@ def main():
                 if t_indices:
                     cols = st.columns(len(t_indices))
                     for col, t_idx in zip(cols, t_indices):
-                        if t_idx <= max(len(s.get('timesteps', [])) for s in st.session_state.summaries):
+                        if t_idx <= max_possible_t:
                             rows_t = []
                             for s in st.session_state.summaries:
                                 if t_idx <= len(s['timesteps']):
@@ -1290,7 +1298,7 @@ def main():
                                 st.plotly_chart(fig_t, use_container_width=True)
                                 st.caption(f"Timestep {t_idx}")
 
-    # --- TAB 4: ST-DGPA Analysis (unchanged) ---
+    # --- TAB 4: ST-DGPA Analysis ---
     with tabs[3]:
         st.subheader("🧠 ST-DGPA Attention & Physics Analysis")
         if st.session_state.interpolation_results and st.session_state.get('interpolation_params'):
@@ -1309,7 +1317,7 @@ def main():
         else:
             st.info("ℹ️ Please run an interpolation first (Tab 2) to see ST-DGPA analysis.")
 
-    # --- TAB 5: Export (unchanged) ---
+    # --- TAB 5: Export ---
     with tabs[4]:
         st.subheader("💾 Export Results")
         if st.session_state.interpolation_results and st.session_state.get('interpolation_params'):
