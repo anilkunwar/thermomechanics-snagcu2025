@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ENHANCED LASER SOLDERING ST-DGPA PLATFORM WITH POLAR RADAR & SANKEY VISUALIZATION
+ENHANCED LASER SOLDERING ST-DGPA PLATFORM WITH POLAR RADAR & 3D VISUALIZATION
 ================================================================================
 Complete integrated application for:
 - FEA laser soldering simulation loading from VTU files
 - ST-DGPA (Spatio-Temporal Gated Physics Attention) interpolation/extrapolation
 - Polar Radar Charts: Energy (angular) × Pulse Duration (radial) × Peak T/Stress
-- Interactive Sankey Diagrams showing weight decomposition flow
 - 3D mesh visualization with caching
 - Robust error handling, session state management, and UI controls
 - NEW: Export functionality, advanced filtering, responsive design
+- IMPROVED: Polar radar with full customization and target query color matching
 """
 
 import streamlit as st
@@ -829,22 +829,40 @@ class PolarRadarVisualizer:
         self.color_scale_temp = 'Inferno'
         self.color_scale_stress = 'Plasma'
         self.target_symbol = 'star-diamond'
-        self.target_color = '#00FF7F'
         self.source_symbol = 'circle'
-        self.source_color_scale = 'Viridis'
     
     def create_polar_radar_chart(self, df: pd.DataFrame, field_type: str = 'temperature',
                                 query_params: Optional[Dict] = None,
                                 timestep: int = 1,
                                 width: int = 800, height: int = 700,
                                 show_legend: bool = True,
-                                marker_size_range: Tuple[int, int] = (10, 30)) -> go.Figure:
+                                marker_size_range: Tuple[int, int] = (10, 30),
+                                # ADDED customization parameters
+                                radial_grid_width: float = 1.0,
+                                angular_grid_width: float = 1.0,
+                                radial_tick_font_size: int = 12,
+                                angular_tick_font_size: int = 12,
+                                title_font_size: int = 18,
+                                margin_pad: Dict[str, int] = None,
+                                energy_min: float = None,
+                                energy_max: float = None,
+                                target_peak_value: float = None) -> go.Figure:
         """
-        Create polar radar chart.
-        Angular axis: Energy (mJ)
-        Radial axis: Pulse Duration (ns)
-        Color/Size: Peak Value (Temperature or Stress)
+        Create polar radar chart with extensive customization.
+        
+        Parameters:
+        - radial_grid_width: line width for radial grid
+        - angular_grid_width: line width for angular grid
+        - radial_tick_font_size: font size for radial tick labels
+        - angular_tick_font_size: font size for angular tick labels
+        - title_font_size: font size for the title
+        - margin_pad: dict with 'l', 'r', 't', 'b' margins
+        - energy_min, energy_max: override the angular axis range (if None, use data min/max)
+        - target_peak_value: if provided, color the target marker with the same colorscale
         """
+        if margin_pad is None:
+            margin_pad = {'l': 60, 'r': 60, 't': 80, 'b': 60}
+        
         if df.empty:
             fig = go.Figure()
             fig.update_layout(title="No data available", width=width, height=height)
@@ -861,15 +879,23 @@ class PolarRadarVisualizer:
             fig.update_layout(title="No valid numeric data", width=width, height=height)
             return fig
 
-        # Normalize Energy to Angular Axis (0 to 2*pi)
-        e_min, e_max = np.nanmin(energies), np.nanmax(energies)
-        e_range = e_max - e_min if e_max > e_min else 1.0
+        # Determine energy range for angular axis
+        e_min_data, e_max_data = np.nanmin(energies), np.nanmax(energies)
+        if energy_min is None:
+            e_min = e_min_data
+        else:
+            e_min = energy_min
+        if energy_max is None:
+            e_max = e_max_data
+        else:
+            e_max = energy_max
         
-        # Protect against division by zero or extreme values
+        e_range = e_max - e_min if e_max > e_min else 1.0
         if not np.isfinite(e_range) or e_range < 1e-6:
             e_range = 1.0
             e_min = 0.0
 
+        # Compute angles for source simulations
         angles_rad = 2 * np.pi * (energies - e_min) / e_range
         angles_deg = np.degrees(angles_rad)
 
@@ -924,35 +950,51 @@ class PolarRadarVisualizer:
             if q_e is not None and q_d is not None and np.isfinite(q_e) and np.isfinite(q_d):
                 q_angle_rad = 2 * np.pi * (q_e - e_min) / e_range
                 q_angle_deg = np.degrees(q_angle_rad)
+                
+                # Determine target marker color: use target_peak_value if available, else a default distinct color
+                if target_peak_value is not None and np.isfinite(target_peak_value):
+                    target_color = target_peak_value
+                    target_color_scale = c_scale
+                    target_colorbar = False  # share the same colorbar
+                else:
+                    # Fallback to a fixed color (e.g., lime green) but with warning
+                    target_color = 'limegreen'
+                    target_color_scale = None
+                    st.info("Target peak value not available, using fixed color.")
+                
                 fig.add_trace(go.Scatterpolar(
                     r=[q_d],
                     theta=[q_angle_deg],
                     mode='markers',
                     marker=dict(
                         size=25,
-                        color=self.target_color,
+                        color=target_color,
+                        colorscale=target_color_scale if target_color_scale else None,
                         symbol=self.target_symbol,
-                        line=dict(width=3, color='black')
+                        line=dict(width=3, color='black'),
+                        colorbar=dict(title=title_field) if target_colorbar else None
                     ),
                     name='Target Query',
-                    hovertemplate=f"<b>Target Query</b><br>Energy: {q_e:.2f} mJ<br>Duration: {q_d:.2f} ns<extra></extra>"
+                    hovertemplate=f"<b>Target Query</b><br>Energy: {q_e:.2f} mJ<br>Duration: {q_d:.2f} ns<br>Peak: {target_peak_value:.3f}<extra></extra>"
                 ))
 
-        # Build polar layout
+        # Build polar layout with customization
         polar_layout = dict(
             radialaxis=dict(
                 visible=True,
                 title="Pulse Duration (ns)",
                 gridcolor="lightgray",
-                tickfont=dict(size=12)
+                gridwidth=radial_grid_width,
+                tickfont=dict(size=radial_tick_font_size)
             ),
             angularaxis=dict(
                 visible=True,
                 direction="clockwise",
                 rotation=90,
                 gridcolor="lightgray",
-                tickfont=dict(size=12)
-                # NOTE: Plotly does not support 'title' on angularaxis
+                gridwidth=angular_grid_width,
+                tickfont=dict(size=angular_tick_font_size)
+                # Note: Plotly does not support 'title' on angularaxis
             ),
             bgcolor="white"
         )
@@ -961,6 +1003,7 @@ class PolarRadarVisualizer:
         if e_range > 1e-6 and np.isfinite(e_min) and np.isfinite(e_max):
             try:
                 tick_angles, tick_texts = [], []
+                # Create 6 evenly spaced tick values between e_min and e_max
                 for v in np.linspace(e_min, e_max, 6):
                     angle_rad = 2 * np.pi * (v - e_min) / e_range
                     angle_deg = np.degrees(angle_rad)
@@ -978,8 +1021,8 @@ class PolarRadarVisualizer:
             fig.update_layout(
                 title=dict(
                     text=f"Polar Radar: {title_field} at t={timestep} ns<br>"
-                         f"<span style='font-size:12px; color:gray;'>Angular: Energy (mJ) • Radial: Pulse Duration (ns)</span>",
-                    font=dict(size=18),
+                         f"<span style='font-size:{title_font_size-4}px; color:gray;'>Angular: Energy (mJ) • Radial: Pulse Duration (ns)</span>",
+                    font=dict(size=title_font_size),
                     x=0.5,
                     xanchor='center'
                 ),
@@ -987,7 +1030,7 @@ class PolarRadarVisualizer:
                 width=width,
                 height=height,
                 showlegend=show_legend,
-                margin=dict(l=60, r=60, t=80, b=60),
+                margin=margin_pad,
                 hovermode='closest'
             )
         except Exception as e:
@@ -997,7 +1040,7 @@ class PolarRadarVisualizer:
                 width=width,
                 height=height,
                 showlegend=show_legend,
-                margin=dict(l=50, r=50, t=50, b=50)
+                margin=margin_pad
             )
 
         return fig
@@ -1005,7 +1048,8 @@ class PolarRadarVisualizer:
     def create_multi_timestep_radar(self, df: pd.DataFrame, field_type: str,
                                    query_params: Optional[Dict],
                                    timesteps: List[int],
-                                   width: int = 300, height: int = 300) -> List[go.Figure]:
+                                   width: int = 300, height: int = 300,
+                                   **kwargs) -> List[go.Figure]:
         """Create multiple radar charts for different timesteps"""
         figures = []
         for t in timesteps:
@@ -1014,195 +1058,14 @@ class PolarRadarVisualizer:
             fig = self.create_polar_radar_chart(
                 df_t, field_type, query_params, timestep=t,
                 width=width, height=height, show_legend=(t == timesteps[0]),
-                marker_size_range=(8, 20)
+                marker_size_range=(8, 20),
+                **kwargs
             )
             figures.append(fig)
         return figures
 
 # =============================================
-# 5. SANKEY VISUALIZER (FIXED & ENHANCED)
-# =============================================
-class SankeyVisualizer:
-    """Creates Sankey diagrams showing ST-DGPA weight decomposition flow"""
-    
-    def __init__(self):
-        self.defaults = {
-            'font_family': 'Arial, sans-serif',
-            'font_size': 12,
-            'node_thickness': 20,
-            'node_pad': 15,
-            'width': 1000,
-            'height': 700,
-            'show_math': True,
-            'target_label': 'TARGET',
-            'node_colors': {
-                'target': '#FF6B6B',
-                'source': '#9966FF',
-                'components': ['#FF6B6B', '#4ECDC4', '#95E1D3', '#FFD93D', '#36A2EB', '#9966FF']
-            }
-        }
-
-    def create_stdgpa_sankey(self, sources_: List[Dict], query: Dict, 
-                            customization: Optional[Dict] = None) -> go.Figure:
-        """Create Sankey diagram showing ST-DGPA weight flow from sources through components to target"""
-        cfg = {**self.defaults, **(customization or {})}
-        
-        # Component labels with optional mathematical notation
-        if cfg['show_math']:
-            comp_labels = [
-                'Energy Gate\nφ² = ((E*-Eᵢ)/s_E)²',
-                'Duration Gate\nφ² = ((τ*-τᵢ)/s_τ)²',
-                'Time Gate\nφ² = ((t*-tᵢ)/s_t)²',
-                'Attention\nαᵢ = softmax(QKᵀ/√dₖ)',
-                'Refinement\nwᵢ ∝ αᵢ·gatingᵢ',
-                'Combined\nwᵢ = αᵢ·gatingᵢ / Σ(...)'
-            ]
-        else:
-            comp_labels = ['Energy Gate', 'Duration Gate', 'Time Gate', 'Attention', 'Refinement', 'Combined']
-        
-        # Build node labels and colors
-        labels = [cfg['target_label']]
-        node_colors = [cfg['node_colors']['target']]
-        n_sources = len(sources_)
-        
-        for i in range(n_sources):
-            row = sources_[i]
-            w = row.get('Combined_Weight', 0)
-            opacity = min(0.3 + w * 0.7, 1.0)
-            base = cfg['node_colors']['source']
-            r, g, b = int(base[1:3], 16), int(base[3:5], 16), int(base[5:7], 16)
-            node_colors.append(f'rgba({r},{g},{b},{opacity:.2f})')
-            labels.append(f"Sim {i+1}\nE:{row.get('Energy',0):.1f} τ:{row.get('Duration',0):.1f}")
-        
-        # Add component nodes
-        comp_start = len(labels)
-        labels.extend(comp_labels)
-        node_colors.extend(cfg['node_colors']['components'])
-        
-        # Build links: sources → components → target
-        s_idx, t_idx, vals, l_colors, h_texts = [], [], [], [], []
-        
-        for i in range(n_sources):
-            src = i + 1
-            row = sources_[i]
-            
-            # Compute gate values (scaled for visualization)
-            ve = ((row.get('Energy', query['Energy']) - query['Energy']) / 10.0)**2 * 10
-            vτ = ((row.get('Duration', query['Duration']) - query['Duration']) / 5.0)**2 * 10
-            vt = ((row.get('Time', query['Time']) - query['Time']) / 20.0)**2 * 10
-            va = row.get('Attention_Score', 0) * 100
-            vr = row.get('Refinement', 0) * 100
-            vc = row.get('Combined_Weight', 0) * 100
-            
-            vals_list = [ve, vτ, vt, va, vr, vc]
-            
-            for c in range(6):
-                s_idx.append(src)
-                t_idx.append(comp_start + c)
-                vals.append(max(0.01, vals_list[c]))
-                l_colors.append(cfg['node_colors']['components'][c].replace('rgb', 'rgba').replace(')', ', 0.5)'))
-                
-                # Create hover text
-                if c == 0:
-                    h_texts.append(f"<b>Energy Gate</b><br>S{src} | φ² = ((E*-Eᵢ)/s_E)² = {ve/10:.4f}")
-                elif c == 1:
-                    h_texts.append(f"<b>Duration Gate</b><br>S{src} | φ² = ((τ*-τᵢ)/s_τ)² = {vτ/10:.4f}")
-                elif c == 2:
-                    h_texts.append(f"<b>Time Gate</b><br>S{src} | φ² = ((t*-tᵢ)/s_t)² = {vt/10:.4f}")
-                elif c == 3:
-                    h_texts.append(f"<b>Attention</b><br>S{src} | αᵢ = 1/(1+√φ²)<br>Score: {row.get('Attention_Score',0):.4f}")
-                elif c == 4:
-                    h_texts.append(f"<b>Refinement</b><br>S{src} | wᵢ ∝ αᵢ·gatingᵢ<br>Ref: {row.get('Refinement',0):.4f}")
-                else:
-                    h_texts.append(f"<b>Combined Weight</b><br>S{src} | wᵢ = (αᵢ·gatingᵢ)/Σ(...)<br>Weight: {row.get('Combined_Weight',0):.4f}")
-
-        # Aggregate component → target flows
-        for c in range(6):
-            s_idx.append(comp_start + c)
-            t_idx.append(0)
-            flow_in = sum(v for s, t, v in zip(s_idx[:-6], t_idx[:-6], vals[:-6]) if t == comp_start + c)
-            vals.append(flow_in * 0.5)
-            l_colors.append('rgba(153,102,255,0.6)')
-            h_texts.append(f"<b>Aggregation</b><br>{comp_labels[c]} → TARGET<br>Total: {flow_in:.3f}")
-            
-        # Create Sankey diagram
-        # NOTE: 'line' property is NOT allowed for Sankey links in Plotly
-        fig = go.Figure(go.Sankey(
-            node=dict(
-                pad=cfg['node_pad'],
-                thickness=cfg['node_thickness'],
-                line=dict(color="black", width=0.5),
-                label=labels,
-                color=node_colors,
-                font=dict(family=cfg['font_family'], size=cfg['font_size']),
-                hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'
-            ),
-            link=dict(
-                source=s_idx,
-                target=t_idx,
-                value=vals,
-                color=l_colors,
-                hovertext=h_texts,
-                hovertemplate='%{hovertext}<extra></extra>'
-                # 'line' property removed - not supported for Sankey links
-            )
-        ))
-        
-        # Build title with query parameters
-        title_text = (f"<b>ST-DGPA Attention Flow</b><br>"
-                     f"Query: E={query['Energy']:.2f} mJ, τ={query['Duration']:.2f} ns, t={query['Time']:.2f} ns<br>"
-                     f"<sub>σ_g={cfg.get('sigma_g', 0.20):.2f}, s_E={cfg.get('s_E', 10.0):.1f}, s_τ={cfg.get('s_tau', 5.0):.1f}, s_t={cfg.get('s_t', 20.0):.1f}</sub>")
-        
-        fig.update_layout(
-            title=dict(
-                text=title_text,
-                font=dict(family=cfg['font_family'], size=cfg['font_size']+4),
-                x=0.5,
-                xanchor='center'
-            ),
-            font=dict(family=cfg['font_family'], size=cfg['font_size']),
-            width=cfg['width'],
-            height=cfg['height'],
-            plot_bgcolor='rgba(240, 240, 245, 0.9)',
-            paper_bgcolor='white',
-            margin=dict(t=100, l=50, r=50, b=50),
-            hoverlabel=dict(
-                font=dict(family=cfg['font_family'], size=cfg['font_size']),
-                bgcolor='rgba(44, 62, 80, 0.9)',
-                bordercolor='white',
-                namelength=-1
-            )
-        )
-        
-        return fig
-    
-    def create_comparison_sankey(self, sources_a: List[Dict], sources_b: List[Dict],
-                               query: Dict, label_a: str = "Config A", label_b: str = "Config B",
-                               customization: Optional[Dict] = None) -> go.Figure:
-        """Create side-by-side Sankey comparison of two configurations"""
-        cfg = {**self.defaults, **(customization or {})}
-        
-        # Create two separate Sankey diagrams
-        fig_a = self.create_stdgpa_sankey(sources_a, query, {**cfg, 'width': cfg['width']//2 - 20})
-        fig_b = self.create_stdgpa_sankey(sources_b, query, {**cfg, 'width': cfg['width']//2 - 20})
-        
-        # Combine into subplots
-        from plotly.subplots import make_subplots
-        fig = make_subplots(rows=1, cols=2, subplot_titles=[label_a, label_b])
-        
-        # Add traces from both figures (simplified - in practice would need to extract traces)
-        # This is a placeholder for the full implementation
-        
-        fig.update_layout(
-            title=f"ST-DGPA Comparison: {label_a} vs {label_b}",
-            width=cfg['width'],
-            height=cfg['height']
-        )
-        
-        return fig
-
-# =============================================
-# 6. ENHANCED VISUALIZER
+# 5. ENHANCED VISUALIZER (Sankey removed, keep only analysis)
 # =============================================
 class EnhancedVisualizer:
     """Comprehensive visualization with extended analysis capabilities"""
@@ -1332,7 +1195,7 @@ class EnhancedVisualizer:
         return fig
 
 # =============================================
-# 7. EXPORT UTILITIES
+# 6. EXPORT UTILITIES
 # =============================================
 class ExportManager:
     """Handles export of results in various formats"""
@@ -1395,7 +1258,7 @@ class ExportManager:
             return None
 
 # =============================================
-# 8. MAIN APPLICATION
+# 7. MAIN APPLICATION
 # =============================================
 def main():
     # Page configuration
@@ -1454,8 +1317,7 @@ def main():
         st.session_state.extrapolator = SpatioTemporalGatedPhysicsAttentionExtrapolator()
     if 'polar_viz' not in st.session_state:
         st.session_state.polar_viz = PolarRadarVisualizer()
-    if 'sankey_viz' not in st.session_state:
-        st.session_state.sankey_viz = SankeyVisualizer()
+    # Sankey visualizer removed from UI
     if 'enhanced_viz' not in st.session_state:
         st.session_state.enhanced_viz = EnhancedVisualizer()
     if 'export_manager' not in st.session_state:
@@ -1534,12 +1396,11 @@ def main():
                 cache_size = len(st.session_state.interpolation_3d_cache)
                 st.caption(f"Cache size: {cache_size}/20 entries")
 
-    # Main Tabs
+    # Main Tabs - SANKEY TAB REMOVED
     tabs = st.tabs([
         "📊 Data Overview",
         "🔮 Interpolation",
         "🎯 Polar Radar",
-        "🕸️ Sankey Diagram",
         "🧠 ST-DGPA Analysis",
         "💾 Export"
     ])
@@ -1758,7 +1619,7 @@ def main():
                     with col2: st.metric("Min Confidence", f"{np.min(conf_scores):.3f}")
                     with col3: st.metric("Max Confidence", f"{np.max(conf_scores):.3f}")
 
-    # --- TAB 3: Polar Radar ---
+    # --- TAB 3: Polar Radar (enhanced with customization) ---
     with tabs[2]:
         st.subheader("🎯 Polar Radar Visualization")
         
@@ -1767,15 +1628,46 @@ def main():
         for s in st.session_state.summaries:
             all_fields.update(s['field_stats'].keys())
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
             field_type = st.selectbox("Field Type", sorted(all_fields), key="polar_field")
         with col2:
             max_timestep = max(s.get('timesteps', [1])[-1] for s in st.session_state.summaries)
             t_step = st.number_input("Timestep Index", 1, max_timestep, 1, key="polar_timestep")
-        with col3:
-            show_target = st.checkbox("Show Target Query", value=True, key="polar_show_target")
-            show_legend = st.checkbox("Show Legend", value=True, key="polar_legend")
+        
+        # Sidebar inside tab for customization
+        with st.expander("🎨 Radar Chart Customization", expanded=True):
+            st.markdown("#### Appearance Settings")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                radial_grid_width = st.slider("Radial grid line width", 0.5, 3.0, 1.0, 0.1)
+                radial_tick_font = st.slider("Radial tick font size", 8, 20, 12)
+                title_font = st.slider("Title font size", 12, 28, 18)
+            with col_b:
+                angular_grid_width = st.slider("Angular grid line width", 0.5, 3.0, 1.0, 0.1)
+                angular_tick_font = st.slider("Angular tick font size", 8, 20, 12)
+            
+            st.markdown("#### Figure Margins (pixels)")
+            col_c, col_d, col_e, col_f = st.columns(4)
+            with col_c: margin_l = st.number_input("Left", 20, 200, 60)
+            with col_d: margin_r = st.number_input("Right", 20, 200, 60)
+            with col_e: margin_t = st.number_input("Top", 40, 200, 80)
+            with col_f: margin_b = st.number_input("Bottom", 40, 200, 60)
+            
+            st.markdown("#### Energy Axis Range")
+            col_g, col_h = st.columns(2)
+            with col_g:
+                use_custom_max = st.checkbox("Set custom max energy", value=True)
+                if use_custom_max:
+                    custom_max_energy = st.number_input("Maximum Energy (mJ)", value=8.0, step=0.5)
+                else:
+                    custom_max_energy = None
+            with col_h:
+                use_custom_min = st.checkbox("Set custom min energy", value=False)
+                if use_custom_min:
+                    custom_min_energy = st.number_input("Minimum Energy (mJ)", value=0.0, step=0.5)
+                else:
+                    custom_min_energy = None
         
         # Build DataFrame for polar chart
         rows = []
@@ -1793,23 +1685,37 @@ def main():
         
         df_polar = pd.DataFrame(rows)
         
-        # Warning for degenerate energy range
-        if df_polar['Energy'].nunique() <= 1:
-            st.info("ℹ️ All loaded simulations use the same energy. The polar chart will show a collapsed angular axis.")
-        
-        # Get query params if showing target
+        # Get target query parameters and predicted peak value for the selected timestep and field
         query_params = None
-        if show_target and st.session_state.get('polar_query'):
-            query_params = st.session_state.polar_query
+        target_peak_value = None
+        if st.session_state.get('polar_query') and st.session_state.get('interpolation_results'):
+            q = st.session_state.polar_query
+            query_params = q
+            # Retrieve predicted peak for this timestep and field
+            results = st.session_state.interpolation_results
+            if field_type in results['field_predictions']:
+                # Find index for timestep t_step (convert to 0-based)
+                t_idx = t_step - 1
+                if t_idx < len(results['field_predictions'][field_type]['max']):
+                    target_peak_value = results['field_predictions'][field_type]['max'][t_idx]
         
-        # Create polar radar chart
+        # Create polar radar chart with customization
         fig_polar = st.session_state.polar_viz.create_polar_radar_chart(
             df_polar, field_type, query_params, timestep=t_step,
-            show_legend=show_legend
+            show_legend=True,
+            radial_grid_width=radial_grid_width,
+            angular_grid_width=angular_grid_width,
+            radial_tick_font_size=radial_tick_font,
+            angular_tick_font_size=angular_tick_font,
+            title_font_size=title_font,
+            margin_pad={'l': margin_l, 'r': margin_r, 't': margin_t, 'b': margin_b},
+            energy_min=custom_min_energy if use_custom_min else None,
+            energy_max=custom_max_energy if use_custom_max else None,
+            target_peak_value=target_peak_value
         )
         st.plotly_chart(fig_polar, use_container_width=True)
         
-        # Multi-timestep comparison
+        # Multi-timestep comparison (optional)
         if st.checkbox("Show Multiple Timesteps", key="polar_multi"):
             st.markdown("##### Multi-Timestep Comparison")
             t_indices = st.multiselect("Select Timesteps", [1, 2, 3, 4, 5], default=[1, 3, 5])
@@ -1831,97 +1737,30 @@ def main():
                                         'Peak_Value': peak_t[t_idx-1]
                                     })
                         
+                        # Get target peak for this timestep
+                        target_val = None
+                        if st.session_state.get('interpolation_results'):
+                            if field_type in st.session_state.interpolation_results['field_predictions']:
+                                if t_idx-1 < len(st.session_state.interpolation_results['field_predictions'][field_type]['max']):
+                                    target_val = st.session_state.interpolation_results['field_predictions'][field_type]['max'][t_idx-1]
+                        
                         fig_t = st.session_state.polar_viz.create_polar_radar_chart(
                             pd.DataFrame(rows_t), field_type, query_params,
-                            timestep=t_idx, width=300, height=300, show_legend=(t_idx == t_indices[0])
+                            timestep=t_idx, width=350, height=350, show_legend=(t_idx == t_indices[0]),
+                            radial_grid_width=radial_grid_width, angular_grid_width=angular_grid_width,
+                            radial_tick_font_size=radial_tick_font-2, angular_tick_font_size=angular_tick_font-2,
+                            title_font_size=title_font-2,
+                            margin_pad={'l': 40, 'r': 40, 't': 60, 'b': 40},
+                            energy_min=custom_min_energy if use_custom_min else None,
+                            energy_max=custom_max_energy if use_custom_max else None,
+                            target_peak_value=target_val
                         )
                         with col:
                             st.plotly_chart(fig_t, use_container_width=True)
                             st.caption(f"Timestep {t_idx}")
 
-    # --- TAB 4: Sankey Diagram ---
+    # --- TAB 4: ST-DGPA Analysis (formerly tab 5) ---
     with tabs[3]:
-        st.subheader("🕸️ ST-DGPA Sankey Diagram")
-        
-        if st.session_state.interpolation_results and st.session_state.get('interpolation_params'):
-            res = st.session_state.interpolation_results
-            params = st.session_state.interpolation_params
-            q_E = params['energy_query']
-            q_τ = params['duration_query']
-            
-            # Timestep selector
-            t_sel = st.slider("Select Timestep for Sankey", 1, len(res['attention_maps']), 1, key="sankey_timestep")
-            t_idx = t_sel - 1
-            
-            # Prepare sources data for Sankey
-            sources_data = []
-            weights = res['attention_maps'][t_idx]
-            phys_att = res['physics_attention_maps'][t_idx]
-            gating = res['ett_gating_maps'][t_idx]
-            
-            # Map weights back to sources using metadata
-            for i in range(len(st.session_state.extrapolator.source_metadata)):
-                meta = st.session_state.extrapolator.source_metadata[i]
-                if meta['timestep_idx'] == t_idx and i < len(weights):
-                    sources_data.append({
-                        'Energy': meta['energy'],
-                        'Duration': meta['duration'],
-                        'Time': meta['time'],
-                        'Attention_Score': float(phys_att[i]) if i < len(phys_att) else 0,
-                        'Gating': float(gating[i]) if i < len(gating) else 0,
-                        'Refinement': float(phys_att[i] * gating[i]) if i < len(phys_att) and i < len(gating) else 0,
-                        'Combined_Weight': float(weights[i]) if i < len(weights) else 0
-                    })
-            
-            if sources_data:
-                query = {'Energy': q_E, 'Duration': q_τ, 'Time': t_sel}
-                customization = {
-                    'font_size': 11,
-                    'node_thickness': 15,
-                    'show_math': st.checkbox("Show Math Formulas", value=True, key="sankey_math")
-                }
-                
-                fig_sankey = st.session_state.sankey_viz.create_stdgpa_sankey(
-                    sources_data, query, customization
-                )
-                st.plotly_chart(fig_sankey, use_container_width=True)
-                
-                st.info("💡 Hover over flows to see mathematical formulas and weight breakdown.")
-                
-                # Export options
-                with st.expander("💾 Export Sankey Diagram"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("Export as PNG"):
-                            img_bytes = st.session_state.export_manager.export_plotly_figure(
-                                fig_sankey, format='png'
-                            )
-                            if img_bytes:
-                                st.download_button(
-                                    label="⬇️ Download PNG",
-                                    data=img_bytes,
-                                    file_name=f"sankey_{q_E:.1f}mJ_{q_τ:.1f}ns_t{t_sel}.png",
-                                    mime="image/png"
-                                )
-                    with col2:
-                        if st.button("Export as HTML"):
-                            html_bytes = st.session_state.export_manager.export_plotly_figure(
-                                fig_sankey, format='html'
-                            )
-                            if html_bytes:
-                                st.download_button(
-                                    label="⬇️ Download HTML",
-                                    data=html_bytes,
-                                    file_name=f"sankey_{q_E:.1f}mJ_{q_τ:.1f}ns_t{t_sel}.html",
-                                    mime="text/html"
-                                )
-            else:
-                st.warning("⚠️ No source data matches the selected timestep. Try a different timestep.")
-        else:
-            st.info("ℹ️ Please run an interpolation first (Tab 2) to see the Sankey diagram.")
-
-    # --- TAB 5: ST-DGPA Analysis ---
-    with tabs[4]:
         st.subheader("🧠 ST-DGPA Attention & Physics Analysis")
         
         if st.session_state.interpolation_results and st.session_state.get('interpolation_params'):
@@ -1953,8 +1792,8 @@ def main():
         else:
             st.info("ℹ️ Please run an interpolation first (Tab 2) to see ST-DGPA analysis.")
 
-    # --- TAB 6: Export ---
-    with tabs[5]:
+    # --- TAB 5: Export (formerly tab 6) ---
+    with tabs[4]:
         st.subheader("💾 Export Results")
         
         if st.session_state.interpolation_results and st.session_state.get('interpolation_params'):
@@ -2040,8 +1879,6 @@ def main():
             if st.session_state.get('polar_query'):
                 viz_options.append("Polar Radar Chart")
             if results.get('attention_maps'):
-                viz_options.append("Sankey Diagram")
-            if results.get('attention_maps') and len(results['attention_maps']) > 0:
                 viz_options.append("ST-DGPA Analysis")
             
             if viz_options:
@@ -2049,17 +1886,15 @@ def main():
                 
                 for viz in selected_viz:
                     if viz == "Polar Radar Chart" and st.session_state.get('polar_query'):
-                        # Re-create polar chart for export
-                        field_type = st.session_state.get('polar_field', 'temperature')
-                        t_step = st.session_state.get('polar_timestep', 1)
-                        # ... (rebuild df_polar as in Tab 3)
-                        st.info(f"Polar Radar export ready for {field_type} at timestep {t_step}")
-                    
-                    elif viz == "Sankey Diagram" and results.get('attention_maps'):
-                        st.info("Sankey Diagram export available in Tab 4")
+                        st.info("Polar Radar export: Use the camera icon on the chart or the download button below.")
+                        # We could re-generate the chart with current settings and export, but for simplicity we guide user.
+                        if st.button("Export Current Polar Chart as PNG"):
+                            # Recreate the polar chart with current settings (same as in tab 3)
+                            # This is a bit complex, we'll rely on Plotly's built-in camera icon.
+                            st.info("Please hover over the chart and click the camera icon to save as PNG.")
                     
                     elif viz == "ST-DGPA Analysis" and results.get('attention_maps'):
-                        st.info("ST-DGPA Analysis export available in Tab 5")
+                        st.info("ST-DGPA Analysis export available in Tab 4.")
         else:
             st.info("ℹ️ Please run an interpolation first (Tab 2) to enable export.")
 
