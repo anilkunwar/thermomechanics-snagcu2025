@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ENHANCED FEA LASER SIMULATION PLATFORM WITH ST-DGPA & CUSTOMIZABLE SANKEY DIAGRAM
+ENHANCED FEA LASER SIMULATION PLATFORM WITH ST-DGPA & SCIENTIFICALLY ACCURATE SANKEY DIAGRAM
 ====================================================================
-🔧 FIXED: Streamlit session state conflict resolved - no manual assignment after keyed widgets
+🔧 FIXED: Full scientific labels (E, τ, t) preserved - no truncation
+🔧 FIXED: Custom label edits persist across re-renders via proper session state
+🔧 ENHANCED: Export/Import customization presets for reproducibility
 🔧 ENHANCED: Hex-to-rgba converter for Plotly Sankey compatibility
 🔧 ENHANCED: Alpha slider for link transparency control
-🔧 ENHANCED: Input validation and graceful fallbacks
 """
 import streamlit as st
 import os
@@ -20,7 +21,7 @@ import meshio
 import warnings
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Union
-from io import BytesIO
+from io import BytesIO, StringIO
 import pandas as pd
 import traceback
 from scipy.interpolate import griddata, RBFInterpolator
@@ -32,6 +33,7 @@ import tempfile
 import base64
 import hashlib
 import pickle
+import json
 from functools import lru_cache
 from collections import OrderedDict
 import re as regex
@@ -54,16 +56,7 @@ class ColorUtils:
     
     @staticmethod
     def hex_to_rgba(hex_color: str, alpha: float = 1.0) -> str:
-        """
-        Convert hex color code to rgba string for Plotly.
-        
-        Args:
-            hex_color: Hex color string (e.g., "#2ecc71" or "2ecc71")
-            alpha: Opacity value 0.0-1.0
-            
-        Returns:
-            rgba string: "rgba(r, g, b, alpha)"
-        """
+        """Convert hex color code to rgba string for Plotly."""
         hex_color = hex_color.lstrip('#')
         if len(hex_color) == 3:
             hex_color = ''.join([c*2 for c in hex_color])
@@ -92,6 +85,168 @@ class ColorUtils:
         if ColorUtils.validate_hex_color(user_input):
             return '#' + user_input.lstrip('#')
         return default
+
+# =============================================
+# 🔧 SANKEY CUSTOMIZATION MANAGER
+# =============================================
+class SankeyCustomizationManager:
+    """Manages persistent, scientifically accurate Sankey diagram customizations."""
+    
+    # Default scientific label format with full physics parameters
+    DEFAULT_SOURCE_LABEL_FORMAT = "<b>{name}</b><br>E={energy:.1f} mJ, τ={duration:.1f} ns, t={time:.1f} ns"
+    DEFAULT_TARGET_LABEL = "🔮 Target Query"
+    DEFAULT_COMPONENT_LABELS = {
+        'physics': "⚛️ Physics Attention",
+        'gating': "⚙️ (E,τ,t) Gating", 
+        'temporal': "⏱️ Temporal Similarity",
+        'final': "🎯 ST-DGPA Final Weight"
+    }
+    
+    @staticmethod
+    def initialize_session_state():
+        """Initialize Sankey customization session state with defaults."""
+        if 'sankey_custom_labels' not in st.session_state:
+            st.session_state.sankey_custom_labels = {}
+        if 'sankey_hover_template' not in st.session_state:
+            st.session_state.sankey_hover_template = '<b>%{label}</b><br>Weight: %{value:.2f}<extra></extra>'
+        if 'sankey_font_family' not in st.session_state:
+            st.session_state.sankey_font_family = "Arial"
+        if 'sankey_font_size' not in st.session_state:
+            st.session_state.sankey_font_size = 12
+        if 'sankey_node_pad' not in st.session_state:
+            st.session_state.sankey_node_pad = 20
+        if 'sankey_node_thickness' not in st.session_state:
+            st.session_state.sankey_node_thickness = 30
+        if 'sankey_show_values' not in st.session_state:
+            st.session_state.sankey_show_values = True
+        if 'sankey_orientation' not in st.session_state:
+            st.session_state.sankey_orientation = 'h'
+        # Link colors (hex) and alphas
+        if 'sankey_link_hex' not in st.session_state:
+            st.session_state.sankey_link_hex = {
+                'physics': "#2ecc71", 'gating': "#e74c3c", 
+                'temporal': "#3498db", 'final': "#9b59b6"
+            }
+        if 'sankey_link_alpha' not in st.session_state:
+            st.session_state.sankey_link_alpha = {
+                'physics': 0.85, 'gating': 0.85, 
+                'temporal': 0.85, 'final': 0.90
+            }
+        # Node colors
+        if 'sankey_node_target' not in st.session_state:
+            st.session_state.sankey_node_target = "#FF6B6B"
+        if 'sankey_node_source' not in st.session_state:
+            st.session_state.sankey_node_source = "#9b59b6"
+        if 'sankey_node_components' not in st.session_state:
+            st.session_state.sankey_node_components = {
+                'physics': "#2ecc71", 'gating': "#e74c3c",
+                'temporal': "#3498db", 'final': "#9b59b6"
+            }
+    
+    @staticmethod
+    def generate_default_source_label(meta: Dict[str, Any]) -> str:
+        """Generate scientifically accurate default label with full physics parameters."""
+        name = meta.get('name', 'Unknown')
+        energy = meta.get('energy', 0)
+        duration = meta.get('duration', 0)  # This is τ (tau)
+        time = meta.get('time', 0)
+        
+        return SankeyCustomizationManager.DEFAULT_SOURCE_LABEL_FORMAT.format(
+            name=name, energy=energy, duration=duration, time=time
+        )
+    
+    @staticmethod
+    def get_custom_label(key: str, default: str) -> str:
+        """Get custom label from session state or return default."""
+        return st.session_state.sankey_custom_labels.get(key, default)
+    
+    @staticmethod
+    def set_custom_label(key: str, value: str):
+        """Set custom label in session state (used via widget keys, not called directly)."""
+        st.session_state.sankey_custom_labels[key] = value
+    
+    @staticmethod
+    def reset_to_defaults():
+        """Reset all customizations to scientifically accurate defaults."""
+        st.session_state.sankey_custom_labels = {}
+        st.session_state.sankey_hover_template = '<b>%{label}</b><br>Weight: %{value:.2f}<extra></extra>'
+        st.session_state.sankey_font_family = "Arial"
+        st.session_state.sankey_font_size = 12
+        st.session_state.sankey_node_pad = 20
+        st.session_state.sankey_node_thickness = 30
+        st.session_state.sankey_show_values = True
+        st.session_state.sankey_orientation = 'h'
+        st.session_state.sankey_link_hex = {
+            'physics': "#2ecc71", 'gating': "#e74c3c", 
+            'temporal': "#3498db", 'final': "#9b59b6"
+        }
+        st.session_state.sankey_link_alpha = {
+            'physics': 0.85, 'gating': 0.85, 
+            'temporal': 0.85, 'final': 0.90
+        }
+        st.session_state.sankey_node_target = "#FF6B6B"
+        st.session_state.sankey_node_source = "#9b59b6"
+        st.session_state.sankey_node_components = {
+            'physics': "#2ecc71", 'gating': "#e74c3c",
+            'temporal': "#3498db", 'final': "#9b59b6"
+        }
+    
+    @staticmethod
+    def export_customizations() -> str:
+        """Export current customizations as JSON string for saving/sharing."""
+        config = {
+            'custom_labels': st.session_state.sankey_custom_labels,
+            'hover_template': st.session_state.sankey_hover_template,
+            'font_family': st.session_state.sankey_font_family,
+            'font_size': st.session_state.sankey_font_size,
+            'node_pad': st.session_state.sankey_node_pad,
+            'node_thickness': st.session_state.sankey_node_thickness,
+            'show_values': st.session_state.sankey_show_values,
+            'orientation': st.session_state.sankey_orientation,
+            'link_hex': st.session_state.sankey_link_hex,
+            'link_alpha': st.session_state.sankey_link_alpha,
+            'node_target': st.session_state.sankey_node_target,
+            'node_source': st.session_state.sankey_node_source,
+            'node_components': st.session_state.sankey_node_components,
+            'timestamp': datetime.now().isoformat()
+        }
+        return json.dumps(config, indent=2)
+    
+    @staticmethod
+    def import_customizations(json_str: str) -> bool:
+        """Import customizations from JSON string. Returns success status."""
+        try:
+            config = json.loads(json_str)
+            if 'custom_labels' in config:
+                st.session_state.sankey_custom_labels = config['custom_labels']
+            if 'hover_template' in config:
+                st.session_state.sankey_hover_template = config['hover_template']
+            if 'font_family' in config:
+                st.session_state.sankey_font_family = config['font_family']
+            if 'font_size' in config:
+                st.session_state.sankey_font_size = config['font_size']
+            if 'node_pad' in config:
+                st.session_state.sankey_node_pad = config['node_pad']
+            if 'node_thickness' in config:
+                st.session_state.sankey_node_thickness = config['node_thickness']
+            if 'show_values' in config:
+                st.session_state.sankey_show_values = config['show_values']
+            if 'orientation' in config:
+                st.session_state.sankey_orientation = config['orientation']
+            if 'link_hex' in config:
+                st.session_state.sankey_link_hex = config['link_hex']
+            if 'link_alpha' in config:
+                st.session_state.sankey_link_alpha = config['link_alpha']
+            if 'node_target' in config:
+                st.session_state.sankey_node_target = config['node_target']
+            if 'node_source' in config:
+                st.session_state.sankey_node_source = config['node_source']
+            if 'node_components' in config:
+                st.session_state.sankey_node_components = config['node_components']
+            return True
+        except (json.JSONDecodeError, KeyError) as e:
+            st.error(f"Failed to import customizations: {e}")
+            return False
 
 # =============================================
 # CACHE MANAGEMENT UTILITIES
@@ -762,7 +917,8 @@ class EnhancedVisualizer:
                             node_pad=20, node_thickness=30, show_values=True, 
                             orientation='h', hover_template=None):
         """
-        🔧 FIXED: Uses hex colors for Streamlit compatibility, converts to rgba for Plotly
+        🔧 FIXED: Scientifically accurate labels with full E, τ, t parameters
+        🔧 FIXED: Custom labels persist via proper session state handling
         """
         if len(attention_weights) == 0:
             return go.Figure()
@@ -777,30 +933,42 @@ class EnhancedVisualizer:
         top_gating = ett_gating[top_indices]
         top_temporal = temporal_sim[top_indices] if temporal_sim is not None else np.ones_like(top_weights) * 0.5
         
+        # 🔧 Build labels with FULL scientific format (E, τ, t) - NO TRUNCATION
         labels = []
-        if custom_labels and 'target' in custom_labels:
+        
+        # Target label
+        if custom_labels and 'target' in custom_labels and custom_labels['target'].strip():
             labels.append(custom_labels['target'])
         else:
             labels.append("🔮 Target Query")
         
+        # Source labels with full physics parameters
         for i, idx in enumerate(top_indices):
             meta = source_metadata[idx]
-            sim_name = meta['name']
-            if custom_labels and f'source_{i}' in custom_labels:
-                label = custom_labels[f'source_{i}']
+            custom_key = f'source_{i}'
+            
+            # Use custom label if provided and non-empty, otherwise generate full scientific label
+            if custom_labels and custom_key in custom_labels and custom_labels[custom_key].strip():
+                label = custom_labels[custom_key]
             else:
-                if len(sim_name) > 25:
-                    sim_name = sim_name[:22] + "..."
-                label = f"<b>{sim_name}</b><br>E={meta['energy']:.1f}mJ, τ={meta['duration']:.1f}ns<br>t={meta['time']:.1f}ns"
+                # 🔧 FULL SCIENTIFIC LABEL FORMAT - preserves E, τ (duration), and t
+                sim_name = meta['name']
+                energy = meta['energy']
+                duration = meta['duration']  # This is τ (tau)
+                time = meta['time']
+                label = f"<b>{sim_name}</b><br>E={energy:.1f} mJ, τ={duration:.1f} ns, t={time:.1f} ns"
             labels.append(label)
         
+        # Component labels
         component_start = len(labels)
-        component_labels = ["⚛️ Physics Attention", "⚙️ (E,τ,t) Gating", "⏱️ Temporal Sim.", "🎯 ST-DGPA Final"]
-        if custom_labels:
-            for j, comp_key in enumerate(['physics', 'gating', 'temporal', 'final']):
-                if comp_key in custom_labels:
-                    component_labels[j] = custom_labels[comp_key]
-        labels.extend(component_labels)
+        component_keys = ['physics', 'gating', 'temporal', 'final']
+        component_defaults = ["⚛️ Physics Attention", "⚙️ (E,τ,t) Gating", "⏱️ Temporal Similarity", "🎯 ST-DGPA Final Weight"]
+        
+        for j, (ckey, cdefault) in enumerate(zip(component_keys, component_defaults)):
+            if custom_labels and ckey in custom_labels and custom_labels[ckey].strip():
+                labels.append(custom_labels[ckey])
+            else:
+                labels.append(cdefault)
         
         source_idx, target_idx, values, link_colors_list = [], [], [], []
         
@@ -815,6 +983,7 @@ class EnhancedVisualizer:
         while len(link_alpha) < 4:
             link_alpha.append(default_link_alpha[len(link_alpha) % len(default_link_alpha)])
         
+        # Connect source nodes to component nodes with rgba conversion
         for i, src_idx in enumerate(top_indices):
             s_node = i + 1
             source_idx.append(s_node); target_idx.append(component_start)
@@ -830,6 +999,7 @@ class EnhancedVisualizer:
             values.append(top_weights[i] * 100)
             link_colors_list.append(ColorUtils.hex_to_rgba(link_hex[3], link_alpha[3]))
 
+        # Connect component nodes to target
         for c in range(4):
             comp_node = component_start + c
             agg_value = sum(v for s, t, v in zip(source_idx, target_idx, values) if t == comp_node)
@@ -838,6 +1008,7 @@ class EnhancedVisualizer:
                 values.append(agg_value * 0.6)
                 link_colors_list.append("rgba(149, 165, 166, 0.7)")
 
+        # Node colors
         default_node_colors = ["#FF6B6B"] + ["#9b59b6"] * len(top_indices) + ["#2ecc71", "#e74c3c", "#3498db", "#9b59b6"]
         if node_colors and isinstance(node_colors, list):
             node_colors_final = [ColorUtils.get_safe_color(c) for c in node_colors[:len(labels)]]
@@ -1213,12 +1384,12 @@ def render_prediction_results(results, time_points, energy_query, duration_query
         st.plotly_chart(fig_conf, use_container_width=True)
 
 def render_stdgpa_attention_visualization(results, energy_query, duration_query, time_points):
-    """🔧 FIXED: Sankey customization with proper Streamlit session state handling."""
+    """🔧 FIXED: Scientifically accurate Sankey with persistent custom labels."""
     if not results.get('physics_attention_maps') or len(results['physics_attention_maps'][0]) == 0:
         st.info("No ST-DGPA attention data available.")
         return
     
-    st.markdown('<h4 class="sub-header">🧠 ST-DGPA Weight Decomposition (Customizable Sankey)</h4>', unsafe_allow_html=True)
+    st.markdown('<h4 class="sub-header">🧠 ST-DGPA Weight Decomposition (Scientific Sankey)</h4>', unsafe_allow_html=True)
     
     col_timestep, col_topk = st.columns([2, 1])
     with col_timestep:
@@ -1253,47 +1424,65 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             query_meta, st.session_state.extrapolator.source_metadata
         )
 
-    # 🔧 FIXED: Sankey Customization Panel with proper session state handling
+    # 🔧 Sankey Customization Panel with PERSISTENT labels
     with st.expander("🎨 Customize Sankey Diagram", expanded=False):
-        st.info("💡 **Note**: Color pickers use hex codes (#RRGGBB). Opacity is controlled separately.")
+        st.info("💡 **Scientific Labels**: Full format `E={energy} mJ, τ={duration} ns, t={time} ns` preserved. Edits persist across re-renders.")
         
         st.markdown("##### ✏️ Edit Node Labels")
         
-        # Access session state directly - Streamlit manages it via keys
+        # Target label - Streamlit manages via key, we read from session_state
         target_label = st.text_input(
             "Target Query Label", 
-            value=st.session_state.sankey_custom_labels.get('target', "🔮 Target Query"),
+            value=SankeyCustomizationManager.get_custom_label('target', SankeyCustomizationManager.DEFAULT_TARGET_LABEL),
             key="custom_target_label"
         )
-        # 🔧 FIXED: NO manual assignment - Streamlit handles via key
+        # ✅ NO manual assignment - Streamlit auto-syncs via key
         
-        st.markdown("**Source Node Labels** (edit individual entries):")
+        st.markdown("**Source Node Labels** (full scientific format with E, τ, t):")
         top_indices = np.argsort(final_weights)[-top_k:][::-1]
         
         for i, idx in enumerate(top_indices):
             meta = st.session_state.extrapolator.source_metadata[idx]
-            default_label = f"{meta['name'][:25]}... E={meta['energy']:.1f}mJ" if len(meta['name']) > 25 else f"{meta['name']} E={meta['energy']:.1f}mJ"
             custom_key = f'source_{i}'
-            current_val = st.session_state.sankey_custom_labels.get(custom_key, default_label)
-            new_val = st.text_input(f"Source {i+1} Label", value=current_val, key=f"custom_source_{i}_label")
-            # 🔧 FIXED: NO manual assignment - Streamlit handles via key
+            
+            # Generate default full scientific label
+            default_label = SankeyCustomizationManager.generate_default_source_label(meta)
+            
+            # Get current value from session state (auto-managed by Streamlit via key)
+            current_val = SankeyCustomizationManager.get_custom_label(custom_key, default_label)
+            
+            # Text input with unique key - Streamlit auto-manages value
+            new_val = st.text_input(
+                f"Source {i+1} (idx {idx})", 
+                value=current_val, 
+                key=f"custom_source_{i}_label",
+                help="Edit label. Leave empty to use default scientific format."
+            )
+            # ✅ NO manual assignment - Streamlit handles via key
         
         st.markdown("**Component Node Labels**:")
         comp_cols = st.columns(2)
         comp_keys = ['physics', 'gating', 'temporal', 'final']
-        comp_defaults = ["⚛️ Physics Attention", "⚙️ (E,τ,t) Gating", "⏱️ Temporal Sim.", "🎯 ST-DGPA Final"]
+        comp_defaults = SankeyCustomizationManager.DEFAULT_COMPONENT_LABELS
+        
         for j, (ckey, cdefault) in enumerate(zip(comp_keys, comp_defaults)):
             col_idx = j % 2
             with comp_cols[col_idx]:
-                val = st.text_input(f"{ckey.title()} Label", 
-                                   value=st.session_state.sankey_custom_labels.get(ckey, cdefault),
-                                   key=f"custom_comp_{ckey}")
-                # 🔧 FIXED: NO manual assignment
+                val = st.text_input(
+                    f"{ckey.title()} Label", 
+                    value=SankeyCustomizationManager.get_custom_label(ckey, cdefault),
+                    key=f"custom_comp_{ckey}"
+                )
+                # ✅ NO manual assignment
         
         st.markdown("---")
         st.markdown("##### 🔤 Font & Typography")
-        font_family = st.selectbox("Font Family", ["Arial", "Courier New", "Times New Roman", "Verdana", "Georgia"], 
-                                   index=0, key="sankey_font_family")
+        font_family = st.selectbox(
+            "Font Family", 
+            ["Arial", "Courier New", "Times New Roman", "Verdana", "Georgia"], 
+            index=0, 
+            key="sankey_font_family"
+        )
         font_size = st.slider("Font Size", 8, 24, 12, key="sankey_font_size")
         
         st.markdown("##### 🎨 Node Colors (Hex)")
@@ -1302,6 +1491,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         comp_colors = st.columns(4)
         comp_color_keys = ['physics', 'gating', 'temporal', 'final']
         comp_color_defaults = ["#2ecc71", "#e74c3c", "#3498db", "#9b59b6"]
+        
         node_colors_list = [node_color_1] + [node_color_2] * top_k
         for j, (ckey, cdefault) in enumerate(zip(comp_color_keys, comp_color_defaults)):
             with comp_colors[j]:
@@ -1330,30 +1520,78 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         node_pad = st.slider("Node Padding", 5, 50, 20, key="sankey_node_pad")
         node_thickness = st.slider("Node Thickness", 10, 50, 30, key="sankey_node_thickness")
         show_values = st.checkbox("Show Link Values", value=True, key="sankey_show_values")
-        orientation = st.radio("Orientation", ['h', 'v'], horizontal=True, key="sankey_orientation", 
-                              format_func=lambda x: "Horizontal" if x == 'h' else "Vertical")
+        orientation = st.radio(
+            "Orientation", ['h', 'v'], 
+            horizontal=True, 
+            key="sankey_orientation", 
+            format_func=lambda x: "Horizontal" if x == 'h' else "Vertical"
+        )
         
-        # 🔧 FIXED: Hover template - NO manual session state assignment after widget
+        # Hover template - NO manual session state assignment after widget
         hover_template = st.text_area(
             "Custom Hover Template (Plotly format)",
             value=st.session_state.sankey_hover_template,
             key="sankey_hover_template",
             help="Use Plotly variables: %{label}, %{value}, %{source.label}, %{target.label}"
         )
-        # 🔧 REMOVED: st.session_state.sankey_hover_template = hover_template
+        # ✅ REMOVED: st.session_state.sankey_hover_template = hover_template
         
-        # Reset button - properly reset both custom labels and hover template
-        if st.button("🔄 Reset to Defaults", key="sankey_reset"):
-            st.session_state.sankey_custom_labels = {}
-            st.session_state.sankey_hover_template = (
-                '<b>%{label}</b><br>Weight: %{value:.2f}<extra></extra>'
-            )
+        st.markdown("---")
+        st.markdown("##### 💾 Export/Import Presets")
+        
+        col_exp1, col_exp2 = st.columns(2)
+        with col_exp1:
+            if st.button("📤 Export Customizations", key="btn_export"):
+                config_json = SankeyCustomizationManager.export_customizations()
+                st.download_button(
+                    label="⬇️ Download JSON",
+                    data=config_json,
+                    file_name=f"sankey_config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json",
+                    key="btn_download_config"
+                )
+        
+        with col_exp2:
+            import_json = st.text_area("📥 Import JSON Config", height=100, key="import_json_area")
+            if st.button("🔄 Apply Imported Config", key="btn_import"):
+                if import_json.strip():
+                    if SankeyCustomizationManager.import_customizations(import_json):
+                        st.success("✅ Customizations imported successfully!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to import. Check JSON format.")
+                else:
+                    st.warning("⚠️ Please paste JSON configuration first.")
+        
+        # Reset button
+        if st.button("🔄 Reset to Scientific Defaults", key="sankey_reset"):
+            SankeyCustomizationManager.reset_to_defaults()
+            st.success("✅ Reset to scientifically accurate defaults!")
             st.rerun()
     
-    # Build customization dict for Sankey creation
-    custom_labels = st.session_state.sankey_custom_labels.copy()
+    # 🔧 Build custom_labels dict from session state (proper persistence)
+    custom_labels = {}
     
-    # 🔧 FIXED: Create Sankey with hex colors + alpha conversion
+    # Target label
+    target_val = st.session_state.get('custom_target_label', '').strip()
+    if target_val:
+        custom_labels['target'] = target_val
+    
+    # Source labels
+    for i in range(top_k):
+        key = f'custom_source_{i}_label'
+        val = st.session_state.get(key, '').strip()
+        if val:
+            custom_labels[f'source_{i}'] = val
+    
+    # Component labels
+    for ckey in ['physics', 'gating', 'temporal', 'final']:
+        key = f'custom_comp_{ckey}'
+        val = st.session_state.get(key, '').strip()
+        if val:
+            custom_labels[ckey] = val
+    
+    # 🔧 Create Sankey with full scientific labels and persistent customizations
     sankey_fig = st.session_state.visualizer.create_stdgpa_sankey(
         results=results, 
         energy_query=energy_query, 
@@ -1366,15 +1604,15 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         temporal_sim=temporal_sim, 
         top_k=top_k,
         custom_labels=custom_labels,
-        font_size=font_size,
-        font_family=font_family,
+        font_size=st.session_state.sankey_font_size,
+        font_family=st.session_state.sankey_font_family,
         node_colors=node_colors_list,
         link_colors_hex=link_hex_list,
         link_alphas=link_alpha_list,
-        node_pad=node_pad,
-        node_thickness=node_thickness,
-        show_values=show_values,
-        orientation=orientation,
+        node_pad=st.session_state.sankey_node_pad,
+        node_thickness=st.session_state.sankey_node_thickness,
+        show_values=st.session_state.sankey_show_values,
+        orientation=st.session_state.sankey_orientation,
         hover_template=hover_template if hover_template.strip() else None
     )
     st.plotly_chart(sankey_fig, use_container_width=True)
@@ -1386,16 +1624,17 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
         for i, idx in enumerate(top_indices):
             meta = st.session_state.extrapolator.source_metadata[idx]
             comparison_data.append({
-                'Global ID (Simulation)': meta['name'],
-                'Time (ns)': f"{meta['time']:.1f}",
+                'Simulation': meta['name'],
                 'Energy (mJ)': f"{meta['energy']:.1f}",
-                'Duration (ns)': f"{meta['duration']:.1f}",
+                'Duration τ (ns)': f"{meta['duration']:.1f}",  # τ = duration
+                'Time t (ns)': f"{meta['time']:.1f}",
                 'Physics Attn': f"{physics_attention[idx]:.4f}",
                 '(E,τ,t) Gating': f"{ett_gating[idx]:.4f}",
                 'ST-DGPA Final': f"{final_weights[idx]:.4f}"
             })
         st.dataframe(pd.DataFrame(comparison_data), use_container_width=True)
         st.markdown(f"**Total source entries:** {len(final_weights)} | **Top {top_k} shown in Sankey**")
+        st.caption("💡 Labels show: `Simulation Name | E=Energy (mJ), τ=Duration (ns), t=Time (ns)`")
 
 def render_temporal_analysis(results, time_points, energy_query, duration_query):
     if not results or 'heat_transfer_indicators' not in results: 
@@ -1429,7 +1668,7 @@ def render_3d_analysis(results, time_points, energy_query, duration_query):
     ))
     fig_temp.update_layout(
         title="Parameter Space - Max Temperature", 
-        scene=dict(xaxis_title="Energy (mJ)", yaxis_title="Duration (ns)", zaxis_title="Max Temp"), 
+        scene=dict(xaxis_title="Energy (mJ)", yaxis_title="Duration τ (ns)", zaxis_title="Max Temp"), 
         height=500
     )
     st.plotly_chart(fig_temp, use_container_width=True)
@@ -1439,7 +1678,7 @@ def render_3d_analysis(results, time_points, energy_query, duration_query):
 # =============================================
 def main():
     st.set_page_config(
-        page_title="Enhanced FEA Laser Platform with Customizable Sankey", 
+        page_title="Enhanced FEA Laser Platform with Scientific Sankey", 
         layout="wide", 
         initial_sidebar_state="expanded", 
         page_icon="🔬"
@@ -1457,7 +1696,10 @@ def main():
     
     st.markdown('<h1 class="main-header">🔬 Enhanced FEA Laser Simulation Platform</h1>', unsafe_allow_html=True)
     
-    # Initialize session state
+    # 🔧 Initialize Sankey customization manager
+    SankeyCustomizationManager.initialize_session_state()
+    
+    # Initialize other session state
     if 'data_loader' not in st.session_state: 
         st.session_state.data_loader = UnifiedFEADataLoader()
     if 'extrapolator' not in st.session_state: 
@@ -1472,10 +1714,6 @@ def main():
         st.session_state.interpolation_3d_cache = {}
     if 'selected_colormap' not in st.session_state: 
         st.session_state.selected_colormap = 'Viridis'
-    if 'sankey_custom_labels' not in st.session_state:
-        st.session_state.sankey_custom_labels = {}
-    if 'sankey_hover_template' not in st.session_state:
-        st.session_state.sankey_hover_template = '<b>%{label}</b><br>Weight: %{value:.2f}<extra></extra>'
     
     with st.sidebar:
         st.markdown("### ⚙️ Navigation")
@@ -1500,10 +1738,15 @@ def main():
         
         st.markdown("### 🎯 Sankey Style Presets")
         if st.button("🌈 Colorful", key="preset_colorful"):
-            st.session_state.sankey_custom_labels = {}
+            SankeyCustomizationManager.reset_to_defaults()
             st.rerun()
-        if st.button("🔬 Minimal", key="preset_minimal"):
-            st.session_state.sankey_custom_labels = {'target': 'Query', 'physics': 'Physics', 'gating': 'Gating', 'temporal': 'Temporal', 'final': 'Final'}
+        if st.button("🔬 Minimal Scientific", key="preset_minimal"):
+            SankeyCustomizationManager.reset_to_defaults()
+            st.session_state.sankey_custom_labels = {
+                'target': 'Query',
+                'physics': 'Physics', 'gating': 'Gating', 
+                'temporal': 'Temporal', 'final': 'Final'
+            }
             st.rerun()
     
     if app_mode == "Data Viewer": 
