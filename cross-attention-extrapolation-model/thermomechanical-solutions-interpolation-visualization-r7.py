@@ -1,19 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ENHANCED LASER SOLDERING ST-DGPA PLATFORM WITH POLAR RADAR & 3D VISUALIZATION
-================================================================================
+ENHANCED LASER SOLDERING ST-DGPA PLATFORM WITH AUTOSCALING POLAR RADAR
+=========================================================================
 Complete integrated application for:
 - FEA laser soldering simulation loading from VTU files
 - ST-DGPA (Spatio-Temporal Gated Physics Attention) interpolation/extrapolation
-- ENHANCED Polar Radar Charts: Energy (angular) × Pulse Duration (radial) × Peak T/Stress
-  - Target query uses same color scale as sources
-  - Full styling controls (fonts, line widths, margins, grid, etc.)
-  - Energy axis can be set to custom max (default 8.0 mJ)
-  - Normalization by reference maximum for consistent scaling
+- ENHANCED Polar Radar Charts with intelligent autoscaling (angular axis adapts to data)
 - 3D mesh visualization with caching
-- Robust error handling, session state management, and UI controls
-- Export functionality (JSON, CSV, images, VTU)
+- Export functionality
 """
 
 import streamlit as st
@@ -34,7 +29,6 @@ import hashlib
 from collections import OrderedDict
 import json
 import time
-from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings('ignore')
 
@@ -54,8 +48,6 @@ for d in [FEA_SOLUTIONS_DIR, VISUALIZATION_OUTPUT_DIR, TEMP_ANIMATION_DIR, EXPOR
 # 1. CACHE MANAGEMENT UTILITIES
 # =============================================
 class CacheManager:
-    """Manages caching of interpolation results to prevent recomputation"""
-    
     @staticmethod
     def generate_cache_key(field_name: str, timestep_idx: int, energy: float, 
                           duration: float, time: float, sigma_param: float,
@@ -126,11 +118,9 @@ class CacheManager:
             st.session_state.interpolation_field_history.popitem(last=False)
 
 # =============================================
-# 2. UNIFIED DATA LOADER
+# 2. UNIFIED DATA LOADER (unchanged)
 # =============================================
 class UnifiedFEADataLoader:
-    """Enhanced data loader with comprehensive field extraction and validation"""
-    
     def __init__(self):
         self.simulations = {}
         self.summaries = []
@@ -296,11 +286,9 @@ class UnifiedFEADataLoader:
         return summary
 
 # =============================================
-# 3. ST-DGPA EXTRAPOLATOR (simplified for brevity, same as original)
+# 3. ST-DGPA EXTRAPOLATOR (unchanged, same as original)
 # =============================================
 class SpatioTemporalGatedPhysicsAttentionExtrapolator:
-    """Advanced extrapolator with Spatio-Temporal Gated Physics Attention (ST-DGPA)"""
-    
     def __init__(self, sigma_param: float = 0.3, spatial_weight: float = 0.5,
                  n_heads: int = 4, temperature: float = 1.0,
                  sigma_g: float = 0.20, s_E: float = 10.0, s_tau: float = 5.0,
@@ -596,11 +584,9 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         return results
 
 # =============================================
-# 4. ENHANCED POLAR RADAR VISUALIZER (merged from second code)
+# 4. ENHANCED POLAR RADAR VISUALIZER (FIXED AUTOSCALING)
 # =============================================
 class PolarRadarVisualizer:
-    """Creates polar radar charts with extensive styling and target color consistency"""
-    
     def __init__(self):
         self.source_symbol = 'circle'
         self.target_symbol = 'star-diamond'
@@ -636,7 +622,6 @@ class PolarRadarVisualizer:
                                          background_color: str = "white",
                                          show_radial_grid: bool = True,
                                          show_angular_grid: bool = True,
-                                         radial_grid_count: int = 5,
                                          # Layout margins
                                          margin_left: int = 60,
                                          margin_right: int = 60,
@@ -653,43 +638,59 @@ class PolarRadarVisualizer:
                                          # Data normalization
                                          normalize_by_max: bool = True,
                                          max_reference_value: Optional[float] = None,
-                                         # Energy axis control
+                                         # Energy axis control (autoscaling)
                                          custom_energy_max: Optional[float] = None,
                                          custom_energy_min: Optional[float] = None,
                                          # Target peak value for color consistency
                                          target_peak_value: Optional[float] = None
                                          ) -> go.Figure:
         """
-        Create enhanced polar radar chart with target query colored consistently with the same colormap.
+        Create enhanced polar radar chart with intelligent autoscaling of the angular axis.
         """
         if df.empty or 'Peak_Value' not in df.columns:
             fig = go.Figure()
             fig.update_layout(title="No Data Available for Radar Chart", width=width, height=height)
             return fig
 
-        # Prepare data
+        # Extract data
         energies = df['Energy'].values
         durations = df['Duration'].values
         peak_values = df['Peak_Value'].values
         sim_names = df.get('Name', [f"Sim {i}" for i in range(len(df))]).tolist()
 
-        # Determine energy range for angular axis
-        e_min_data, e_max_data = np.nanmin(energies), np.nanmax(energies)
-        e_min = custom_energy_min if custom_energy_min is not None else e_min_data
-        e_max = custom_energy_max if custom_energy_max is not None else max(e_max_data, 8.0)  # ensure at least 8.0 mJ
-        e_range = e_max - e_min if e_max > e_min else 1.0
-        if not np.isfinite(e_range) or e_range < 1e-6:
+        # --- IMPROVED ENERGY TO ANGLE MAPPING (AUTOSCALING) ---
+        e_min_data = np.nanmin(energies)
+        e_max_data = np.nanmax(energies)
+        
+        # Decide max: use custom only if explicitly set > 110% of data max
+        if custom_energy_max is not None and custom_energy_max > e_max_data * 1.1:
+            e_max = custom_energy_max
+        else:
+            e_max = e_max_data * 1.05   # small padding for readability
+        
+        # Min: use custom only if set and less than data min
+        if custom_energy_min is not None and custom_energy_min < e_min_data:
+            e_min = custom_energy_min
+        else:
+            e_min = e_min_data
+        
+        e_range = e_max - e_min
+        if e_range < 1e-6:
             e_range = 1.0
-            e_min = 0.0
 
-        # Compute angles
+        # Compute angles (0° to 360°)
         angles_rad = 2 * np.pi * (energies - e_min) / e_range
         angles_deg = np.degrees(angles_rad)
+
+        # Generate nice tick values based on the actual energy range
+        tick_energies = np.linspace(e_min, e_max, 6)
+        tick_angles = [2 * np.pi * (e - e_min) / e_range for e in tick_energies]
+        tick_angles_deg = np.degrees(tick_angles)
 
         # Normalize peak values if requested
         if normalize_by_max and max_reference_value is not None and max_reference_value > 0:
             norm_peak = peak_values / max_reference_value
-            r_range = (0, 1.2)  # allow a little headroom
+            r_range = (0, 1.2)  # allow headroom
         else:
             norm_peak = peak_values
             r_range = radial_axis_range if radial_axis_range else (0, max(peak_values)*1.1 if len(peak_values) > 0 else 1.0)
@@ -732,13 +733,11 @@ class PolarRadarVisualizer:
 
                 # Determine target marker color: use the same colorscale if peak value is known
                 if use_colorbar_scale and target_peak_value is not None:
-                    # Normalize target peak value for coloring
                     if normalize_by_max and max_reference_value is not None:
                         norm_target = target_peak_value / max_reference_value
                     else:
                         norm_target = target_peak_value / (np.max(peak_values) + 1e-9)
                     norm_target = np.clip(norm_target, 0, 1)
-                    # Sample color from the same colorscale
                     target_color = px.colors.sample_colorscale(c_scale, [norm_target])[0]
                 else:
                     target_color = target_query_color
@@ -758,7 +757,7 @@ class PolarRadarVisualizer:
                     hovertemplate=f"<b>Target Query</b><br>Energy: {q_e:.2f} mJ<br>Duration: {q_d:.2f} ns<br>Peak: {target_peak_value:.3f}<extra></extra>"
                 ))
 
-        # Build polar layout
+        # Build polar layout with improved angular axis
         polar_layout = dict(
             radialaxis=dict(
                 visible=True,
@@ -777,8 +776,12 @@ class PolarRadarVisualizer:
                 gridwidth=grid_line_width,
                 tickfont=dict(size=tick_font_size, family=label_font_family),
                 tickmode='array',
-                tickvals=[2 * np.pi * (e - e_min) / e_range for e in np.linspace(e_min, e_max, 6)],
-                ticktext=[f"{e:.1f}" for e in np.linspace(e_min, e_max, 6)]
+                tickvals=tick_angles_deg,
+                ticktext=[f"{e:.2f}" for e in tick_energies],
+                thetaunit="degrees",
+                showline=True,
+                linecolor="black",
+                linewidth=1
             ),
             bgcolor=background_color,
             gridshape='circular'
@@ -812,7 +815,7 @@ class PolarRadarVisualizer:
             polar=polar_layout,
             title=dict(
                 text=f"Polar Radar: {title_field} at t={timestep} ns<br>"
-                     f"<span style='font-size:{title_font_size-4}px;'>Angular: Energy (mJ) • Radial: Pulse Duration (ns)</span>",
+                     f"<span style='font-size:{title_font_size-4}px;'>Energy range: {e_min:.2f} – {e_max:.2f} mJ • Radial: Pulse Duration (ns)</span>",
                 font=dict(size=title_font_size, family=title_font_family),
                 x=0.5,
                 xanchor='center',
@@ -839,13 +842,12 @@ class PolarRadarVisualizer:
         return fig
 
 # =============================================
-# 5. ENHANCED VISUALIZER (keep from original)
+# 5. ENHANCED VISUALIZER (unchanged, kept for ST-DGPA analysis)
 # =============================================
 class EnhancedVisualizer:
     @staticmethod
     def create_stdgpa_analysis(results: Dict, energy_query: float, duration_query: float,
                             time_points: np.ndarray) -> Optional[go.Figure]:
-        # (same as original, omitted for brevity – can be kept as is)
         if not results or 'attention_maps' not in results or len(results['attention_maps']) == 0:
             return None
         timestep_idx = len(time_points) // 2
@@ -882,7 +884,7 @@ class EnhancedVisualizer:
         return fig
 
 # =============================================
-# 6. EXPORT UTILITIES
+# 6. EXPORT UTILITIES (unchanged)
 # =============================================
 class ExportManager:
     @staticmethod
@@ -1007,7 +1009,7 @@ def main():
             """)
         return
 
-    # --- TAB 1: Data Overview (unchanged, keep original) ---
+    # --- TAB 1: Data Overview (unchanged) ---
     with tabs[0]:
         st.subheader("Loaded Simulations Summary")
         df_summary = pd.DataFrame([{'Name': s['name'], 'Energy (mJ)': s['energy'], 'Duration (ns)': s['duration'], 'Timesteps': len(s['timesteps']), 'Fields': ', '.join(sorted(s['field_stats'].keys())[:3]) + ('...' if len(s['field_stats']) > 3 else '')} for s in st.session_state.summaries])
@@ -1031,7 +1033,7 @@ def main():
                 fig.update_layout(scene=dict(aspectmode="data"), title=f"{field} at Timestep {timestep+1}", height=600)
                 st.plotly_chart(fig, use_container_width=True)
 
-    # --- TAB 2: Interpolation (unchanged, keep original) ---
+    # --- TAB 2: Interpolation (unchanged) ---
     with tabs[1]:
         st.subheader("Run ST-DGPA Interpolation")
         c1, c2, c3 = st.columns(3)
@@ -1079,7 +1081,7 @@ def main():
                     fig_conf = st.session_state.enhanced_viz.create_confidence_plot(results, params['time_points'])
                     st.plotly_chart(fig_conf, use_container_width=True)
 
-    # --- TAB 3: Polar Radar (ENHANCED with full styling controls) ---
+    # --- TAB 3: Polar Radar (with autoscaling fix and dynamic defaults) ---
     with tabs[2]:
         st.subheader("🎯 Polar Radar Visualization")
         all_fields = set()
@@ -1087,6 +1089,17 @@ def main():
         col1, col2 = st.columns(2)
         with col1: field_type = st.selectbox("Field Type", sorted(all_fields), key="polar_field")
         with col2: max_timestep = max(s.get('timesteps', [1])[-1] for s in st.session_state.summaries); t_step = st.number_input("Timestep Index", 1, max_timestep, 1, key="polar_timestep")
+
+        # Build DataFrame to get data min/max for dynamic defaults
+        rows = []
+        for s in st.session_state.summaries:
+            if t_step <= len(s['timesteps']):
+                idx = t_step - 1
+                peak = s['field_stats'].get(field_type, {}).get('max', [0])
+                if idx < len(peak):
+                    rows.append({'Name': s['name'], 'Energy': s['energy'], 'Duration': s['duration'], 'Peak_Value': peak[idx]})
+        df_polar = pd.DataFrame(rows)
+        e_max_data = df_polar['Energy'].max() if not df_polar.empty else 1.0
 
         # Styling controls in expanders
         with st.expander("🎨 Radar Chart Styling Options", expanded=True):
@@ -1142,22 +1155,12 @@ def main():
             colI, colJ = st.columns(2)
             with colI:
                 normalize_by_max = st.checkbox("Normalize by Maximum Value", value=True, key="radar_normalize")
-                max_reference_value = st.number_input("Max Reference Value", min_value=0.0, value=8.0, key="radar_max_ref", help="Reference maximum for normalization (e.g., 8.0 mJ)")
+                max_reference_value = st.number_input("Max Reference Value", min_value=0.0, value=float(e_max_data * 1.2), key="radar_max_ref", help="Reference maximum for normalization (auto-set to data max +20%)")
             with colJ:
                 highlight_target = st.checkbox("Highlight Target Query", value=True, key="radar_highlight_target")
                 target_label = st.text_input("Target Label", "Target Query", key="radar_target_label")
-                custom_energy_max = st.number_input("Custom Max Energy (mJ)", min_value=0.0, value=8.0, key="radar_custom_energy_max", help="Override angular axis maximum (0=use data max)")
+                custom_energy_max = st.number_input("Custom Max Energy (mJ)", min_value=0.0, value=float(e_max_data * 1.2), key="radar_custom_energy_max", help="Override angular axis maximum (0 = auto)")
                 custom_energy_min = st.number_input("Custom Min Energy (mJ)", min_value=0.0, value=0.0, key="radar_custom_energy_min")
-
-        # Build DataFrame for polar chart
-        rows = []
-        for s in st.session_state.summaries:
-            if t_step <= len(s['timesteps']):
-                idx = t_step - 1
-                peak = s['field_stats'].get(field_type, {}).get('max', [0])
-                if idx < len(peak):
-                    rows.append({'Name': s['name'], 'Energy': s['energy'], 'Duration': s['duration'], 'Peak_Value': peak[idx]})
-        df_polar = pd.DataFrame(rows)
 
         # Get target query params and predicted peak value
         query_params = None
@@ -1170,7 +1173,7 @@ def main():
                 if t_idx < len(results['field_predictions'][field_type]['max']):
                     target_peak_value = results['field_predictions'][field_type]['max'][t_idx]
 
-        # Create enhanced polar radar chart
+        # Create enhanced polar radar chart (with autoscaling)
         fig_polar = st.session_state.polar_viz.create_enhanced_polar_radar_chart(
             df_polar, field_type, query_params, timestep=t_step,
             show_legend=True, width=900, height=750,
@@ -1193,7 +1196,7 @@ def main():
         )
         st.plotly_chart(fig_polar, use_container_width=True)
 
-        # Multi-timestep comparison
+        # Multi-timestep comparison (optional)
         if st.checkbox("Show Multiple Timesteps", key="polar_multi"):
             st.markdown("##### Multi-Timestep Comparison")
             t_indices = st.multiselect("Select Timesteps", [1,2,3,4,5], default=[1,3,5])
