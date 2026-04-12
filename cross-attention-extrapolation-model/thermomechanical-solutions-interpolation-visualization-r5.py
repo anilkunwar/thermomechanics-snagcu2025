@@ -114,7 +114,7 @@ class CacheManager:
             st.session_state.interpolation_field_history.popitem(last=False)
 
 # =============================================
-# 2. UNIFIED DATA LOADER
+# 2. UNIFIED DATA LOADER (IMPROVED)
 # =============================================
 class UnifiedFEADataLoader:
     def __init__(self):
@@ -163,8 +163,15 @@ class UnifiedFEADataLoader:
                     fields = {}
                     for key in mesh0.point_data.keys():
                         arr = mesh0.point_data[key].astype(np.float32)
-                        sim_data['field_info'][key] = ("scalar", 1) if arr.ndim == 1 else ("vector", arr.shape[1])
-                        shape = (len(vtu_files), n_pts) if arr.ndim == 1 else (len(vtu_files), n_pts, arr.shape[1])
+                        # Determine field type: scalar (1D) or vector (2D)
+                        if arr.ndim == 1:
+                            field_type = "scalar"
+                            comp = 1
+                        else:
+                            field_type = "vector"
+                            comp = arr.shape[1]
+                        sim_data['field_info'][key] = (field_type, comp)
+                        shape = (len(vtu_files), n_pts) if field_type == "scalar" else (len(vtu_files), n_pts, comp)
                         fields[key] = np.full(shape, np.nan, dtype=np.float32)
                         fields[key][0] = arr
                         _self.available_fields.add(key)
@@ -172,7 +179,8 @@ class UnifiedFEADataLoader:
                         try:
                             mesh = meshio.read(vtu_files[t])
                             for key in sim_data['field_info']:
-                                if key in mesh.point_data: fields[key][t] = mesh.point_data[key].astype(np.float32)
+                                if key in mesh.point_data:
+                                    fields[key][t] = mesh.point_data[key].astype(np.float32)
                         except: pass
                     sim_data.update({'points': points, 'fields': fields, 'triangles': triangles, 'has_mesh': True})
                 summaries.append(_self.extract_summary_statistics(vtu_files, energy, duration, name))
@@ -196,18 +204,27 @@ class UnifiedFEADataLoader:
                     data = mesh.point_data[field_name]
                     if field_name not in summary['field_stats']:
                         summary['field_stats'][field_name] = {'min': [], 'max': [], 'mean': [], 'std': []}
-                    if data.ndim == 1: clean_data = data[~np.isnan(data)]
-                    else: clean_data = np.linalg.norm(data, axis=1)[~np.isnan(np.linalg.norm(data, axis=1))]
-                    if clean_data.size > 0:
-                        for key in ['min', 'max', 'mean', 'std']:
-                            summary['field_stats'][field_name][key].append(float(eval(f"np.{key}(clean_data)")))
+                    # Convert vector fields to magnitude for statistics
+                    if data.ndim == 1:
+                        clean_data = data[~np.isnan(data)]
                     else:
-                        for key in ['min', 'max', 'mean', 'std']: summary['field_stats'][field_name][key].append(0.0)
+                        # Take Euclidean norm over all component axes (axis=1 for (n_points, comp))
+                        mag = np.linalg.norm(data, axis=1)
+                        clean_data = mag[~np.isnan(mag)]
+                    if clean_data.size > 0:
+                        # Use getattr instead of eval
+                        summary['field_stats'][field_name]['min'].append(float(np.min(clean_data)))
+                        summary['field_stats'][field_name]['max'].append(float(np.max(clean_data)))
+                        summary['field_stats'][field_name]['mean'].append(float(np.mean(clean_data)))
+                        summary['field_stats'][field_name]['std'].append(float(np.std(clean_data)))
+                    else:
+                        for key in ['min', 'max', 'mean', 'std']:
+                            summary['field_stats'][field_name][key].append(0.0)
             except: continue
         return summary
 
 # =============================================
-# 3. ST-DGPA EXTRAPOLATOR
+# 3. ST-DGPA EXTRAPOLATOR (unchanged)
 # =============================================
 class SpatioTemporalGatedPhysicsAttentionExtrapolator:
     def __init__(self, sigma_param=0.3, spatial_weight=0.5, n_heads=4, temperature=1.0,
@@ -382,7 +399,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         except Exception as e: st.error(f"Error exporting VTU: {str(e)}"); return False
 
 # =============================================
-# 4. POLAR RADAR VISUALIZER
+# 4. POLAR RADAR VISUALIZER (unchanged)
 # =============================================
 class PolarRadarVisualizer:
     """Creates polar radar charts with Energy (angular), Pulse Width (radial), and Peak Value (color/size)"""
@@ -512,7 +529,7 @@ class PolarRadarVisualizer:
         return fig
 
 # =============================================
-# 5. SANKEY VISUALIZER
+# 5. SANKEY VISUALIZER (unchanged)
 # =============================================
 class SankeyVisualizer:
     def __init__(self):
@@ -617,7 +634,7 @@ class SankeyVisualizer:
         return fig
 
 # =============================================
-# 6. ENHANCED VISUALIZER
+# 6. ENHANCED VISUALIZER (unchanged)
 # =============================================
 class EnhancedVisualizer:
     @staticmethod
@@ -650,7 +667,7 @@ class EnhancedVisualizer:
         return fig
 
 # =============================================
-# 7. MAIN APPLICATION
+# 7. MAIN APPLICATION (FIXED 3D VIEWER)
 # =============================================
 def main():
     st.set_page_config(page_title="Laser Soldering ST-DGPA Platform", layout="wide", initial_sidebar_state="expanded")
@@ -708,8 +725,18 @@ def main():
                 field = st.selectbox("Select Field", sorted(sim['field_info'].keys()))
                 timestep = st.slider("Timestep", 0, sim['n_timesteps']-1, 0)
                 if sim['points'] is not None and field in sim['fields']:
-                    values = sim['fields'][field][timestep]
-                    if values.ndim == 2: values = np.linalg.norm(values, axis=2)
+                    values = sim['fields'][field][timestep].copy()
+                    # ----- FIX: Robust conversion of vector/tensor fields to scalar intensity -----
+                    if values.ndim >= 2:
+                        # Take Euclidean norm over all axes except the first (points axis)
+                        # For vector: shape (n_points, 3) -> norm over axis=1
+                        # For higher tensors: norm over all axes starting from 1
+                        norm_axes = tuple(range(1, values.ndim))
+                        values = np.linalg.norm(values, axis=norm_axes)
+                    # values is now 1D scalar per point; handle NaNs
+                    values = np.nan_to_num(values, nan=0.0)
+                    
+                    # Create 3D mesh plot
                     fig = go.Figure(go.Mesh3d(
                         x=sim['points'][:,0], y=sim['points'][:,1], z=sim['points'][:,2],
                         i=sim['triangles'][:,0], j=sim['triangles'][:,1], k=sim['triangles'][:,2],
@@ -847,4 +874,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
