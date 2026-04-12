@@ -498,21 +498,21 @@ class PolarRadarVisualizer:
                     hovertemplate=f"<b>Target Query</b><br>Energy: {q_e:.2f} mJ<br>Duration: {q_d:.2f} ns<extra></extra>"
                 ))
 
-        # Build polar layout with robust tick handling
+        # Build polar layout with robust tick handling and NO title on angularaxis
         polar_layout = dict(
             radialaxis=dict(
                 visible=True,
-                title="Pulse Duration (ns)",
+                title="Pulse Duration (ns)",      # Allowed
                 gridcolor="lightgray",
                 tickfont=dict(size=12)
             ),
             angularaxis=dict(
                 visible=True,
-                title="Energy (mJ)",
                 direction="clockwise",
                 rotation=90,
                 gridcolor="lightgray",
                 tickfont=dict(size=12)
+                # NO 'title' here (not supported by Plotly)
             ),
             bgcolor="white"
         )
@@ -539,15 +539,17 @@ class PolarRadarVisualizer:
         try:
             fig.update_layout(
                 title=dict(
-                    text=f"Polar Radar: {title_field} at t={timestep} ns",
+                    text=f"Polar Radar: {title_field} at t={timestep} ns<br>"
+                         f"<span style='font-size:12px; color:gray;'>Angular: Energy (mJ) • Radial: Pulse Duration (ns)</span>",
                     font=dict(size=18),
-                    x=0.5
+                    x=0.5,
+                    xanchor='center'
                 ),
                 polar=polar_layout,
                 width=width,
                 height=height,
                 showlegend=True,
-                margin=dict(l=50, r=50, t=50, b=50),
+                margin=dict(l=60, r=60, t=80, b=60),
                 hovermode='closest'
             )
         except Exception as e:
