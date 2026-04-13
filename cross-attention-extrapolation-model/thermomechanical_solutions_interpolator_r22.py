@@ -4118,32 +4118,32 @@ def compute_interpolated_field_cached(_extrapolator, field_name, attention_weigh
         field_name, attention_weights, source_metadata, simulations
     )
 #
-def render_3d_interpolation(results, time_points, energy_query, duration_query, 
+#
+def render_3d_interpolation(results, time_points, energy_query, duration_query,
                            enable_3d=True, optimize_performance=False, top_k=10):
-    """Render 3D field interpolation visualization with adjustable opacity"""
+    """Render 3D field interpolation visualization with full Plotly customizations"""
     st.markdown('<h4 class="sub-header">🖼️ 3D Field Interpolation with ST-DGPA</h4>', unsafe_allow_html=True)
-    
+
     if not st.session_state.get('simulations'):
         st.warning("No full simulations loaded for 3D rendering. Please reload with 'Load Full Mesh' enabled.")
         return
-    
-    # Check if any simulation has mesh data
+
     first_sim = next(iter(st.session_state.simulations.values()))
     if not first_sim.get('has_mesh', False):
         st.error("Simulations were loaded without full mesh data. Please reload with 'Load Full Mesh' enabled.")
         return
-    
+
     # Show cache status
     if 'interpolation_3d_cache' in st.session_state and st.session_state.interpolation_3d_cache:
         cache_size = len(st.session_state.interpolation_3d_cache)
         st.markdown(f"""
         <div class="cache-status">
-        <strong>Cache Status:</strong> {cache_size} field(s) cached | 
+        <strong>Cache Status:</strong> {cache_size} field(s) cached |
         <strong>Prediction ID:</strong> {st.session_state.last_prediction_id or 'N/A'} |
         <strong>Temporal Gating:</strong> s_t = {st.session_state.extrapolator.s_t:.1f} ns
         </div>
         """, unsafe_allow_html=True)
-    
+
     st.markdown("""
     <div class="interpolation-3d-container">
     <h5>3D Field Interpolation Settings</h5>
@@ -4151,75 +4151,81 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
     <p><strong>Field switching is now cached</strong> - previously computed fields load instantly.</p>
     </div>
     """, unsafe_allow_html=True)
-    
-    # Get parameters from session state
+
     params = st.session_state.interpolation_params or {}
-    
-    # Select field and timestep for 3D with session state persistence
     available_fields = list(results['field_predictions'].keys())
-    
     if not available_fields:
         st.warning("No field predictions available for 3D visualization.")
         return
-    
-    # --- NEW: Add opacity slider in the selection row ---
+
+    # ================= SELECTION CONTROLS (Original + Opacity) =================
     col1, col2, col3 = st.columns(3)
     with col1:
-        # Use session state to remember last selected field
         if 'current_3d_field' not in st.session_state or st.session_state.current_3d_field not in available_fields:
             st.session_state.current_3d_field = available_fields[0]
-        
         selected_field_3d = st.selectbox(
-            "Select Field for 3D Rendering", 
-            available_fields, 
-            index=available_fields.index(st.session_state.current_3d_field) if st.session_state.current_3d_field in available_fields else 0,
-            key="interp_3d_field",
-            help="Choose field to visualize in 3D",
-            on_change=lambda: setattr(st.session_state, 'current_3d_field', 
-                                    st.session_state.interp_3d_field if 'interp_3d_field' in st.session_state else available_fields[0])
+            "Select Field for 3D Rendering", available_fields,
+            index=available_fields.index(st.session_state.current_3d_field),
+            key="interp_3d_field"
         )
-        
-        # Update session state
         st.session_state.current_3d_field = selected_field_3d
-    
+
     with col2:
-        # Use session state to remember last selected timestep
         if 'current_3d_timestep' not in st.session_state:
             st.session_state.current_3d_timestep = min(len(time_points)//2, len(time_points)-1)
-        
         timestep_idx_3d = st.slider(
-            "Select Timestep for 3D", 
-            0, len(time_points) - 1, 
+            "Select Timestep for 3D", 0, len(time_points) - 1,
             st.session_state.current_3d_timestep,
-            key="interp_3d_timestep",
-            help="Select timestep for 3D visualization",
-            on_change=lambda: setattr(st.session_state, 'current_3d_timestep', 
-                                    st.session_state.interp_3d_timestep if 'interp_3d_timestep' in st.session_state else 0)
+            key="interp_3d_timestep"
         )
-        
-        # Update session state
         st.session_state.current_3d_timestep = timestep_idx_3d
-    
+
     with col3:
-        # NEW: Opacity slider for 3D visualization
         opacity_3d = st.slider(
-            "Opacity",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.9,
-            step=0.05,
+            "🔹 Opacity", 0.0, 1.0, 0.9, 0.05,
             key="interp_3d_opacity",
-            help="Adjust transparency of the 3D plot (0 = invisible, 1 = fully opaque)"
+            help="Adjust transparency of the 3D plot"
         )
-    
+
     selected_time_3d = time_points[timestep_idx_3d]
     attention_weights_3d = results['attention_maps'][timestep_idx_3d]
     physics_attention_3d = results['physics_attention_maps'][timestep_idx_3d]
     ett_gating_3d = results['ett_gating_maps'][timestep_idx_3d]
     confidence_score = results['confidence_scores'][timestep_idx_3d]
     temporal_confidence = results['temporal_confidences'][timestep_idx_3d] if 'temporal_confidences' in results else 0.0
-    
-    # Display confidence metric and cache info
+
+    # ================= NEW PLOTLY CUSTOMISATION CONTROLS =================
+    st.markdown('<h5 class="sub-header">🎨 3D View Customisation</h5>', unsafe_allow_html=True)
+    col_a, col_b, col_c, col_d = st.columns(4)
+    with col_a:
+        aspect_mode = st.selectbox(
+            "Aspect Ratio", ["data", "cube", "auto"], index=0,
+            key="interp_3d_aspect"
+        )
+    with col_b:
+        camera_preset = st.selectbox(
+            "📷 Camera View",
+            ["Isometric", "Front", "Side", "Top", "Bottom"],
+            index=0,
+            key="interp_3d_camera"
+        )
+    with col_c:
+        lighting_preset = st.selectbox(
+            "💡 Lighting",
+            ["Default", "Shiny", "Matte", "High Contrast"],
+            index=0,
+            key="interp_3d_lighting"
+        )
+    with col_d:
+        bg_mode = st.selectbox(
+            "Plot Theme", ["Light", "Dark"], index=0,
+            key="interp_3d_theme"
+        )
+
+    # Color scale limits (auto/manual) – shown after we compute values
+    # We'll compute the field first, then show these controls.
+
+    # Display confidence metrics
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Prediction Confidence", f"{confidence_score:.3f}")
@@ -4229,19 +4235,15 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
         st.metric("Timestep", f"{selected_time_3d} ns")
     with col4:
         cached = CacheManager.get_cached_interpolation(selected_field_3d, timestep_idx_3d, params) is not None
-        cache_status = "✅ Cached" if cached else "🔄 Compute"
-        st.metric("Cache Status", cache_status)
-    
-    # Check cache first
+        st.metric("Cache Status", "✅ Cached" if cached else "🔄 Compute")
+
+    # Get interpolated field (cached or compute)
     cached_result = CacheManager.get_cached_interpolation(selected_field_3d, timestep_idx_3d, params)
-    
     if cached_result:
-        # Load from cache
         interpolated_values = cached_result['interpolated_values']
         cache_source = "cache"
         st.success(f"✅ Loaded {selected_field_3d} from cache (previously computed)")
     else:
-        # Performance optimization: filter top-K sources
         if optimize_performance and len(attention_weights_3d) > top_k:
             top_indices = np.argsort(attention_weights_3d)[-top_k:]
             filtered_weights = np.zeros_like(attention_weights_3d)
@@ -4249,8 +4251,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
             filtered_weights = filtered_weights / np.sum(filtered_weights)
             attention_weights_3d = filtered_weights
             st.info(f"Using top-{top_k} sources for performance optimization")
-        
-        # Compute interpolated field
+
         with st.spinner(f"Computing {selected_field_3d} field at t={selected_time_3d} ns..."):
             interpolated_values = st.session_state.extrapolator.interpolate_full_field(
                 selected_field_3d,
@@ -4258,44 +4259,74 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                 st.session_state.extrapolator.source_metadata,
                 st.session_state.simulations
             )
-        
         if interpolated_values is None:
-            st.error("Failed to interpolate field. Ensure full meshes are loaded and field exists.")
+            st.error("Failed to interpolate field.")
             return
-        
-        # Cache the result
         CacheManager.set_cached_interpolation(selected_field_3d, timestep_idx_3d, params, interpolated_values)
         cache_source = "new computation"
         st.info(f"✅ Computed and cached {selected_field_3d}")
-    
-    # Get common mesh (from first sim)
-    first_sim = next(iter(st.session_state.simulations.values()))
-    pts = first_sim['points']
-    triangles = first_sim.get('triangles')
-    
-    # Performance optimization: subsample points
-    subsample_factor = params.get('subsample_factor', 1)
-    if optimize_performance and subsample_factor > 1 and pts.shape[0] > 10000:
-        indices = np.arange(0, pts.shape[0], subsample_factor)
-        pts = pts[indices]
-        interpolated_values = interpolated_values[indices]
-        st.info(f"Subsampled mesh from {pts.shape[0]*subsample_factor} to {pts.shape[0]} points for performance")
-    
-    # Handle scalar/vector fields
+
+    # Now we have values, compute min/max for color scale limits
     if interpolated_values.ndim == 1:
-        values = np.nan_to_num(interpolated_values)  # Replace NaNs
+        values = np.nan_to_num(interpolated_values)
         label = selected_field_3d
-        field_type = "scalar"
     else:
         magnitude = np.linalg.norm(interpolated_values, axis=1)
         values = np.nan_to_num(magnitude)
         label = f"{selected_field_3d} (magnitude)"
-        field_type = "vector"
-    
-    # Create 3D visualization
+
+    data_min, data_max = float(np.min(values)), float(np.max(values))
+
+    # Color scale limits controls (after values are known)
+    st.markdown('<h5 class="sub-header">🌈 Color Scale Limits</h5>', unsafe_allow_html=True)
+    col_e, col_f, col_g = st.columns(3)
+    with col_e:
+        auto_scale = st.checkbox("Auto Scale", value=True, key="interp_3d_auto_scale")
+    with col_f:
+        cmin = st.number_input("Min Limit", value=data_min, format="%.3f", disabled=auto_scale, key="interp_3d_cmin")
+    with col_g:
+        cmax = st.number_input("Max Limit", value=data_max, format="%.3f", disabled=auto_scale, key="interp_3d_cmax")
+    if auto_scale:
+        cmin, cmax = None, None
+
+    # ================= THEME & LIGHTING SETUP =================
+    lighting_map = {
+        "Default": dict(ambient=0.8, diffuse=0.8, specular=0.5, roughness=0.5),
+        "Shiny": dict(ambient=0.6, diffuse=0.9, specular=0.8, roughness=0.2),
+        "Matte": dict(ambient=0.9, diffuse=0.6, specular=0.1, roughness=0.9),
+        "High Contrast": dict(ambient=0.4, diffuse=0.9, specular=0.7, roughness=0.4)
+    }
+    lighting = lighting_map[lighting_preset]
+
+    camera_map = {
+        "Isometric": dict(eye=dict(x=1.5, y=1.5, z=1.5)),
+        "Front": dict(eye=dict(x=0, y=2, z=0.1)),
+        "Side": dict(eye=dict(x=2, y=0, z=0.1)),
+        "Top": dict(eye=dict(x=0, y=0, z=2)),
+        "Bottom": dict(eye=dict(x=0, y=0, z=-2))
+    }
+    camera = camera_map[camera_preset]
+
+    if bg_mode == "Dark":
+        plot_bgcolor, paper_bgcolor, grid_color, font_color = "rgb(17,17,17)", "rgb(17,17,17)", "rgb(40,40,40)", "white"
+    else:
+        plot_bgcolor, paper_bgcolor, grid_color, font_color = "white", "white", "lightgray", "black"
+
+    # ================= PREPARE MESH DATA =================
+    pts = first_sim['points']
+    triangles = first_sim.get('triangles')
+
+    subsample_factor = params.get('subsample_factor', 1)
+    if optimize_performance and subsample_factor > 1 and pts.shape[0] > 10000:
+        indices = np.arange(0, pts.shape[0], subsample_factor)
+        pts = pts[indices]
+        values = values[indices]
+        st.info(f"Subsampled mesh from {pts.shape[0]*subsample_factor} to {pts.shape[0]} points for performance")
+
+    # ================= CREATE 3D PLOT =================
     st.markdown(f"### 📊 {label} at t={selected_time_3d} ns")
-    
-    # Show ST-DGPA weight analysis
+
+    # ---- ST-DGPA Weight Analysis (original expander) ----
     with st.expander("🔍 ST-DGPA Weight Analysis for This Timestep", expanded=False):
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -4305,14 +4336,12 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
         with col3:
             st.metric("Max ST-DGPA Weight", f"{np.max(attention_weights_3d):.4f}")
         with col4:
-            # Temporal coherence of sources
             if hasattr(st.session_state.extrapolator, '_assess_temporal_coherence'):
                 coherence = st.session_state.extrapolator._assess_temporal_coherence(
                     st.session_state.extrapolator.source_metadata, attention_weights_3d
                 )
                 st.metric("Temporal Coherence", f"{coherence:.3f}")
-        
-        # Show top contributing sources with temporal information
+
         if len(attention_weights_3d) > 0:
             top_indices = np.argsort(attention_weights_3d)[-5:][::-1]
             st.write("**Top 5 Contributing Sources:**")
@@ -4322,226 +4351,150 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                         f"Physics={physics_attention_3d[idx]:.4f}, "
                         f"Gating={ett_gating_3d[idx]:.4f}, "
                         f"ST-DGPA={attention_weights_3d[idx]:.4f}")
-    
-    # Show field history if available
+
+    # ---- Field history (original) ----
     if 'interpolation_field_history' in st.session_state and st.session_state.interpolation_field_history:
         recent_fields = list(st.session_state.interpolation_field_history.keys())[-5:]
         if recent_fields:
             st.caption(f"**Recently viewed:** {', '.join([f.split('_')[0] for f in recent_fields])}")
-    
-    # --- Build the 3D plot with adjustable opacity ---
+
+    # ---- Build the 3D trace with all new customisations ----
     if triangles is not None and len(triangles) > 0 and pts.shape[0] < 50000:
-        # Validate triangles after possible subsampling
         if optimize_performance and subsample_factor > 1:
-            # For subsampled points, use point cloud
-            mesh_data = go.Scatter3d(
+            trace_data = go.Scatter3d(
                 x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
                 mode='markers',
                 marker=dict(
-                    size=4,
-                    color=values,
-                    colorscale=st.session_state.selected_colormap,
-                    opacity=opacity_3d,  # <-- applied
-                    colorbar=dict(
-                        title=dict(text=label, font=dict(size=12)),
-                        thickness=20,
-                        len=0.6
-                    ),
-                    showscale=True
+                    size=4, color=values, colorscale=st.session_state.selected_colormap,
+                    cmin=cmin, cmax=cmax, opacity=opacity_3d,
+                    colorbar=dict(title=dict(text=label, font=dict(size=12)), thickness=20, len=0.6)
                 ),
-                hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
-                             '<b>X:</b> %{x:.3f}<br>' +
-                             '<b>Y:</b> %{y:.3f}<br>' +
-                             '<b>Z:</b> %{z:.3f}<extra></extra>'
+                hovertemplate=f'<b>{label}:</b> %{{marker.color:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
             )
         else:
-            # Use mesh with triangles
             valid_triangles = triangles[np.all(triangles < len(pts), axis=1)]
             if len(valid_triangles) > 0:
-                mesh_data = go.Mesh3d(
+                trace_data = go.Mesh3d(
                     x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
                     i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
-                    intensity=values,
-                    colorscale=st.session_state.selected_colormap,
-                    intensitymode='vertex',
-                    colorbar=dict(
-                        title=dict(text=label, font=dict(size=12)),
-                        thickness=20,
-                        len=0.6
-                    ),
-                    opacity=opacity_3d,  # <-- applied
-                    lighting=dict(
-                        ambient=0.8,
-                        diffuse=0.8,
-                        specular=0.5,
-                        roughness=0.5
-                    ),
-                    lightposition=dict(x=100, y=200, z=300),
-                    hovertemplate='<b>Value:</b> %{intensity:.3f}<br>' +
-                                 '<b>X:</b> %{x:.3f}<br>' +
-                                 '<b>Y:</b> %{y:.3f}<br>' +
-                                 '<b>Z:</b> %{z:.3f}<extra></extra>'
+                    intensity=values, colorscale=st.session_state.selected_colormap,
+                    intensitymode='vertex', cmin=cmin, cmax=cmax,
+                    opacity=opacity_3d, lighting=lighting,
+                    hovertemplate=f'<b>{label}:</b> %{{intensity:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
                 )
             else:
-                # Fallback to scatter if triangles are invalid
-                mesh_data = go.Scatter3d(
+                trace_data = go.Scatter3d(
                     x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
                     mode='markers',
                     marker=dict(
-                        size=4,
-                        color=values,
-                        colorscale=st.session_state.selected_colormap,
-                        opacity=opacity_3d,  # <-- applied
-                        colorbar=dict(title=label),
-                        showscale=True
+                        size=4, color=values, colorscale=st.session_state.selected_colormap,
+                        cmin=cmin, cmax=cmax, opacity=opacity_3d,
+                        colorbar=dict(title=label)
                     ),
-                    hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
-                                 '<b>X:</b> %{x:.3f}<br>' +
-                                 '<b>Y:</b> %{y:.3f}<br>' +
-                                 '<b>Z:</b> %{z:.3f}<extra></extra>'
+                    hovertemplate=f'<b>{label}:</b> %{{marker.color:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
                 )
     else:
-        # Fallback scatter for point cloud or large meshes
-        mesh_data = go.Scatter3d(
+        trace_data = go.Scatter3d(
             x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
             mode='markers',
             marker=dict(
-                size=4,
-                color=values,
-                colorscale=st.session_state.selected_colormap,
-                opacity=opacity_3d,  # <-- applied
-                colorbar=dict(
-                    title=dict(text=label, font=dict(size=12)),
-                    thickness=20,
-                    len=0.6
-                ),
-                showscale=True
+                size=4, color=values, colorscale=st.session_state.selected_colormap,
+                cmin=cmin, cmax=cmax, opacity=opacity_3d,
+                colorbar=dict(title=dict(text=label, font=dict(size=12)), thickness=20, len=0.6)
             ),
-            hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
-                         '<b>X:</b> %{x:.3f}<br>' +
-                         '<b>Y:</b> %{y:.3f}<br>' +
-                         '<b>Z:</b> %{z:.3f}<extra></extra>'
+            hovertemplate=f'<b>{label}:</b> %{{marker.color:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
         )
-    
-    fig_3d = go.Figure(data=mesh_data)
-    
-    # Get heat transfer phase
+
+    fig_3d = go.Figure(data=trace_data)
+
+    # Get heat transfer phase for title
     heat_transfer_phase = "Unknown"
     if 'heat_transfer_indicators' in results and timestep_idx_3d < len(results['heat_transfer_indicators']):
         indicators = results['heat_transfer_indicators'][timestep_idx_3d]
         if indicators:
             heat_transfer_phase = indicators.get('phase', 'Unknown')
-    
+
     fig_3d.update_layout(
         title=dict(
             text=f"ST-DGPA Interpolated {label} at t={selected_time_3d} ns<br>"
                  f"E={energy_query:.1f} mJ, τ={duration_query:.1f} ns, Phase: {heat_transfer_phase}<br>"
                  f"Confidence: {confidence_score:.3f}, Temporal: {temporal_confidence:.3f}<br>"
-                 f"<sub>σ_g={params.get('sigma_g', 0.20):.2f}, s_E={params.get('s_E', 10.0):.1f}, s_τ={params.get('s_tau', 5.0):.1f}, s_t={params.get('s_t', 20.0):.1f}</sub>",
-            font=dict(size=14)
+                 f"<sub>σ_g={params.get('sigma_g', 0.20):.2f}, s_E={params.get('s_E', 10.0):.1f}, "
+                 f"s_τ={params.get('s_tau', 5.0):.1f}, s_t={params.get('s_t', 20.0):.1f}</sub>",
+            font=dict(size=14, color=font_color)
         ),
         scene=dict(
-            aspectmode="data",
-            camera=dict(
-                eye=dict(x=1.5, y=1.5, z=1.5),
-                up=dict(x=0, y=0, z=1)
-            ),
+            aspectmode=aspect_mode,
+            camera=camera,
             xaxis=dict(
-                title="X",
-                gridcolor="lightgray",
-                showbackground=True,
-                backgroundcolor="white"
+                showbackground=True, backgroundcolor=plot_bgcolor,
+                gridcolor=grid_color, color=font_color, title="X"
             ),
             yaxis=dict(
-                title="Y",
-                gridcolor="lightgray",
-                showbackground=True,
-                backgroundcolor="white"
+                showbackground=True, backgroundcolor=plot_bgcolor,
+                gridcolor=grid_color, color=font_color, title="Y"
             ),
             zaxis=dict(
-                title="Z",
-                gridcolor="lightgray",
-                showbackground=True,
-                backgroundcolor="white"
+                showbackground=True, backgroundcolor=plot_bgcolor,
+                gridcolor=grid_color, color=font_color, title="Z"
             )
         ),
+        plot_bgcolor=plot_bgcolor,
+        paper_bgcolor=paper_bgcolor,
         height=700,
-        margin=dict(l=0, r=0, t=100, b=0)
+        margin=dict(l=0, r=0, t=120, b=0)
     )
-    
+
+    # Sync colorbar font colour with theme
+    for trace in fig_3d.data:
+        if hasattr(trace, 'colorbar') and trace.colorbar:
+            trace.colorbar.title.font.color = font_color
+            trace.colorbar.tickfont.color = font_color
+
     st.plotly_chart(fig_3d, use_container_width=True)
-    
-    # Field statistics for interpolated field
+
+    # ================= FIELD STATISTICS (original) =================
     st.markdown("##### 📊 Interpolated Field Statistics")
-    
     col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        st.metric("Min", f"{np.min(values):.3f}")
-    with col2:
-        st.metric("Max", f"{np.max(values):.3f}")
-    with col3:
-        st.metric("Mean", f"{np.mean(values):.3f}")
-    with col4:
-        st.metric("Std Dev", f"{np.std(values):.3f}")
-    with col5:
-        st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
-    
-    # Histogram of interpolated values
+    with col1: st.metric("Min", f"{np.min(values):.3f}")
+    with col2: st.metric("Max", f"{np.max(values):.3f}")
+    with col3: st.metric("Mean", f"{np.mean(values):.3f}")
+    with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
+    with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
+
+    # ================= HISTOGRAM (original) =================
     fig_hist = go.Figure()
-    fig_hist.add_trace(go.Histogram(
-        x=values,
-        nbinsx=50,
-        marker_color='skyblue',
-        opacity=0.7,
-        name='Value Distribution'
-    ))
-    
+    fig_hist.add_trace(go.Histogram(x=values, nbinsx=50, marker_color='skyblue', opacity=0.7))
     fig_hist.update_layout(
         title=f"Distribution of Interpolated {label} Values",
-        xaxis_title=label,
-        yaxis_title="Frequency",
-        height=400
+        xaxis_title=label, yaxis_title="Frequency", height=400
     )
-    
     st.plotly_chart(fig_hist, use_container_width=True)
-    
-    # Export options
+
+    # ================= EXPORT OPTIONS (original) =================
     st.markdown("##### 💾 Export Interpolated Field")
-    
     col1, col2, col3 = st.columns(3)
-    
     with col1:
-        # Export as VTU file
-        if st.button("📥 Export as VTU File", use_container_width=True, key="export_vtu_3d"):
+        if st.button("📥 Export as VTU File", key="export_vtu_3d"):
             with tempfile.NamedTemporaryFile(delete=False, suffix='.vtu') as tmp:
                 success = st.session_state.extrapolator.export_interpolated_vtu(
-                    selected_field_3d,
-                    interpolated_values,
-                    st.session_state.simulations,
-                    tmp.name
+                    selected_field_3d, interpolated_values,
+                    st.session_state.simulations, tmp.name
                 )
-                
                 if success:
                     with open(tmp.name, 'rb') as f:
                         vtu_data = f.read()
-                    
                     b64 = base64.b64encode(vtu_data).decode()
                     href = f'<a href="data:application/octet-stream;base64,{b64}" download="stdgpa_interpolated_{selected_field_3d}_t{selected_time_3d}.vtu">Download VTU File</a>'
                     st.markdown(href, unsafe_allow_html=True)
-    
     with col2:
-        # Export as NPZ file
-        if st.button("📥 Export as NPZ File", use_container_width=True, key="export_npz_3d"):
+        if st.button("📥 Export as NPZ File", key="export_npz_3d"):
             npz_data = {
-                'field_name': selected_field_3d,
-                'values': interpolated_values,
-                'points': pts,
-                'triangles': triangles,
+                'field_name': selected_field_3d, 'values': interpolated_values,
+                'points': pts, 'triangles': triangles,
                 'metadata': {
-                    'energy_mJ': energy_query,
-                    'duration_ns': duration_query,
-                    'time_ns': selected_time_3d,
-                    'confidence': confidence_score,
+                    'energy_mJ': energy_query, 'duration_ns': duration_query,
+                    'time_ns': selected_time_3d, 'confidence': confidence_score,
                     'temporal_confidence': temporal_confidence,
                     'heat_transfer_phase': heat_transfer_phase,
                     'stdgpa_params': {
@@ -4550,36 +4503,27 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                         's_tau': params.get('s_tau', 5.0),
                         's_t': params.get('s_t', 20.0),
                         'temporal_weight': params.get('temporal_weight', 0.3)
-                    },
-                    'cache_source': cache_source
+                    }
                 }
             }
-            
             with tempfile.NamedTemporaryFile(delete=False, suffix='.npz') as tmp:
                 np.savez(tmp, **npz_data)
                 with open(tmp.name, 'rb') as f:
                     npz_bytes = f.read()
-                
                 b64 = base64.b64encode(npz_bytes).decode()
                 href = f'<a href="data:application/octet-stream;base64,{b64}" download="stdgpa_interpolated_{selected_field_3d}_t{selected_time_3d}.npz">Download NPZ File</a>'
                 st.markdown(href, unsafe_allow_html=True)
-    
     with col3:
-        # Export heat transfer data
-        if st.button("📥 Export Heat Transfer Data", use_container_width=True, key="export_heat_3d"):
-            # Create comprehensive heat transfer analysis
+        if st.button("📥 Export Heat Transfer Data", key="export_heat_3d"):
             if 'heat_transfer_indicators' in results and timestep_idx_3d < len(results['heat_transfer_indicators']):
                 indicators = results['heat_transfer_indicators'][timestep_idx_3d]
-                
                 heat_data = {
                     'time_ns': selected_time_3d,
                     'energy_mJ': energy_query,
                     'duration_ns': duration_query,
                     'field_stats': {
-                        'min': float(np.min(values)),
-                        'max': float(np.max(values)),
-                        'mean': float(np.mean(values)),
-                        'std': float(np.std(values))
+                        'min': float(np.min(values)), 'max': float(np.max(values)),
+                        'mean': float(np.mean(values)), 'std': float(np.std(values))
                     },
                     'heat_transfer_indicators': indicators,
                     'attention_analysis': {
@@ -4590,31 +4534,26 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                         ) if hasattr(st.session_state.extrapolator, '_assess_temporal_coherence') else 0.0)
                     }
                 }
-                
                 json_str = json.dumps(heat_data, indent=2)
                 st.download_button(
-                    label="📥 Download Heat Data",
-                    data=json_str.encode('utf-8'),
+                    label="📥 Download Heat Data", data=json_str.encode('utf-8'),
                     file_name=f"heat_transfer_{selected_field_3d}_t{selected_time_3d}.json",
-                    mime="application/json",
-                    use_container_width=True
+                    mime="application/json", use_container_width=True
                 )
-    
-    # Quick field switching buttons
+
+    # ================= QUICK FIELD SWITCHING (original) =================
     if len(available_fields) > 1:
         st.markdown("##### ⚡ Quick Field Switching")
-        
-        # Show buttons for other fields
         other_fields = [f for f in available_fields if f != selected_field_3d][:4]
-        
         if other_fields:
             cols = st.columns(len(other_fields))
             for idx, field in enumerate(other_fields):
                 with cols[idx]:
-                    if st.button(f"📊 {field[:10]}...", key=f"quick_switch_{field}", use_container_width=True):
-                        # Update session state and rerun
+                    if st.button(f"📊 {field[:10]}...", key=f"quick_switch_{field}"):
                         st.session_state.current_3d_field = field
                         st.rerun()
+
+
 
 def render_comparative_analysis():
     """Render enhanced comparative analysis interface"""
