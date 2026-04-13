@@ -1632,7 +1632,7 @@ def render_stdgpa_attention_visualization(results, energy_query, duration_query,
             index=0, 
             key="sankey_font_family"
         )
-        font_size = st.slider("Font Size", 8, 24, 12, key="sankey_font_size")
+        font_size = st.slider("Font Size", 8, 100, 12, key="sankey_font_size")
         
         st.markdown("##### 🎨 Node Colors (Hex)")
         node_color_1 = st.color_picker("Target Node Color", "#FF6B6B", key="sankey_node_target")
