@@ -75,6 +75,8 @@
     [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionviewer20-streamlit-red)](https://thermomechanical-solutions-data-viewer20.streamlit.app/) (customizable color bars)
 
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionviewer21-streamlit-red)](https://thermomechanical-solutions-data-viewer21.streamlit.app/) (customizable color bars and controllable opacity)
+
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator22-streamlit-red)](https://thermomechanical-solutions-interpolator22.streamlit.app/) (r19 with customizable color bars for 3D vision, gated attention with weights for flux, pulse duration and time, robust and working interpolation module, no temporal bias and so interpolation only within 20 ns duration, opacity of dataviewer changeable for better visualization in all places, render detailed results function corrected, customized for experimental target E and tau values)
    
   
    Robust Visualizations
