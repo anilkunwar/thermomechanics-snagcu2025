@@ -2089,9 +2089,9 @@ def main():
         render_heat_transfer_analysis()
 #
 def render_data_viewer():
-    """Render the enhanced data visualization interface with adjustable opacity"""
+    """Render the enhanced data visualization interface with full Plotly customizations"""
     st.markdown('<h2 class="sub-header">📁 Data Viewer</h2>', unsafe_allow_html=True)
-    
+
     if not st.session_state.data_loaded:
         st.markdown("""
         <div class="warning-box">
@@ -2100,67 +2100,59 @@ def render_data_viewer():
         <p>Ensure your data follows this structure:</p>
         </div>
         """, unsafe_allow_html=True)
-        
         with st.expander("📁 Expected Directory Structure"):
             st.code("""
 fea_solutions/
 ├── q0p5mJ-delta4p2ns/        # Energy: 0.5 mJ, Duration: 4.2 ns
 │   ├── a_t0001.vtu           # Timestep 1
 │   ├── a_t0002.vtu           # Timestep 2
-│   ├── a_t0003.vtu           # Timestep 3
 │   └── ...
-├── q1p0mJ-delta2p0ns/        # Energy: 1.0 mJ, Duration: 2.0 ns
-│   ├── a_t0001.vtu
-│   ├── a_t0002.vtu
-│   └── ...
-└── q2p0mJ-delta1p0ns/        # Energy: 2.0 mJ, Duration: 1.0 ns
-    ├── a_t0001.vtu
-    └── ...
+└── ...
             """)
         return
-    
+
     simulations = st.session_state.simulations
-    
+
     # Simulation selection
     col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
         sim_name = st.selectbox(
             "Select Simulation",
             sorted(simulations.keys()),
-            key="viewer_sim_select",
-            help="Choose a simulation to visualize"
+            key="viewer_sim_select"
         )
-    
+
     sim = simulations[sim_name]
-    
+
     with col2:
         st.metric("Energy", f"{sim['energy_mJ']:.2f} mJ")
     with col3:
         st.metric("Duration", f"{sim['duration_ns']:.2f} ns")
-    
+
     if not sim.get('has_mesh', False):
         st.warning("This simulation was loaded without mesh data. Please reload with 'Load Full Mesh' enabled.")
         return
-    
+
     if 'field_info' not in sim or not sim['field_info']:
         st.error("No field data available for this simulation.")
         return
-    
-    # Field, timestep, colormap, and opacity selection
+
+    # ================= VISUALIZATION CONTROLS =================
+    st.markdown('<h4 class="sub-header">🎛️ Visualization Controls</h4>', unsafe_allow_html=True)
+
+    # Row 1: Field, Timestep, Colormap, Opacity
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         field = st.selectbox(
             "Select Field",
             sorted(sim['field_info'].keys()),
-            key="viewer_field_select",
-            help="Choose a field to visualize"
+            key="viewer_field_select"
         )
     with col2:
         timestep = st.slider(
             "Timestep",
             0, sim['n_timesteps'] - 1, 0,
-            key="viewer_timestep_slider",
-            help="Select timestep to display"
+            key="viewer_timestep_slider"
         )
     with col3:
         colormap = st.selectbox(
@@ -2171,257 +2163,232 @@ fea_solutions/
         )
     with col4:
         opacity = st.slider(
-            "Opacity",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.9,
-            step=0.05,
-            key="viewer_opacity",
-            help="Adjust transparency of the 3D visualization"
+            "🔹 Opacity",
+            0.0, 1.0, 0.9, 0.05,
+            key="viewer_opacity"
         )
-    
-    # Main 3D visualization
-    if 'points' in sim and 'fields' in sim and field in sim['fields']:
-        pts = sim['points']
-        kind, _ = sim['field_info'][field]
-        raw = sim['fields'][field][timestep]
-        
-        if kind == "scalar":
-            values = np.where(np.isnan(raw), 0, raw)
-            label = field
+
+    # Row 2: Aspect Ratio, Camera Preset, Lighting Preset, Theme
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        aspect_mode = st.selectbox(
+            "Aspect Ratio",
+            ["data", "cube", "auto"],
+            index=0,
+            key="viewer_aspect"
+        )
+    with col2:
+        camera_preset = st.selectbox(
+            "📷 Camera View",
+            ["Isometric", "Front", "Side", "Top", "Bottom"],
+            index=0,
+            key="viewer_camera"
+        )
+    with col3:
+        lighting_preset = st.selectbox(
+            "💡 Lighting",
+            ["Default", "Shiny", "Matte", "High Contrast"],
+            index=0,
+            key="viewer_lighting"
+        )
+    with col4:
+        bg_mode = st.selectbox(
+            "Plot Theme",
+            ["Light", "Dark"],
+            index=0,
+            key="viewer_theme"
+        )
+
+    # Row 3: Color Scale Limits (auto/manual)
+    st.markdown('<h5 class="sub-header">🌈 Color Scale Limits</h5>', unsafe_allow_html=True)
+
+    # Extract raw values for min/max
+    kind, _ = sim['field_info'][field]
+    raw = sim['fields'][field][timestep]
+    if kind == "scalar":
+        values = np.where(np.isnan(raw), 0, raw)
+    else:
+        values = np.where(np.isnan(np.linalg.norm(raw, axis=1)), 0, np.linalg.norm(raw, axis=1))
+    data_min, data_max = float(np.min(values)), float(np.max(values))
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        auto_scale = st.checkbox("Auto Scale", value=True, key="viewer_auto_scale")
+    with col_b:
+        cmin = st.number_input("Min Limit", value=data_min, format="%.3f", disabled=auto_scale, key="viewer_cmin")
+    with col_c:
+        cmax = st.number_input("Max Limit", value=data_max, format="%.3f", disabled=auto_scale, key="viewer_cmax")
+
+    if auto_scale:
+        cmin, cmax = None, None
+
+    # ================= THEME & LIGHTING SETUP =================
+    lighting_map = {
+        "Default": dict(ambient=0.8, diffuse=0.8, specular=0.5, roughness=0.5),
+        "Shiny": dict(ambient=0.6, diffuse=0.9, specular=0.8, roughness=0.2),
+        "Matte": dict(ambient=0.9, diffuse=0.6, specular=0.1, roughness=0.9),
+        "High Contrast": dict(ambient=0.4, diffuse=0.9, specular=0.7, roughness=0.4)
+    }
+    lighting = lighting_map[lighting_preset]
+
+    camera_map = {
+        "Isometric": dict(eye=dict(x=1.5, y=1.5, z=1.5)),
+        "Front": dict(eye=dict(x=0, y=2, z=0.1)),
+        "Side": dict(eye=dict(x=2, y=0, z=0.1)),
+        "Top": dict(eye=dict(x=0, y=0, z=2)),
+        "Bottom": dict(eye=dict(x=0, y=0, z=-2))
+    }
+    camera = camera_map[camera_preset]
+
+    if bg_mode == "Dark":
+        plot_bgcolor, paper_bgcolor, grid_color, font_color = "rgb(17,17,17)", "rgb(17,17,17)", "rgb(40,40,40)", "white"
+    else:
+        plot_bgcolor, paper_bgcolor, grid_color, font_color = "white", "white", "lightgray", "black"
+
+    # ================= DATA PREPARATION =================
+    if kind == "scalar":
+        label = field
+    else:
+        label = f"{field} (magnitude)"
+
+    # ================= TRACE CONSTRUCTION =================
+    pts = sim['points']
+    tri = sim.get('triangles')
+
+    if tri is not None and len(tri) > 0:
+        # Filter invalid triangles
+        valid_triangles = tri[np.all(tri < len(pts), axis=1)]
+        if len(valid_triangles) > 0:
+            trace_data = go.Mesh3d(
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
+                intensity=values,
+                colorscale=colormap,
+                intensitymode='vertex',
+                cmin=cmin, cmax=cmax,
+                opacity=opacity,
+                lighting=lighting,
+                hovertemplate=f'<b>{label}:</b> %{{intensity:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
+            )
         else:
-            magnitude = np.linalg.norm(raw, axis=1)
-            values = np.where(np.isnan(magnitude), 0, magnitude)
-            label = f"{field} (magnitude)"
-        
-        # Create 3D visualization
-        if sim.get('triangles') is not None and len(sim['triangles']) > 0:
-            tri = sim['triangles']
-            
-            # Check triangle validity
-            valid_triangles = []
-            for triangle in tri:
-                if all(idx < len(pts) for idx in triangle):
-                    valid_triangles.append(triangle)
-            
-            if valid_triangles:
-                valid_triangles = np.array(valid_triangles)
-                mesh_data = go.Mesh3d(
-                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
-                    i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
-                    intensity=values,
-                    colorscale=colormap,
-                    intensitymode='vertex',
-                    colorbar=dict(
-                        title=dict(text=label, font=dict(size=14)),
-                        thickness=20,
-                        len=0.75
-                    ),
-                    opacity=opacity,  # <-- using slider value
-                    lighting=dict(
-                        ambient=0.8,
-                        diffuse=0.8,
-                        specular=0.5,
-                        roughness=0.5
-                    ),
-                    lightposition=dict(x=100, y=200, z=300),
-                    hovertemplate='<b>Value:</b> %{intensity:.3f}<br>' +
-                                 '<b>X:</b> %{x:.3f}<br>' +
-                                 '<b>Y:</b> %{y:.3f}<br>' +
-                                 '<b>Z:</b> %{z:.3f}<extra></extra>'
-                )
-            else:
-                # Fallback to scatter plot
-                mesh_data = go.Scatter3d(
-                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
-                    mode='markers',
-                    marker=dict(
-                        size=4,
-                        color=values,
-                        colorscale=colormap,
-                        opacity=opacity,  # <-- using slider value
-                        colorbar=dict(
-                            title=dict(text=label, font=dict(size=14)),
-                            thickness=20,
-                            len=0.75
-                        ),
-                        showscale=True
-                    ),
-                    hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
-                                 '<b>X:</b> %{x:.3f}<br>' +
-                                 '<b>Y:</b> %{y:.3f}<br>' +
-                                 '<b>Z:</b> %{z:.3f}<extra></extra>'
-                )
-        else:
-            # Scatter plot for point cloud
-            mesh_data = go.Scatter3d(
+            trace_data = go.Scatter3d(
                 x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
                 mode='markers',
                 marker=dict(
                     size=4,
                     color=values,
                     colorscale=colormap,
-                    opacity=opacity,  # <-- using slider value
-                    colorbar=dict(
-                        title=dict(text=label, font=dict(size=14)),
-                        thickness=20,
-                        len=0.75
-                    ),
-                    showscale=True
+                    cmin=cmin, cmax=cmax,
+                    opacity=opacity,
+                    colorbar=dict(title=label)
                 ),
-                hovertemplate='<b>Value:</b> %{marker.color:.3f}<br>' +
-                             '<b>X:</b> %{x:.3f}<br>' +
-                             '<b>Y:</b> %{y:.3f}<br>' +
-                             '<b>Z:</b> %{z:.3f}<extra></extra>'
+                hovertemplate=f'<b>{label}:</b> %{{marker.color:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
             )
-        
-        fig = go.Figure(data=mesh_data)
-        fig.update_layout(
-            title=dict(
-                text=f"{label} at Timestep {timestep + 1}<br><sub>{sim_name}</sub>",
-                font=dict(size=20)
+    else:
+        trace_data = go.Scatter3d(
+            x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+            mode='markers',
+            marker=dict(
+                size=4,
+                color=values,
+                colorscale=colormap,
+                cmin=cmin, cmax=cmax,
+                opacity=opacity,
+                colorbar=dict(title=label)
             ),
-            scene=dict(
-                aspectmode="data",
-                camera=dict(
-                    eye=dict(x=1.5, y=1.5, z=1.5),
-                    up=dict(x=0, y=0, z=1)
-                ),
-                xaxis=dict(
-                    title="X",
-                    gridcolor="lightgray",
-                    showbackground=True,
-                    backgroundcolor="white"
-                ),
-                yaxis=dict(
-                    title="Y",
-                    gridcolor="lightgray",
-                    showbackground=True,
-                    backgroundcolor="white"
-                ),
-                zaxis=dict(
-                    title="Z",
-                    gridcolor="lightgray",
-                    showbackground=True,
-                    backgroundcolor="white"
-                )
-            ),
-            height=700,
-            margin=dict(l=0, r=0, t=80, b=0)
+            hovertemplate=f'<b>{label}:</b> %{{marker.color:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
         )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Field statistics
-        st.markdown('<h3 class="sub-header">📊 Field Statistics</h3>', unsafe_allow_html=True)
-        
-        col1, col2, col3, col4, col5 = st.columns(5)
-        with col1:
-            st.metric("Min", f"{np.min(values):.3f}")
-        with col2:
-            st.metric("Max", f"{np.max(values):.3f}")
-        with col3:
-            st.metric("Mean", f"{np.mean(values):.3f}")
-        with col4:
-            st.metric("Std Dev", f"{np.std(values):.3f}")
-        with col5:
-            st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
-    
-    # Field evolution over time (unchanged)
+
+    # ================= LAYOUT & RENDERING =================
+    fig = go.Figure(data=trace_data)
+    fig.update_layout(
+        title=dict(
+            text=f"{label} at Timestep {timestep + 1}<br><sub>{sim_name}</sub>",
+            font=dict(size=18, color=font_color)
+        ),
+        scene=dict(
+            aspectmode=aspect_mode,
+            camera=camera,
+            xaxis=dict(
+                showbackground=True,
+                backgroundcolor=plot_bgcolor,
+                gridcolor=grid_color,
+                color=font_color,
+                title="X"
+            ),
+            yaxis=dict(
+                showbackground=True,
+                backgroundcolor=plot_bgcolor,
+                gridcolor=grid_color,
+                color=font_color,
+                title="Y"
+            ),
+            zaxis=dict(
+                showbackground=True,
+                backgroundcolor=plot_bgcolor,
+                gridcolor=grid_color,
+                color=font_color,
+                title="Z"
+            )
+        ),
+        plot_bgcolor=plot_bgcolor,
+        paper_bgcolor=paper_bgcolor,
+        height=700,
+        margin=dict(l=0, r=0, t=50, b=0)
+    )
+
+    # Sync colorbar font color with theme
+    for trace in fig.data:
+        if hasattr(trace, 'colorbar') and trace.colorbar:
+            trace.colorbar.title.font.color = font_color
+            trace.colorbar.tickfont.color = font_color
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Field statistics (unchanged)
+    st.markdown('<h3 class="sub-header">📊 Field Statistics</h3>', unsafe_allow_html=True)
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1: st.metric("Min", f"{np.min(values):.3f}")
+    with col2: st.metric("Max", f"{np.max(values):.3f}")
+    with col3: st.metric("Mean", f"{np.mean(values):.3f}")
+    with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
+    with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
+
+    # Field evolution over time (unchanged, but kept for completeness)
     st.markdown('<h3 class="sub-header">📈 Field Evolution Over Time</h3>', unsafe_allow_html=True)
-    
-    # Find corresponding summary
     summary = next((s for s in st.session_state.summaries if s['name'] == sim_name), None)
-    
     if summary and field in summary['field_stats']:
         stats = summary['field_stats'][field]
-        
         fig_time = go.Figure()
-        
         if stats['mean']:
-            # Mean line
             fig_time.add_trace(go.Scatter(
-                x=summary['timesteps'],
-                y=stats['mean'],
-                mode='lines',
-                name='Mean',
+                x=summary['timesteps'], y=stats['mean'], mode='lines', name='Mean',
                 line=dict(color='blue', width=3)
             ))
-            
-            # Confidence band (mean ± std)
             if stats['std']:
                 y_upper = np.array(stats['mean']) + np.array(stats['std'])
                 y_lower = np.array(stats['mean']) - np.array(stats['std'])
-                
                 fig_time.add_trace(go.Scatter(
                     x=summary['timesteps'] + summary['timesteps'][::-1],
                     y=np.concatenate([y_upper, y_lower[::-1]]),
-                    fill='toself',
-                    fillcolor='rgba(0, 100, 255, 0.2)',
-                    line=dict(color='rgba(255,255,255,0)'),
-                    showlegend=False,
-                    name='± Std Dev'
+                    fill='toself', fillcolor='rgba(0,100,255,0.2)',
+                    line=dict(color='rgba(255,255,255,0)'), showlegend=False, name='± Std Dev'
                 ))
-            
-            # Max line
             if stats['max']:
                 fig_time.add_trace(go.Scatter(
-                    x=summary['timesteps'],
-                    y=stats['max'],
-                    mode='lines',
-                    name='Maximum',
+                    x=summary['timesteps'], y=stats['max'], mode='lines', name='Maximum',
                     line=dict(color='red', width=2, dash='dash')
                 ))
-        
         fig_time.update_layout(
-            title=dict(
-                text=f"{field} Statistics Over Time",
-                font=dict(size=18)
-            ),
-            xaxis_title="Timestep (ns)",
-            yaxis_title=f"{field} Value",
-            hovermode="x unified",
-            height=400,
-            showlegend=True,
-            legend=dict(
-                yanchor="top",
-                y=0.99,
-                xanchor="left",
-                x=0.01
-            )
+            title=dict(text=f"{field} Statistics Over Time", font=dict(size=18)),
+            xaxis_title="Timestep (ns)", yaxis_title=f"{field} Value",
+            hovermode="x unified", height=400, showlegend=True
         )
-        
         st.plotly_chart(fig_time, use_container_width=True)
-        
-        # Percentile analysis
-        with st.expander("📊 Detailed Percentile Analysis"):
-            if 'percentiles' in stats and stats['percentiles']:
-                percentiles_data = np.array(stats['percentiles'])
-                
-                fig_percentiles = go.Figure()
-                
-                percentile_labels = ['10th', '25th', '50th', '75th', '90th']
-                colors = ['lightblue', 'blue', 'darkblue', 'red', 'darkred']
-                
-                for i in range(5):
-                    fig_percentiles.add_trace(go.Scatter(
-                        x=summary['timesteps'],
-                        y=percentiles_data[:, i],
-                        mode='lines',
-                        name=percentile_labels[i],
-                        line=dict(color=colors[i], width=2)
-                    ))
-                
-                fig_percentiles.update_layout(
-                    title="Field Value Percentiles Over Time",
-                    xaxis_title="Timestep (ns)",
-                    yaxis_title=f"{field} Value",
-                    height=400
-                )
-                
-                st.plotly_chart(fig_percentiles, use_container_width=True)
     else:
         st.info(f"No time series data available for {field}")
+        
+
 
 def render_interpolation_extrapolation():
     """Render the enhanced interpolation/extrapolation interface with ST-DGPA"""
