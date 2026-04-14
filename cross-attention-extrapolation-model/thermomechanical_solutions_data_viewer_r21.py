@@ -291,13 +291,14 @@ def render_data_viewer(selected_colormap):
     st.markdown('<h5 class="sub-header">🌈 Color Scale Limits</h5>', unsafe_allow_html=True)
     data_min, data_max = float(np.min(values)), float(np.max(values))
     
+    # FIX: Dynamic keys ensure each field gets its own independent widget state
     col_a, col_b, col_c = st.columns(3)
     with col_a:
-        auto_scale = st.checkbox("Auto Scale", value=True, key="cb_auto_scale")
+        auto_scale = st.checkbox("Auto Scale", value=True, key=f"auto_scale_{field}")
     with col_b:
-        cmin = st.number_input("Min Limit", value=data_min, format="%.3f", disabled=auto_scale, key="num_cmin")
+        cmin = st.number_input("Min Limit", value=data_min, format="%.3f", disabled=auto_scale, key=f"cmin_{field}")
     with col_c:
-        cmax = st.number_input("Max Limit", value=data_max, format="%.3f", disabled=auto_scale, key="num_cmax")
+        cmax = st.number_input("Max Limit", value=data_max, format="%.3f", disabled=auto_scale, key=f"cmax_{field}")
     
     if auto_scale:
         cmin, cmax = None, None
