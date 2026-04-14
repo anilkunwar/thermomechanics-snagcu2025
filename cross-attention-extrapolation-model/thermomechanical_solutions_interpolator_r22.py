@@ -4123,6 +4123,7 @@ def compute_interpolated_field_cached(_extrapolator, field_name, attention_weigh
     )
 #
 #
+#
 def render_3d_interpolation(results, time_points, energy_query, duration_query,
                            enable_3d=True, optimize_performance=False, top_k=10):
     """Render 3D field interpolation visualization with full Plotly customizations"""
@@ -4162,7 +4163,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
         st.warning("No field predictions available for 3D visualization.")
         return
 
-    # ================= SELECTION CONTROLS (Original + Opacity) =================
+    # ================= SELECTION CONTROLS =================
     col1, col2, col3 = st.columns(3)
     with col1:
         if 'current_3d_field' not in st.session_state or st.session_state.current_3d_field not in available_fields:
@@ -4226,9 +4227,6 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
             key="interp_3d_theme"
         )
 
-    # Color scale limits (auto/manual) – shown after we compute values
-    # We'll compute the field first, then show these controls.
-
     # Display confidence metrics
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -4270,7 +4268,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
         cache_source = "new computation"
         st.info(f"✅ Computed and cached {selected_field_3d}")
 
-    # Now we have values, compute min/max for color scale limits
+    # Process values for display
     if interpolated_values.ndim == 1:
         values = np.nan_to_num(interpolated_values)
         label = selected_field_3d
@@ -4281,15 +4279,24 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
 
     data_min, data_max = float(np.min(values)), float(np.max(values))
 
-    # Color scale limits controls (after values are known)
+    # ================= COLOR SCALE LIMITS (Dynamic Keys) =================
+    # Create a unique suffix for this field + timestep to isolate state
+    state_suffix = f"{selected_field_3d}_t{timestep_idx_3d}"
+
     st.markdown('<h5 class="sub-header">🌈 Color Scale Limits</h5>', unsafe_allow_html=True)
     col_e, col_f, col_g = st.columns(3)
     with col_e:
-        auto_scale = st.checkbox("Auto Scale", value=True, key="interp_3d_auto_scale")
+        auto_scale = st.checkbox("Auto Scale", value=True, key=f"auto_3d_{state_suffix}")
     with col_f:
-        cmin = st.number_input("Min Limit", value=data_min, format="%.3f", disabled=auto_scale, key="interp_3d_cmin")
+        cmin = st.number_input(
+            "Min Limit", value=data_min, format="%.3f",
+            disabled=auto_scale, key=f"cmin_3d_{state_suffix}"
+        )
     with col_g:
-        cmax = st.number_input("Max Limit", value=data_max, format="%.3f", disabled=auto_scale, key="interp_3d_cmax")
+        cmax = st.number_input(
+            "Max Limit", value=data_max, format="%.3f",
+            disabled=auto_scale, key=f"cmax_3d_{state_suffix}"
+        )
     if auto_scale:
         cmin, cmax = None, None
 
@@ -4330,7 +4337,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
     # ================= CREATE 3D PLOT =================
     st.markdown(f"### 📊 {label} at t={selected_time_3d} ns")
 
-    # ---- ST-DGPA Weight Analysis (original expander) ----
+    # ST-DGPA Weight Analysis (original expander)
     with st.expander("🔍 ST-DGPA Weight Analysis for This Timestep", expanded=False):
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -4356,20 +4363,23 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                         f"Gating={ett_gating_3d[idx]:.4f}, "
                         f"ST-DGPA={attention_weights_3d[idx]:.4f}")
 
-    # ---- Field history (original) ----
+    # Field history
     if 'interpolation_field_history' in st.session_state and st.session_state.interpolation_field_history:
         recent_fields = list(st.session_state.interpolation_field_history.keys())[-5:]
         if recent_fields:
             st.caption(f"**Recently viewed:** {', '.join([f.split('_')[0] for f in recent_fields])}")
 
-    # ---- Build the 3D trace with all new customisations ----
+    # Build the 3D trace with all customisations
+    # Use the global colormap from sidebar – it updates on rerun
+    active_colormap = st.session_state.get("selected_colormap", "Viridis")
+
     if triangles is not None and len(triangles) > 0 and pts.shape[0] < 50000:
         if optimize_performance and subsample_factor > 1:
             trace_data = go.Scatter3d(
                 x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
                 mode='markers',
                 marker=dict(
-                    size=4, color=values, colorscale=st.session_state.selected_colormap,
+                    size=4, color=values, colorscale=active_colormap,
                     cmin=cmin, cmax=cmax, opacity=opacity_3d,
                     colorbar=dict(title=dict(text=label, font=dict(size=12)), thickness=20, len=0.6)
                 ),
@@ -4381,7 +4391,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                 trace_data = go.Mesh3d(
                     x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
                     i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
-                    intensity=values, colorscale=st.session_state.selected_colormap,
+                    intensity=values, colorscale=active_colormap,
                     intensitymode='vertex', cmin=cmin, cmax=cmax,
                     opacity=opacity_3d, lighting=lighting,
                     hovertemplate=f'<b>{label}:</b> %{{intensity:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
@@ -4391,7 +4401,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                     x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
                     mode='markers',
                     marker=dict(
-                        size=4, color=values, colorscale=st.session_state.selected_colormap,
+                        size=4, color=values, colorscale=active_colormap,
                         cmin=cmin, cmax=cmax, opacity=opacity_3d,
                         colorbar=dict(title=label)
                     ),
@@ -4402,7 +4412,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
             x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
             mode='markers',
             marker=dict(
-                size=4, color=values, colorscale=st.session_state.selected_colormap,
+                size=4, color=values, colorscale=active_colormap,
                 cmin=cmin, cmax=cmax, opacity=opacity_3d,
                 colorbar=dict(title=dict(text=label, font=dict(size=12)), thickness=20, len=0.6)
             ),
@@ -4457,7 +4467,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
 
     st.plotly_chart(fig_3d, use_container_width=True)
 
-    # ================= FIELD STATISTICS (original) =================
+    # ================= FIELD STATISTICS =================
     st.markdown("##### 📊 Interpolated Field Statistics")
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1: st.metric("Min", f"{np.min(values):.3f}")
@@ -4466,7 +4476,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
     with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
     with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
 
-    # ================= HISTOGRAM (original) =================
+    # ================= HISTOGRAM =================
     fig_hist = go.Figure()
     fig_hist.add_trace(go.Histogram(x=values, nbinsx=50, marker_color='skyblue', opacity=0.7))
     fig_hist.update_layout(
@@ -4475,7 +4485,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
     )
     st.plotly_chart(fig_hist, use_container_width=True)
 
-    # ================= EXPORT OPTIONS (original) =================
+    # ================= EXPORT OPTIONS =================
     st.markdown("##### 💾 Export Interpolated Field")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -4545,7 +4555,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                     mime="application/json", use_container_width=True
                 )
 
-    # ================= QUICK FIELD SWITCHING (original) =================
+    # ================= QUICK FIELD SWITCHING =================
     if len(available_fields) > 1:
         st.markdown("##### ⚡ Quick Field Switching")
         other_fields = [f for f in available_fields if f != selected_field_3d][:4]
@@ -4556,8 +4566,7 @@ def render_3d_interpolation(results, time_points, energy_query, duration_query,
                     if st.button(f"📊 {field[:10]}...", key=f"quick_switch_{field}"):
                         st.session_state.current_3d_field = field
                         st.rerun()
-
-
+                        
 
 def render_comparative_analysis():
     """Render enhanced comparative analysis interface"""
