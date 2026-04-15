@@ -29,7 +29,7 @@
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionreader2-streamlit-red)](https://simulation-files-reader2.streamlit.app/)
 
 
-   Interpolating (Extrapolating) the solutions
+   Interpolating (Extrapolating) the solutions (works better with python 3.12 or earlier versions)
 
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator1-streamlit-red)](https://thermomechanical-solutions-interpolator1.streamlit.app/)
 
@@ -79,7 +79,7 @@
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutioninterpolator22-streamlit-red)](https://thermomechanical-solutions-interpolator22.streamlit.app/) (r19 with customizable color bars for 3D vision i.e. color bars edge values setting function and color maps perform correctly , gated attention with weights for flux, pulse duration and time, robust and working interpolation module, no temporal bias and so interpolation only within 20 ns duration, opacity of dataviewer changeable for better visualization in all places, render detailed results function corrected, customized for experimental target E and tau values)
    
   
-   Robust Visualizations
+   Robust Visualizations 
 
     [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankeydemo-v1-brightgreen.svg)](https://thermomechanical-demo-data-interpolation-sankey-visualization1.streamlit.app/) (Sankey visualization for demo data)
 
