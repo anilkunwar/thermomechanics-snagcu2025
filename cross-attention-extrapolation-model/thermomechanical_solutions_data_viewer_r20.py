@@ -21,7 +21,7 @@ os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 # UNIFIED DATA LOADER
 # =============================================
 class UnifiedFEADataLoader:
-    """Enhanced data loader for FEA simulations"""
+    """Enhanced data loader for FEA simulations with Cloud debugging"""
     def __init__(self):
         self.simulations = {}
         self.summaries = []
@@ -58,6 +58,13 @@ class UnifiedFEADataLoader:
             if not vtu_files:
                 continue
 
+            # 🆕 DEBUG: Check file size to detect truncation (Common on Streamlit Cloud)
+            first_file_size = os.path.getsize(vtu_files[0])
+            if first_file_size < 1000:  # 1KB is too small for a mesh
+                st.error(f"🚨 Truncated File Detected: {vtu_files[0]} is only {first_file_size} bytes. "
+                         f"This suggests Git truncation or LFS failure.")
+                continue
+
             status_text.text(f"Loading {name}... ({len(vtu_files)} files)")
             try:
                 mesh0 = meshio.read(vtu_files[0])
@@ -68,14 +75,12 @@ class UnifiedFEADataLoader:
                 points = mesh0.points.astype(np.float32)
                 n_pts = len(points)
                 
-                # Find triangles
                 triangles = None
                 for cell_block in mesh0.cells:
                     if cell_block.type == "triangle":
                         triangles = cell_block.data.astype(np.int32)
                         break
 
-                # Initialize fields
                 fields = {}
                 field_info = {}
                 for key in mesh0.point_data.keys():
@@ -89,7 +94,6 @@ class UnifiedFEADataLoader:
                     fields[key][0] = arr
                     _self.available_fields.add(key)
 
-                # Load remaining timesteps
                 for t in range(1, len(vtu_files)):
                     try:
                         mesh = meshio.read(vtu_files[t])
@@ -97,42 +101,42 @@ class UnifiedFEADataLoader:
                             if key in mesh.point_data:
                                 fields[key][t] = mesh.point_data[key].astype(np.float32)
                     except Exception as e:
-                        st.warning(f"Error loading timestep {t} in {name}: {e}")
+                        # 🆕 SPECIFIC ERROR CATCH FOR BASE64 ISSUES
+                        if "base64" in str(e).lower() or "binascii" in str(e).lower():
+                            st.error(f"🚨 **Base64 Error in {name}**: File {vtu_files[t]} is corrupted. "
+                                     f"Likely caused by Git truncation. Please check Git LFS setup.")
+                        else:
+                            st.warning(f"Error loading timestep {t} in {name}: {e}")
+                        continue # Skip this timestep but keep loading others if possible
 
                 sim_data = {
-                    'name': name,
-                    'energy_mJ': energy,
-                    'duration_ns': duration,
-                    'n_timesteps': len(vtu_files),
-                    'vtu_files': vtu_files,
-                    'field_info': field_info,
-                    'has_mesh': load_full_mesh,
-                    'points': points,
-                    'fields': fields,
-                    'triangles': triangles
+                    'name': name, 'energy_mJ': energy, 'duration_ns': duration,
+                    'n_timesteps': len(vtu_files), 'vtu_files': vtu_files,
+                    'field_info': field_info, 'has_mesh': load_full_mesh,
+                    'points': points, 'fields': fields, 'triangles': triangles
                 }
                 
-                # Create summary
                 summary = {
-                    'name': name,
-                    'energy': energy,
-                    'duration': duration,
-                    'timesteps': list(range(1, len(vtu_files) + 1)),
-                    'field_stats': {} # Simplified summary for viewer
+                    'name': name, 'energy': energy, 'duration': duration,
+                    'timesteps': list(range(1, len(vtu_files) + 1)), 'field_stats': {}
                 }
-                # Populate basic stats
                 for field in field_info:
+                    vals = fields[field]
                     summary['field_stats'][field] = {
-                        'min': [float(np.nanmin(fields[field][:, :]))],
-                        'max': [float(np.nanmax(fields[field][:, :]))],
-                        'mean': [float(np.nanmean(fields[field][:, :]))],
-                        'std': [float(np.nanstd(fields[field][:, :]))]
+                        'min': [float(np.nanmin(vals))],
+                        'max': [float(np.nanmax(vals))],
+                        'mean': [float(np.nanmean(vals))],
+                        'std': [float(np.nanstd(vals))]
                     }
 
                 simulations[name] = sim_data
                 summaries.append(summary)
             except Exception as e:
-                st.warning(f"Error loading {name}: {str(e)}")
+                # 🆕 SPECIFIC ERROR CATCH FOR BASE64 ISSUES (Global catch)
+                if "base64" in str(e).lower() or "binascii" in str(e).lower():
+                    st.error(f"🚨 **Base64 Error in {name}**: The file is likely corrupted/truncated on the cloud server.")
+                else:
+                    st.warning(f"Error loading {name}: {str(e)}")
                 continue
             
             progress_bar.progress((folder_idx + 1) / len(folders))
@@ -158,13 +162,11 @@ def main():
         page_icon="📊"
     )
 
-    # CSS Styling
     st.markdown("""
     <style>
     .main-header { font-size: 2.5rem; background: linear-gradient(90deg, #1E88E5, #4A00E0); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 1.5rem; font-weight: 800; }
     .sub-header { font-size: 1.5rem; color: #2c3e50; margin-top: 1rem; margin-bottom: 0.5rem; border-bottom: 2px solid #3498db; padding-bottom: 0.3rem; font-weight: 600; }
-    .success-box { background: #e8f5e9; border-left: 4px solid #4CAF50; padding: 1rem; margin: 1rem 0; border-radius: 4px; }
-    .warning-box { background: #fff3e0; border-left: 4px solid #ff9800; padding: 1rem; margin: 1rem 0; border-radius: 4px; }
+    .control-box { background: #f8f9fa; border-left: 4px solid #1E88E5; padding: 0.8rem; margin: 0.5rem 0; border-radius: 4px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -179,26 +181,18 @@ def main():
         st.session_state.simulations = {}
     if 'summaries' not in st.session_state:
         st.session_state.summaries = []
-    if 'color_auto_scale' not in st.session_state:
-        st.session_state.color_auto_scale = True
-    if 'cmin_override' not in st.session_state:
-        st.session_state.cmin_override = 0.0
-    if 'cmax_override' not in st.session_state:
-        st.session_state.cmax_override = 1.0
 
     # Sidebar
     with st.sidebar:
         st.markdown("### ⚙️ Data Settings")
         load_full_data = st.checkbox("Load Full Mesh", value=True, help="Load complete mesh data for 3D visualization")
         
-        # Extended colormap options
         extended_colormaps = [
             'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis',
             'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland',
-            'Bluered', 'Electric', 'Thermal', 'Balance',
-            'Teal', 'Sunset', 'Burg'
+            'Bluered', 'Electric', 'Thermal', 'Balance', 'Teal', 'Sunset', 'Burg'
         ]
-        selected_colormap = st.selectbox("Colormap", extended_colormaps, index=0)
+        selected_colormap = st.selectbox("Colormap", extended_colormaps, index=0, key="global_colormap")
 
         if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
             with st.spinner("Loading simulation data..."):
@@ -206,8 +200,11 @@ def main():
                 st.session_state.simulations = simulations
                 st.session_state.summaries = summaries
                 st.session_state.data_loaded = bool(simulations)
-                # Reset color scale on load
-                st.session_state.color_auto_scale = True
+
+        # 🆕 FIX 1: Add Clear Cache Button for Cloud Debugging
+        if st.button("🧹 Clear Cache", use_container_width=True, type="secondary"):
+            st.cache_data.clear()
+            st.success("Cache cleared! Please reload data.")
 
         if st.session_state.data_loaded:
             st.markdown("---")
@@ -220,14 +217,15 @@ def main():
     # Main Content
     if not st.session_state.data_loaded:
         st.markdown("""
-        <div class="warning-box">
+        <div class="control-box" style="border-left-color: #ff9800; background: #fff3e0;">
             <h3>⚠️ No Data Loaded</h3>
             <p>Please load simulations using the "Load All Simulations" button in the sidebar.</p>
+            <p><i>If you see Base64 errors, check your Git LFS setup or file sizes.</i></p>
         </div>
         """, unsafe_allow_html=True)
         return
 
-    render_data_viewer(selected_colormap)
+    render_data_viewer(st.session_state.get('global_colormap', 'Viridis'))
 
 def render_data_viewer(selected_colormap):
     st.markdown('<h2 class="sub-header">📁 Data Viewer</h2>', unsafe_allow_html=True)
@@ -241,7 +239,6 @@ def render_data_viewer(selected_colormap):
     with col1:
         sim_name = st.selectbox("Select Simulation", sorted(simulations.keys()), key="viewer_sim_select")
     sim = simulations[sim_name]
-    
     with col2: st.metric("Energy", f"{sim['energy_mJ']:.2f} mJ")
     with col3: st.metric("Duration", f"{sim['duration_ns']:.2f} ns")
 
@@ -252,14 +249,55 @@ def render_data_viewer(selected_colormap):
         st.error("No field data available.")
         return
 
-    # Controls: Field, Timestep
-    col1, col2 = st.columns(2)
+    # ================= VISUALIZATION CONTROLS =================
+    st.markdown('<h4 class="sub-header">🎛️ Visualization Controls</h4>', unsafe_allow_html=True)
+    
+    # Row 1: Field, Timestep, Aspect Ratio, Background
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         field = st.selectbox("Select Field", sorted(sim['field_info'].keys()), key="viewer_field_select")
     with col2:
         timestep = st.slider("Timestep", 0, sim['n_timesteps'] - 1, 0, key="viewer_timestep_slider")
+    with col3:
+        aspect_mode = st.selectbox("Aspect Ratio", ["data", "cube", "auto"], index=0, key="aspect_mode")
+    with col4:
+        bg_mode = st.selectbox("Plot Theme", ["Light", "Dark"], index=0, key="bg_mode")
 
-    # Get Data
+    # Row 2: Opacity, Point Size, Camera, Lighting
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        opacity = st.slider("🔹 Opacity", 0.0, 1.0, 0.9, 0.05, key="opacity")
+    with col2:
+        point_size = st.slider("🔹 Point Size", 1, 15, 4, key="point_size")
+    with col3:
+        camera_preset = st.selectbox("📷 Camera View", ["Isometric", "Front", "Side", "Top", "Bottom"], index=0, key="camera_preset")
+    with col4:
+        lighting_preset = st.selectbox("💡 Lighting", ["Default", "Shiny", "Matte", "High Contrast"], index=0, key="lighting_preset")
+
+    # ================= THEME & LIGHTING SETUP =================
+    lighting_map = {
+        "Default": dict(ambient=0.8, diffuse=0.8, specular=0.5, roughness=0.5),
+        "Shiny": dict(ambient=0.6, diffuse=0.9, specular=0.8, roughness=0.2),
+        "Matte": dict(ambient=0.9, diffuse=0.6, specular=0.1, roughness=0.9),
+        "High Contrast": dict(ambient=0.4, diffuse=0.9, specular=0.7, roughness=0.4)
+    }
+    lighting = lighting_map[lighting_preset]
+
+    camera_map = {
+        "Isometric": dict(eye=dict(x=1.5, y=1.5, z=1.5)),
+        "Front": dict(eye=dict(x=0, y=2, z=0.1)),
+        "Side": dict(eye=dict(x=2, y=0, z=0.1)),
+        "Top": dict(eye=dict(x=0, y=0, z=2)),
+        "Bottom": dict(eye=dict(x=0, y=0, z=-2))
+    }
+    camera = camera_map[camera_preset]
+
+    if bg_mode == "Dark":
+        plot_bgcolor, paper_bgcolor, grid_color, font_color = "rgb(17,17,17)", "rgb(17,17,17)", "rgb(40,40,40)", "white"
+    else:
+        plot_bgcolor, paper_bgcolor, grid_color, font_color = "white", "white", "lightgray", "black"
+
+    # ================= DATA PROCESSING =================
     pts = sim['points']
     kind, _ = sim['field_info'][field]
     raw = sim['fields'][field][timestep]
@@ -272,81 +310,67 @@ def render_data_viewer(selected_colormap):
         values = np.where(np.isnan(magnitude), 0, magnitude)
         label = f"{field} (magnitude)"
 
-    # ==========================================
-    # CUSTOM COLOR SCALE LIMITS
-    # ==========================================
-    st.markdown('<h4 class="sub-header">🎨 Color Scale Customization</h4>', unsafe_allow_html=True)
+    # ================= COLOR SCALE LIMITS =================
+    st.markdown('<h5 class="sub-header">🌈 Color Scale Limits</h5>', unsafe_allow_html=True)
+    data_min, data_max = float(np.min(values)), float(np.max(values))
     
-    # Calculate data range for default values
-    data_min = float(np.min(values))
-    data_max = float(np.max(values))
-
-    # Reset button
-    if st.button("🔄 Reset to Auto Scale", use_container_width=True):
-        st.session_state.color_auto_scale = True
-        st.rerun()
-
+    # FIX: Dynamic keys ensure each field gets its own independent widget state
     col_a, col_b, col_c = st.columns(3)
     with col_a:
-        auto_scale = st.checkbox("Auto Scale", value=st.session_state.color_auto_scale, key="cb_auto_scale")
+        auto_scale = st.checkbox("Auto Scale", value=True, key=f"auto_scale_{field}")
     with col_b:
-        # If auto scale is ON, show disabled inputs with current auto limits, else show editable
-        is_editable = not auto_scale
-        cmin_val = st.session_state.cmin_override if not auto_scale else data_min
-        cmin = st.number_input("Min Limit", value=cmin_val, format="%.3f", disabled=auto_scale, key="num_cmin")
+        cmin = st.number_input("Min Limit", value=data_min, format="%.3f", disabled=auto_scale, key=f"cmin_{field}")
     with col_c:
-        cmax_val = st.session_state.cmax_override if not auto_scale else data_max
-        cmax = st.number_input("Max Limit", value=cmax_val, format="%.3f", disabled=auto_scale, key="num_cmax")
+        cmax = st.number_input("Max Limit", value=data_max, format="%.3f", disabled=auto_scale, key=f"cmax_{field}")
+    
+    if auto_scale:
+        cmin, cmax = None, None
 
-    # Update session state
-    if not auto_scale:
-        st.session_state.color_auto_scale = False
-        st.session_state.cmin_override = cmin
-        st.session_state.cmax_override = cmax
-    else:
-        st.session_state.color_auto_scale = True
-        cmin = None
-        cmax = None
-
-    # Create 3D Visualization
-    mesh_data = None
+    # ================= PLOTLY TRACE CONSTRUCTION =================
     tri = sim.get('triangles')
+    trace_data = None
     
     if tri is not None and len(tri) > 0:
         valid_triangles = tri[np.all(tri < len(pts), axis=1)]
         if len(valid_triangles) > 0:
-            mesh_data = go.Mesh3d(
+            trace_data = go.Mesh3d(
                 x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
                 i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
-                intensity=values,
-                colorscale=selected_colormap,
-                intensitymode='vertex',
-                cmin=cmin,  # Applied custom min
-                cmax=cmax,  # Applied custom max
-                colorbar=dict(title=dict(text=label, font=dict(size=12)), thickness=20, len=0.75),
-                opacity=0.9,
-                lighting=dict(ambient=0.8, diffuse=0.8, specular=0.5, roughness=0.5),
-                hovertemplate='<b>Value:</b> %{intensity:.3f}<extra></extra>'
+                intensity=values, colorscale=selected_colormap, intensitymode='vertex',
+                cmin=cmin, cmax=cmax, opacity=opacity, lighting=lighting,
+                hovertemplate=f'<b>{label}:</b> %{{intensity:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
             )
     
-    if mesh_data is None:
-        mesh_data = go.Scatter3d(
+    if trace_data is None:
+        trace_data = go.Scatter3d(
             x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
             mode='markers',
-            marker=dict(size=4, color=values, colorscale=selected_colormap, cmin=cmin, cmax=cmax, showscale=True),
-            hovertemplate='<b>Value:</b> %{marker.color:.3f}<extra></extra>'
+            marker=dict(size=point_size, color=values, colorscale=selected_colormap, cmin=cmin, cmax=cmax, opacity=opacity),
+            hovertemplate=f'<b>{label}:</b> %{{marker.color:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
         )
 
-    fig = go.Figure(data=mesh_data)
+    # ================= LAYOUT & RENDERING =================
+    fig = go.Figure(data=trace_data)
     fig.update_layout(
-        title=f"{label} at Timestep {timestep + 1}",
-        scene=dict(aspectmode="data", camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))),
-        height=700,
-        margin=dict(l=0, r=0, t=40, b=0)
+        title=dict(text=f"{label} at Timestep {timestep + 1}", font=dict(size=18, color=font_color)),
+        scene=dict(
+            aspectmode=aspect_mode, camera=camera,
+            xaxis=dict(showbackground=True, backgroundcolor=plot_bgcolor, gridcolor=grid_color, color=font_color, title="X"),
+            yaxis=dict(showbackground=True, backgroundcolor=plot_bgcolor, gridcolor=grid_color, color=font_color, title="Y"),
+            zaxis=dict(showbackground=True, backgroundcolor=plot_bgcolor, gridcolor=grid_color, color=font_color, title="Z")
+        ),
+        plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=700, margin=dict(l=0, r=0, t=50, b=0)
     )
-    st.plotly_chart(fig, use_container_width=True)
+    
+    # Sync colorbar font with theme
+    for trace in fig.data:
+        if hasattr(trace, 'colorbar') and trace.colorbar:
+            trace.colorbar.title.font.color = font_color
+            trace.colorbar.tickfont.color = font_color
 
-    # Statistics
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Field Statistics
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1: st.metric("Min", f"{np.min(values):.3f}")
     with col2: st.metric("Max", f"{np.max(values):.3f}")
