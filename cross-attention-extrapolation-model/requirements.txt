@@ -23,3 +23,5 @@ cmasher
 stpyvista
 scikit-image
 kaleido
+flake8
+pylint
