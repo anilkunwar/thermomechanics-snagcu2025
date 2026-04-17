@@ -20,7 +20,7 @@
    (ii) generated data: T_h-SnAgCu.csv (csv format) and T_h-SnAgCu.dat (dat file format)
 
 
-2. Attention Mechanism
+2. Attention Mechanism for Contruction of Numerically Attentive Interpolation and Extrapolation Framework from Finite Element Fields Datasets
 
    Reading the simulation results
    
