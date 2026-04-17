@@ -585,7 +585,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         self.value_scaler = StandardScaler()
         self.source_embeddings: np.ndarray = np.array([])
         self.source_values: np.ndarray = np.array([])
-        self.source_meta List[Dict] = []
+        self.source_metadata: List[Dict] = []
         self.fitted: bool = False
 
     def load_summaries(self, summaries: List[Dict]):
