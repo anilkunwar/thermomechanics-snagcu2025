@@ -172,7 +172,7 @@ class PhysicalUnit:
                 return False, f"Value {physical_value:.2f} {self.unit} outside valid range [{v_min}, {v_max}]"
         return True, None
 
-
+#
 @dataclass
 class RadarDataPoint:
     """
@@ -187,7 +187,7 @@ class RadarDataPoint:
     peak_physical: float       # Physical: peak field value (e.g., 523.4 K)
     peak_normalized: float = 0.0  # Computed: normalized for visualization [0,1]
     uncertainty_physical: Optional[float] = None  # Optional: ± uncertainty in physical units
-    meta Dict = field(default_factory=dict)  # Additional context: unit, refs, etc.
+    metadata: Dict = field(default_factory=dict)  # ✅ FIXED: colon syntax for type hint
     
     def __post_init__(self):
         """Auto-compute normalized value if physical value and refs provided."""
@@ -218,7 +218,7 @@ class RadarDataPoint:
                 for k, v in self.metadata.items()
             }
         }
-
+      
 
 @dataclass  
 class RadarVisualizationConfig:
