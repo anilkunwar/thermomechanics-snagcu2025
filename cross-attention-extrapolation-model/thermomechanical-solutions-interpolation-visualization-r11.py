@@ -2946,7 +2946,7 @@ def main():
                             row['confidence'] = results['confidence_scores'][idx]
                         csv_data.append(row)
                     
-                    if csv_
+                    if csv_data:
                         df_csv = pd.DataFrame(csv_data)
                         csv_str, csv_name = st.session_state.export_manager.export_to_csv(df_csv)
                         if csv_str:
