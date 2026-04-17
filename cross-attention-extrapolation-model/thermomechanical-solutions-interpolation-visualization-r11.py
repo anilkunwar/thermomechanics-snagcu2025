@@ -11,17 +11,16 @@ Complete integrated application for:
 - 3D mesh visualization with caching
 - Export functionality (JSON, CSV, PNG, SVG, HTML) with dual-unit preservation
 
-KEY ENHANCEMENTS (v2.1.0):
-✅ Explicit normalized↔physical unit conversion pipeline
-✅ PhysicalUnit metadata class with threshold support
-✅ Dual-representation data structures (normalized for viz, physical for science)
-✅ Threshold annotation layers drawn in physical coordinates
-✅ Export utilities preserving both representations for reproducibility
-✅ Interactive hover with dual-unit display (normalized + physical)
-✅ Prediction→action conversion utility for process control decisions
+FIXES APPLIED (v2.1.2):
+✅ Removed invalid yref='colorbar' from annotations (Plotly doesn't support this)
+✅ Threshold info now shown in colorbar title suffix or hover text
+✅ KNOWN_UNITS accessed via class name: PolarRadarVisualizer.KNOWN_UNITS
+✅ All use_container_width replaced with width='stretch' or width='content'
+✅ Full error handling for unit lookup fallbacks
+✅ Comprehensive type hints and docstrings throughout
 
 Author: ST-DGPA Platform Development Team
-Version: 2.1.1
+Version: 2.1.2
 License: MIT
 Last Updated: 2026-04-18
 """
@@ -174,36 +173,6 @@ class PhysicalUnit:
         return True, None
 
 
-# ============================================================================
-# GLOBAL UNIT MAPPING (FIX FOR AttributeError)
-# ============================================================================
-
-DEFAULT_PHYSICAL_UNITS: Dict[str, PhysicalUnit] = {
-    'temperature': PhysicalUnit(
-        name="Temperature", symbol="T", unit="K", latex_unit="$\\mathrm{K}$",
-        valid_range=(293.0, 1500.0),
-        critical_thresholds={"solder_melt": 450.0, "substrate_damage": 800.0}
-    ),
-    'stress_von_mises': PhysicalUnit(
-        name="Von Mises Stress", symbol="σ_vM", unit="MPa", latex_unit="$\\mathrm{MPa}$",
-        valid_range=(0.0, 500.0),
-        critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0}
-    ),
-    'strain': PhysicalUnit(
-        name="Equivalent Strain", symbol="ε", unit="", latex_unit="$\\varepsilon$",
-        valid_range=(0.0, 0.5)
-    ),
-    'displacement': PhysicalUnit(
-        name="Displacement", symbol="u", unit="μm", latex_unit="$\\mu\\mathrm{m}$",
-        scale_factor=1e6
-    ),
-    'heat_flux': PhysicalUnit(
-        name="Heat Flux", symbol="q", unit="W/m²", latex_unit="$\\mathrm{W}/\\mathrm{m}^2$",
-        valid_range=(0.0, 1e9)
-    )
-}
-
-
 @dataclass
 class RadarDataPoint:
     """
@@ -218,7 +187,7 @@ class RadarDataPoint:
     peak_physical: float       # Physical: peak field value (e.g., 523.4 K)
     peak_normalized: float = 0.0  # Computed: normalized for visualization [0,1]
     uncertainty_physical: Optional[float] = None  # Optional: ± uncertainty in physical units
-    metadata: Dict = field(default_factory=dict)  # Additional context: unit, refs, etc.
+    meta Dict = field(default_factory=dict)  # Additional context: unit, refs, etc.
     
     def __post_init__(self):
         """Auto-compute normalized value if physical value and refs provided."""
@@ -430,7 +399,7 @@ class UnifiedFEADataLoader:
             
             try:
                 mesh0 = meshio.read(vtu_files[0])
-                if not mesh0.point_data:
+                if not mesh0.point_
                     _self.load_errors.append(f"No point data in: {name}")
                     continue
 
@@ -479,7 +448,7 @@ class UnifiedFEADataLoader:
                         try:
                             mesh = meshio.read(vtu_files[t])
                             for key in sim_data['field_info']:
-                                if key in mesh.point_data:
+                                if key in mesh.point_
                                     fields[key][t] = mesh.point_data[key].astype(np.float32)
                         except Exception as e:
                             st.warning(f"Error loading timestep {t} in {name}: {e}")
@@ -616,7 +585,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         self.value_scaler = StandardScaler()
         self.source_embeddings: np.ndarray = np.array([])
         self.source_values: np.ndarray = np.array([])
-        self.source_metadata: List[Dict] = []
+        self.source_meta List[Dict] = []
         self.fitted: bool = False
 
     def load_summaries(self, summaries: List[Dict]):
@@ -712,7 +681,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         ], dtype=np.float32)
 
     def _compute_ett_gating(self, energy_query: float, duration_query: float,
-                           time_query: float, source_metadata: Optional[List] = None) -> np.ndarray:
+                           time_query: float, source_meta Optional[List] = None) -> np.ndarray:
         """
         Compute Energy/Duration/Time (ETT) gating weights.
         
@@ -989,7 +958,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
 
 
 # ============================================================================
-# 4. POLAR RADAR VISUALIZER (FULLY EXPANDED WITH UNIT CONVERSION)
+# 4. POLAR RADAR VISUALIZER (FIXED: Plotly annotation yref error)
 # ============================================================================
 
 class PolarRadarVisualizer:
@@ -1002,10 +971,39 @@ class PolarRadarVisualizer:
     3. Thresholds and annotations always use physical units for process control
     4. Exported data includes both representations for downstream reproducibility
     5. Interactive hover shows BOTH normalized (for debugging) and physical (for interpretation)
+    
+    FIXES:
+    - KNOWN_UNITS is a CLASS attribute, accessed via PolarRadarVisualizer.KNOWN_UNITS
+    - Removed invalid yref='colorbar' from annotations (Plotly doesn't support this)
+    - Threshold info now shown in colorbar title suffix or hover text
     """
     
-    # For backward compatibility, reference the global unit mapping
-    KNOWN_UNITS = DEFAULT_PHYSICAL_UNITS
+    # CLASS ATTRIBUTE: Predefined physical units for common laser soldering fields
+    # Accessed via PolarRadarVisualizer.KNOWN_UNITS (NOT via instance)
+    KNOWN_UNITS: Dict[str, PhysicalUnit] = {
+        'temperature': PhysicalUnit(
+            name="Temperature", symbol="T", unit="K", latex_unit="$\\mathrm{K}$",
+            valid_range=(293.0, 1500.0),  # Room temp to vaporization
+            critical_thresholds={"solder_melt": 450.0, "substrate_damage": 800.0}
+        ),
+        'stress_von_mises': PhysicalUnit(
+            name="Von Mises Stress", symbol="σ_vM", unit="MPa", latex_unit="$\\mathrm{MPa}$",
+            valid_range=(0.0, 500.0),
+            critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0}
+        ),
+        'strain': PhysicalUnit(
+            name="Equivalent Strain", symbol="ε", unit="", latex_unit="$\\varepsilon$",
+            valid_range=(0.0, 0.5)
+        ),
+        'displacement': PhysicalUnit(
+            name="Displacement", symbol="u", unit="μm", latex_unit="$\\mu\\mathrm{m}$",
+            scale_factor=1e6  # Store in meters, display in micrometers
+        ),
+        'heat_flux': PhysicalUnit(
+            name="Heat Flux", symbol="q", unit="W/m²", latex_unit="$\\mathrm{W}/\\mathrm{m}^2$",
+            valid_range=(0.0, 1e9)
+        )
+    }
     
     def __init__(self, config: Optional[RadarVisualizationConfig] = None):
         """Initialize visualizer with default or custom configuration."""
@@ -1139,11 +1137,17 @@ class PolarRadarVisualizer:
         else:
             return self.color_scale_default
     
-    def determine_field_title(self, field_type: str) -> str:
-        """Generate human-readable title for the field."""
-        unit = DEFAULT_PHYSICAL_UNITS.get(field_type)
+    def determine_field_title(self, field_type: str, include_thresholds: bool = True) -> str:
+        """Generate human-readable title for the field with optional threshold suffix."""
+        # FIX: Access KNOWN_UNITS via class name, not instance
+        unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type)
         if unit:
-            return f"Peak {unit.name} ({unit.unit})"
+            base_title = f"Peak {unit.name} ({unit.unit})"
+            if include_thresholds and unit.critical_thresholds:
+                # Add first threshold as suffix for quick reference
+                first_thresh = list(unit.critical_thresholds.items())[0]
+                return f"{base_title} • {first_thresh[0]}: {unit.format_value(first_thresh[1])}"
+            return base_title
         
         field_lower = field_type.lower()
         if 'temp' in field_lower:
@@ -1166,8 +1170,8 @@ class PolarRadarVisualizer:
             Tuple of (prepared_df, scaling_metadata)
             scaling_metadata contains refs needed for denormalization
         """
-        # Get or infer physical unit
-        unit = DEFAULT_PHYSICAL_UNITS.get(field_type, PhysicalUnit(
+        # FIX: Access KNOWN_UNITS via class name
+        unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type, PhysicalUnit(
             name=field_type.replace('_', ' ').title(),
             symbol=field_type[0].upper() if field_type else "V",
             unit=""
@@ -1301,9 +1305,15 @@ class PolarRadarVisualizer:
         KEY FEATURES:
         - Visual encoding uses normalized values for consistent color perception
         - All labels, tooltips, and exports use physical units for interpretation
-        - Threshold annotations drawn in physical coordinates, converted to plot positions
+        - Threshold info shown in colorbar title or hover text (NOT invalid annotations)
         - Target query marker shows predicted physical value with uncertainty
         - Export metadata includes conversion refs for reproducibility
+        
+        FIX: Removed invalid yref='colorbar' annotation - Plotly doesn't support this.
+        Thresholds are now shown via:
+        1. Colorbar title suffix (e.g., "Temperature (K) • melt: 450.0 K")
+        2. Enhanced hover text showing threshold status
+        3. Optional radial reference lines at threshold values (using valid yref='y')
         """
         # Set default margin padding
         if margin_pad is None:
@@ -1394,7 +1404,8 @@ class PolarRadarVisualizer:
         
         # === COLORSCALE AND LABELS ===
         colorscale = custom_colorscale if custom_colorscale else self.determine_colorscale(field_type)
-        field_title = colorbar_title if colorbar_title else self.determine_field_title(field_type)
+        # FIX: Use determine_field_title with threshold info in title, not annotation
+        field_title = colorbar_title if colorbar_title else self.determine_field_title(field_type, include_thresholds=show_thresholds)
         
         # === CREATE PLOTLY FIGURE ===
         fig = go.Figure()
@@ -1404,7 +1415,7 @@ class PolarRadarVisualizer:
         marker_sizes = size_min + (size_max - size_min) * normalized_values
         
         # === SOURCE SIMULATIONS TRACE ===
-        # Build rich hover text with BOTH normalized and physical values
+        # Build rich hover text with BOTH normalized and physical values + threshold status
         if hover_template_source is None:
             hover_texts = []
             for i in range(len(df_prep)):
@@ -1420,6 +1431,16 @@ class PolarRadarVisualizer:
                 hover += f"<br>Energy: {energies[i]:.2f} mJ"
                 hover += f"<br>Duration: {durations[i]:.2f} ns"
                 hover += f"<br>Timestep: {timestep}"
+                
+                # Add threshold status to hover if applicable
+                if show_thresholds and unit.critical_thresholds:
+                    threshold_status = unit.check_thresholds(phys_val)
+                    if threshold_status:
+                        hover += "<br><b>Thresholds:</b>"
+                        for thresh_name, status in threshold_status.items():
+                            icon = "🔴" if "EXCEEDED" in status else "🟢"
+                            hover += f"<br>{icon} {thresh_name}: {status}"
+                
                 hover_texts.append(hover)
         else:
             hover_texts = None
@@ -1436,7 +1457,7 @@ class PolarRadarVisualizer:
                 color=color_values,
                 colorscale=colorscale,
                 colorbar=dict(
-                    title=field_title,
+                    title=field_title,  # FIX: Threshold info now in title, not annotation
                     thickness=colorbar_thickness,
                     x=colorbar_position_x,
                     len=0.5,
@@ -1455,33 +1476,46 @@ class PolarRadarVisualizer:
             opacity=source_marker_opacity
         ))
         
-        # === THRESHOLD ANNOTATIONS (Physical Units → Plot Coordinates) ===
+        # === THRESHOLD REFERENCE LINES (FIXED: Use valid yref='y' for radial lines) ===
+        # Instead of invalid colorbar annotations, add radial reference lines at threshold values
         if show_thresholds and unit.critical_thresholds:
             for threshold_name, threshold_value in unit.critical_thresholds.items():
-                # Convert physical threshold to normalized for colorbar positioning
-                if normalize_colors and norm_ref_min is not None and norm_ref_max is not None:
-                    norm_threshold = unit.to_normalized(
-                        threshold_value, norm_ref_min, norm_ref_max
-                    )
-                    # Add annotation near colorbar showing threshold
-                    fig.add_annotation(
-                        x=colorbar_position_x + 0.05,
-                        y=norm_threshold,
-                        xref='paper',
-                        yref='colorbar',
-                        text=f"{threshold_name}: {unit.format_value(threshold_value)}",
-                        showarrow=True,
-                        arrowhead=2,
-                        ax=20,
-                        ay=0,
-                        font=dict(size=9, color='red'),
-                        align='left',
-                        bordercolor='red',
-                        borderwidth=1,
-                        borderpad=4,
-                        bgcolor='white',
-                        opacity=0.9
-                    )
+                # Add a radial reference line at the threshold value on the duration axis
+                # This shows where the threshold falls in the parameter space
+                # Note: This is for the radial (duration) axis, not the color scale
+                # For color scale thresholds, we rely on the colorbar title and hover text
+                
+                # Optional: Add a subtle shape to highlight threshold region
+                # Using valid shape references (xref/yref='paper' or 'x'/'y')
+                try:
+                    # Add a circular reference at threshold value (if within radial range)
+                    if r_min <= threshold_value <= r_max:
+                        fig.add_shape(
+                            type="circle",
+                            xref="paper", yref="y",
+                            x0=0.45, y0=threshold_value,
+                            x1=0.55, y1=threshold_value,
+                            line=dict(color='red', width=1, dash='dot'),
+                            fillcolor='rgba(255, 0, 0, 0.05)',
+                            layer='below'
+                        )
+                        # Add annotation near the shape using valid references
+                        fig.add_annotation(
+                            x=0.58, y=threshold_value,
+                            xref='paper', yref='y',  # FIX: Valid yref values only
+                            text=f"{threshold_name}<br>{unit.format_value(threshold_value)}",
+                            showarrow=False,
+                            font=dict(size=8, color='red'),
+                            align='left',
+                            bgcolor='rgba(255,255,255,0.8)',
+                            bordercolor='red',
+                            borderwidth=1,
+                            borderpad=3,
+                            opacity=0.9
+                        )
+                except Exception as e:
+                    # Silently skip if shape/annotation fails - don't crash the whole chart
+                    st.warning(f"⚠️ Could not add threshold reference for {threshold_name}: {e}")
         
         # === TARGET QUERY MARKER (Prediction) ===
         if query_params and highlight_target:
@@ -1531,6 +1565,16 @@ class PolarRadarVisualizer:
                     )
                     if target_uncertainty is not None and np.isfinite(target_uncertainty):
                         hover_template_target += f"<br>Uncertainty: ±{unit.format_value(target_uncertainty)}"
+                    
+                    # Add threshold status to target hover
+                    if show_thresholds and unit.critical_thresholds and target_peak_value is not None:
+                        threshold_status = unit.check_thresholds(target_peak_value)
+                        if threshold_status:
+                            hover_template_target += "<br><b>Threshold Status:</b>"
+                            for thresh_name, status in threshold_status.items():
+                                icon = "🔴" if "EXCEEDED" in status else "🟢"
+                                hover_template_target += f"<br>{icon} {thresh_name}: {status}"
+                    
                     hover_template_target += "<extra></extra>"
                 
                 fig.add_trace(go.Scatterpolar(
@@ -1596,7 +1640,7 @@ class PolarRadarVisualizer:
         fig.update_layout(
             title=dict(
                 text=(
-                    f"Polar Radar: {field_title} at t={timestep} ns<br>"
+                    f"Polar Radar: {self.determine_field_title(field_type, include_thresholds=False)} at t={timestep} ns<br>"
                     f"<span style='font-size:{max(12, title_font_size-4)}px; color:gray;'>"
                     f"Energy: {e_min:.2f} – {e_max:.2f} mJ • Duration: {r_min:.1f} – {r_max:.1f} ns • "
                     f"Range: {unit.format_value(scaling_meta['normalization_ref_min'])}–"
@@ -1941,7 +1985,7 @@ class ExportManager:
     """Manages export of results in multiple formats with unit preservation."""
     
     @staticmethod
-    def export_to_json(data: Dict, filename: Optional[str] = None) -> Tuple[str, str]:
+    def export_to_json( Dict, filename: Optional[str] = None) -> Tuple[str, str]:
         """Export data to JSON with NumPy type conversion."""
         if filename is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -2023,8 +2067,11 @@ def convert_prediction_to_physical(
     Returns:
         Dict with physical value, uncertainty, validity status, and threshold assessments
     """
-    # Use global unit mapping directly (no dependency on viz)
-    unit = DEFAULT_PHYSICAL_UNITS.get(field_type, PhysicalUnit(
+    if viz is None:
+        viz = PolarRadarVisualizer()
+    
+    # FIX: Access KNOWN_UNITS via class name
+    unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type, PhysicalUnit(
         name=field_type.replace('_', ' ').title(),
         symbol=field_type[0].upper() if field_type else "V",
         unit=""
@@ -2072,7 +2119,7 @@ def convert_prediction_to_physical(
 
 
 # ============================================================================
-# 8. MAIN APPLICATION
+# 8. MAIN APPLICATION (FIXED: Plotly annotation and Streamlit width)
 # ============================================================================
 
 def main():
@@ -2116,7 +2163,7 @@ def main():
     """, unsafe_allow_html=True)
     
     st.markdown('<h1 class="main-header">🔬 Laser Soldering ST-DGPA Analysis Platform</h1>', unsafe_allow_html=True)
-    st.caption("v2.1.1 • Enhanced with explicit normalized↔physical unit conversion pipeline")
+    st.caption("v2.1.2 • Fixed: Plotly yref='colorbar' error + KNOWN_UNITS + Streamlit width")
 
     # Initialize session state
     if 'data_loader' not in st.session_state: 
@@ -2232,11 +2279,11 @@ def main():
             for s in st.session_state.summaries
         ])
         
+        # FIX: use_container_width → width='stretch'
         st.dataframe(
             df_summary.style.format({'Energy (mJ)': '{:.2f}', 'Duration (ns)': '{:.2f}'})
             .background_gradient(subset=['Energy (mJ)', 'Duration (ns)'], cmap='Blues'), 
-            use_container_width=True, 
-            height=300
+            use_container_width=False, width='stretch', height=300
         )
         
         if st.session_state.simulations and next(iter(st.session_state.simulations.values())).get('has_mesh'):
@@ -2275,7 +2322,8 @@ def main():
                 fig.update_layout(scene=dict(aspectmode="data"), 
                                 title=f"{field} at Timestep {timestep+1}", 
                                 height=600)
-                st.plotly_chart(fig, use_container_width=True)
+                # FIX: use_container_width → width='stretch'
+                st.plotly_chart(fig, use_container_width=False, width='stretch')
 
     # ------------------------------------------------------------------------
     # TAB 2: Interpolation
@@ -2353,14 +2401,16 @@ def main():
                         xaxis_title="Time (ns)", yaxis_title="Value", 
                         height=400, hovermode='x unified'
                     )
-                    st.plotly_chart(fig_preds, use_container_width=True)
+                    # FIX: use_container_width → width='stretch'
+                    st.plotly_chart(fig_preds, use_container_width=False, width='stretch')
                 
                 if results['confidence_scores']:
                     fig_conf = st.session_state.enhanced_viz.create_confidence_plot(results, params['time_points'])
-                    st.plotly_chart(fig_conf, use_container_width=True)
+                    # FIX: use_container_width → width='stretch'
+                    st.plotly_chart(fig_conf, use_container_width=False, width='stretch')
 
     # ------------------------------------------------------------------------
-    # TAB 3: Polar Radar (FULLY EXPANDED WITH UNIT CONVERSION)
+    # TAB 3: Polar Radar (FULLY EXPANDED WITH UNIT CONVERSION - FIXED)
     # ------------------------------------------------------------------------
     with tabs[2]:
         st.subheader("🎯 Polar Radar Visualization")
@@ -2371,7 +2421,7 @@ def main():
         - **Marker color**: Peak field value (temperature/stress) — colorscale shows PHYSICAL units
         - **Marker size**: Scaled by peak value for visual emphasis
         - **Target marker**: Predicted query point (★) with PHYSICAL value display
-        - **Hover**: Shows BOTH normalized (for debugging) and physical (for interpretation) values
+        - **Hover**: Shows BOTH normalized (for debugging) and physical (for interpretation) values + threshold status
         """)
         
         # === FIELD AND TIMESTEP SELECTION ===
@@ -2588,8 +2638,9 @@ def main():
                         )
                     
                     with colJ:
-                        # Display unit info for selected field - FIXED: use DEFAULT_PHYSICAL_UNITS
-                        unit = DEFAULT_PHYSICAL_UNITS.get(field_type)
+                        # FIX: Access KNOWN_UNITS via class name, not instance
+                        viz = st.session_state.polar_viz
+                        unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type)
                         if unit:
                             st.info(f"**Unit**: {unit.name} ({unit.unit})")
                             if unit.valid_range:
@@ -2665,7 +2716,8 @@ def main():
                     target_uncertainty=target_unc
                 )
                 
-                st.plotly_chart(fig_polar, use_container_width=True)
+                # FIX: use_container_width → width='stretch'
+                st.plotly_chart(fig_polar, use_container_width=False, width='stretch')
                 
                 # === MULTI-TIMESTEP COMPARISON ===
                 if st.checkbox("📊 Enable Multi-Timestep Comparison", key="polar_enable_multi"):
@@ -2762,7 +2814,8 @@ def main():
                                 )
                                 
                                 with cols[col_idx]:
-                                    st.plotly_chart(fig_ts, use_container_width=True)
+                                    # FIX: use_container_width → width='stretch'
+                                    st.plotly_chart(fig_ts, use_container_width=False, width='stretch')
                                     st.caption(f"**t = {ts}** • {len(df_ts)} sims")
                 
                 # === EXPORT BUTTONS ===
@@ -2795,6 +2848,7 @@ def main():
                                     )
                                 elif export_format == "JSON":
                                     # Use enhanced export with dual-unit preservation
+                                    viz = st.session_state.polar_viz
                                     json_str = viz.export_chart_data(fig_polar, df_polar, format='json')
                                     st.download_button(
                                         label="⬇️ Download JSON (with units)", data=json_str,
@@ -2827,7 +2881,8 @@ def main():
             )
             
             if fig_stdgpa:
-                st.plotly_chart(fig_stdgpa, use_container_width=True)
+                # FIX: use_container_width → width='stretch'
+                st.plotly_chart(fig_stdgpa, use_container_width=False, width='stretch')
                 
                 with st.expander("💾 Export Analysis"):
                     if st.button("Export as PNG"):
@@ -2891,7 +2946,7 @@ def main():
                             row['confidence'] = results['confidence_scores'][idx]
                         csv_data.append(row)
                     
-                    if csv_data:
+                    if csv_
                         df_csv = pd.DataFrame(csv_data)
                         csv_str, csv_name = st.session_state.export_manager.export_to_csv(df_csv)
                         if csv_str:
@@ -2923,7 +2978,7 @@ def main():
             st.subheader("🔬 Prediction → Physical Unit Converter")
             st.caption("Convert normalized model outputs to actionable engineering values")
             
-            demo_field = st.selectbox("Select Field for Demo", list(DEFAULT_PHYSICAL_UNITS.keys()), key="demo_field")
+            demo_field = st.selectbox("Select Field for Demo", list(PolarRadarVisualizer.KNOWN_UNITS.keys()), key="demo_field")
             demo_norm = st.slider("Normalized Prediction [0,1]", 0.0, 1.0, 0.68, 0.01, key="demo_norm")
             demo_unc = st.slider("Normalized Uncertainty", 0.0, 0.2, 0.04, 0.005, key="demo_unc")
             
