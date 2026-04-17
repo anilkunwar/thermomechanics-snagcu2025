@@ -156,18 +156,18 @@ def get_global_max_peak(summary: dict, field_name: str) -> float:
 
 def build_sunburst_data(summaries, field_name):
     """Build the hierarchy lists for a given field.
-    Returns: labels, parents, values, numeric_colors (for the leaf nodes)
+    Returns: labels, parents, values, numeric_colors (for leaf nodes)
     """
     labels = []
     parents = []
     values = []
-    numeric_colors = []  # will be used for leaf wedges only; interior nodes get a fixed color
+    numeric_colors = []  # will be used for leaf wedges only; interior nodes get None
 
     # Root
     labels.append("All Simulations")
     parents.append("")
     values.append(len(summaries))
-    numeric_colors.append(None)  # placeholder
+    numeric_colors.append(None)
 
     # Group by pulse duration (τ)
     duration_groups = {}
@@ -200,7 +200,7 @@ def build_sunburst_data(summaries, field_name):
                 values.append(1)
                 numeric_colors.append(None)  # simulation node itself has no numeric value
 
-                # Leaf: Temperature peak (or other field)
+                # Leaf: field peak
                 peak_val = get_global_max_peak(s, field_name)
                 leaf_label = f"{field_name}: {peak_val:.2f}"
                 labels.append(leaf_label)
@@ -210,74 +210,66 @@ def build_sunburst_data(summaries, field_name):
 
     return labels, parents, values, numeric_colors
 
-def create_sunburst_figure(summaries, field_name, colormap, highlight_sim=None):
+def build_sunburst_figure(summaries, field_name, colormap_name, highlight_sim=None):
     """Create a Plotly Sunburst figure for a given field."""
     labels, parents, values, num_colors = build_sunburst_data(summaries, field_name)
-
-    # For leaf nodes (where num_colors is not None), use the numeric value for coloring.
-    # For interior nodes, assign a neutral color (light gray).
-    color_values = []
-    for v in num_colors:
-        if v is None:
-            color_values.append(0.5)  # dummy value that will be mapped to a mid-gray
+    
+    # Map numeric leaf values to actual colors using the chosen colormap
+    import plotly.express as px
+    
+    # Get the colorscale as a list of 101 colors
+    if colormap_name in px.colors.named_colorscales():
+        colorscale = px.colors.sample_colorscale(colormap_name, [i/100 for i in range(101)])
+    else:
+        colorscale = px.colors.sample_colorscale("Viridis", [i/100 for i in range(101)])
+    
+    # Determine the range of leaf values (excluding None)
+    leaf_vals = [v for v in num_colors if v is not None]
+    if leaf_vals:
+        vmin, vmax = min(leaf_vals), max(leaf_vals)
+    else:
+        vmin, vmax = 0, 1
+    
+    # Build color list for all wedges
+    color_list = []
+    for val in num_colors:
+        if val is None:
+            color_list.append("#CCCCCC")  # light gray for interior nodes
         else:
-            color_values.append(v)
-
-    # Build custom color scale: we want interior nodes to be gray, leaf nodes to follow colormap.
-    # We'll use a continuous colorscale and set a fixed gray for the dummy value.
-    # Simpler: use marker colors as a list of colors, not a colorscale.
-    # But to support colormap selection, we create a continuous colorscale and then map the numeric
-    # values to colors. However, interior nodes have dummy values that would get colored.
-    # Better: create two traces? Not necessary. We'll let Plotly's colorscale apply,
-    # and we'll manually set the color of interior nodes after figure creation.
-    # However, Plotly's sunburst does not support per-wedge color assignment easily.
-    # Alternative: use marker=dict(colors=color_values, colorscale=colormap) and then override
-    # the interior node colors using `marker.colors` list after building? Not straightforward.
-
-    # A clean solution: Use a separate color for interior nodes by setting a constant color
-    # for them in the figure after creation via `fig.update_traces(marker_colors=...)`.
-    # But Plotly's go.Sunburst does not accept a list of colors directly; it accepts a colorscale.
-    # Workaround: Create a custom colorscale that maps the dummy value (0.5) to gray,
-    # and the rest to the desired colormap. But the dummy value may interfere with real data range.
-
-    # Simpler: Use two traces: one for interior nodes (constant color) and one for leaf nodes (colormap).
-    # However, that breaks the hierarchical structure.
-
-    # Given the complexity, we accept that interior nodes will also be colored according to the colormap,
-    # but since their dummy values are all the same, they will appear uniformly (mid‑scale).
-    # This is acceptable for the purpose.
-
+            # Normalize value to [0,1] within the leaf range
+            if vmax > vmin:
+                norm = (val - vmin) / (vmax - vmin)
+            else:
+                norm = 0.5
+            idx = int(norm * 100)
+            idx = min(idx, 100)
+            color_list.append(colorscale[idx])
+    
+    # Highlight selected simulation if requested
+    if highlight_sim and highlight_sim != "None":
+        # Find indices of the simulation node and its leaf children
+        for i, lbl in enumerate(labels):
+            if lbl == highlight_sim:
+                color_list[i] = "red"  # simulation node
+            elif parents[i] == highlight_sim:
+                color_list[i] = "red"  # leaf nodes
+        # Also ensure the leaf nodes' colors are overridden even if they were already set
+        # (the above loop already does that)
+    
     fig = go.Figure(go.Sunburst(
         labels=labels,
         parents=parents,
         values=values,
-        marker=dict(
-            colors=color_values,
-            colorscale=colormap,
-            showscale=True,
-            colorbar=dict(title=field_name)
-        ),
+        marker=dict(colors=color_list),
         branchvalues="total",
-        hovertemplate='<b>%{label}</b><br>Value: %{value:.2f}<extra></extra>'
+        hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'
     ))
-
-    # Highlight a specific simulation if requested
-    if highlight_sim:
-        # Find indices of all nodes that belong to that simulation (including leaf nodes)
-        sim_indices = [i for i, lbl in enumerate(labels) if lbl == highlight_sim]
-        for idx in sim_indices:
-            fig.data[0].marker.colors[idx] = "red"  # override color for that wedge
-            # Note: this works only if we later convert to a list of colors, but Plotly expects a list of colors
-            # Actually, go.Sunburst accepts marker_colors as a list of color strings.
-            # We'll restructure: build the figure without colorscale, then assign colors manually.
-            # The above is not sufficient. Let's do a proper implementation:
-
-    # Proper implementation: Build the figure with marker_colors as a list of color strings.
-    # We'll compute colors for all wedges based on colormap and then override highlight.
-    # We'll do this inside the function.
-
-    # Let's reimplement this function more robustly.
-    return fig  # placeholder; we will replace with a proper implementation below
+    fig.update_layout(
+        title=dict(text=f"Peak {field_name} (max over all timesteps)", font=dict(size=16)),
+        height=600,
+        margin=dict(t=40, l=10, r=10, b=10)
+    )
+    return fig
 
 # =============================================
 # MAIN APPLICATION
@@ -315,12 +307,16 @@ def main():
         st.markdown("### ⚙️ Data Settings")
         load_full_data = st.checkbox("Load Full Mesh", value=True, help="Load complete mesh data for 3D visualization")
         
+        # Define extended colormaps and store in session state for global access
         extended_colormaps = [
             'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis',
             'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland',
-            'Bluered', 'Electric', 'Thermal', 'Balance', 'Teal', 'Sunset', 'Burg'
+            'Bluered', 'Electric', 'Thermal', 'Balance', 'Teal', 
+            'Sunset', 'Burg', 'Sunsetdark'
         ]
-        selected_colormap = st.selectbox("Colormap", extended_colormaps, index=0, key="global_colormap")
+        st.session_state.extended_colormaps = extended_colormaps
+        
+        selected_colormap = st.selectbox("Global Colormap", extended_colormaps, index=0, key="global_colormap")
 
         if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
             with st.spinner("Loading simulation data..."):
@@ -515,81 +511,39 @@ def render_data_viewer(selected_colormap):
     if len(available_fields) < 2:
         st.warning("Need at least two fields to display two sunburst charts.")
     else:
+        # Use extended_colormaps from session state
+        extended_colormaps = st.session_state.get('extended_colormaps', [
+            'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis',
+            'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland',
+            'Bluered', 'Electric', 'Thermal', 'Balance', 'Teal', 
+            'Sunset', 'Burg', 'Sunsetdark'
+        ])
+        
         col_left, col_right = st.columns(2)
         with col_left:
             field1 = st.selectbox("Left Sunburst Field", available_fields, index=0, key="sunburst_field1")
-            colormap1 = st.selectbox("Colormap for " + field1, extended_colormaps, index=extended_colormaps.index("Thermal") if "Thermal" in extended_colormaps else 0, key="sunburst_cmap1")
+            colormap1 = st.selectbox(
+                f"Colormap for {field1}", 
+                extended_colormaps, 
+                index=extended_colormaps.index("Thermal") if "Thermal" in extended_colormaps else 0,
+                key="sunburst_cmap1"
+            )
         with col_right:
-            # Default second field: try to find 'vonMises' or 'stress' or just the next field
             default_idx = 1 if len(available_fields) > 1 else 0
             field2 = st.selectbox("Right Sunburst Field", available_fields, index=default_idx, key="sunburst_field2")
-            colormap2 = st.selectbox("Colormap for " + field2, extended_colormaps, index=extended_colormaps.index("Plasma") if "Plasma" in extended_colormaps else 0, key="sunburst_cmap2")
+            colormap2 = st.selectbox(
+                f"Colormap for {field2}", 
+                extended_colormaps, 
+                index=extended_colormaps.index("Plasma") if "Plasma" in extended_colormaps else 0,
+                key="sunburst_cmap2"
+            )
 
         highlight_sim = st.selectbox("Highlight a specific simulation (optional)", ["None"] + sorted(simulations.keys()), key="sunburst_highlight")
 
         if st.button("Generate Sunburst Charts", type="primary", use_container_width=True):
             with st.spinner("Building sunburst charts..."):
-                # Build data structures once
-                def build_sunburst_figure(field_name, colormap):
-                    labels, parents, values, num_colors = build_sunburst_data(summaries, field_name)
-                    # Convert numeric colors to a list of actual colors using the chosen colormap
-                    # We need to map the numeric values (for leaf nodes) to colors, and assign a neutral gray for interior nodes.
-                    # Because Plotly's sunburst does not accept a colorscale directly on marker.colors if we provide a list,
-                    # we will use marker.colors as a list of color strings.
-                    # First, get the range of leaf values (excluding None)
-                    leaf_vals = [v for v in num_colors if v is not None]
-                    if leaf_vals:
-                        vmin, vmax = min(leaf_vals), max(leaf_vals)
-                    else:
-                        vmin, vmax = 0, 1
-                    # Create a colorscale function from plotly's express
-                    import plotly.express as px
-                    from matplotlib.colors import to_hex
-                    # Get the colormap as a list of colors
-                    if colormap in px.colors.named_colorscales():
-                        colorscale = px.colors.sample_colorscale(colormap, [i/100 for i in range(101)])
-                    else:
-                        colorscale = px.colors.sample_colorscale("Viridis", [i/100 for i in range(101)])
-                    # Map each numeric value to a color
-                    color_list = []
-                    for val in num_colors:
-                        if val is None:
-                            color_list.append("#CCCCCC")  # light gray for interior nodes
-                        else:
-                            # Normalize value to [0,1] within the leaf range
-                            if vmax > vmin:
-                                norm = (val - vmin) / (vmax - vmin)
-                            else:
-                                norm = 0.5
-                            idx = int(norm * 100)
-                            idx = min(idx, 100)
-                            color_list.append(colorscale[idx])
-                    # Highlight selected simulation
-                    if highlight_sim != "None":
-                        # Find indices of the simulation node and its two leaf children
-                        for i, lbl in enumerate(labels):
-                            if lbl == highlight_sim:
-                                color_list[i] = "red"  # simulation node
-                            elif parents[i] == highlight_sim:
-                                color_list[i] = "red"  # leaf nodes (temp/vonMises)
-                    # Create figure
-                    fig = go.Figure(go.Sunburst(
-                        labels=labels,
-                        parents=parents,
-                        values=values,
-                        marker=dict(colors=color_list),
-                        branchvalues="total",
-                        hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'
-                    ))
-                    fig.update_layout(
-                        title=dict(text=f"Peak {field_name} (max over all timesteps)", font=dict(size=16)),
-                        height=600,
-                        margin=dict(t=40, l=10, r=10, b=10)
-                    )
-                    return fig
-
-                fig1 = build_sunburst_figure(field1, colormap1)
-                fig2 = build_sunburst_figure(field2, colormap2)
+                fig1 = build_sunburst_figure(summaries, field1, colormap1, highlight_sim)
+                fig2 = build_sunburst_figure(summaries, field2, colormap2, highlight_sim)
                 col_left.plotly_chart(fig1, use_container_width=True)
                 col_right.plotly_chart(fig2, use_container_width=True)
 
