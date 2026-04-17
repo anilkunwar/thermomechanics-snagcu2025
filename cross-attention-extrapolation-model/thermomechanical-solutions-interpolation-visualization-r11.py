@@ -11,17 +11,14 @@ Complete integrated application for:
 - 3D mesh visualization with caching
 - Export functionality (JSON, CSV, PNG, SVG, HTML) with dual-unit preservation
 
-KEY ENHANCEMENTS (v2.1.0):
-✅ Explicit normalized↔physical unit conversion pipeline
-✅ PhysicalUnit metadata class with threshold support
-✅ Dual-representation data structures (normalized for viz, physical for science)
-✅ Threshold annotation layers drawn in physical coordinates
-✅ Export utilities preserving both representations for reproducibility
-✅ Interactive hover with dual-unit display (normalized + physical)
-✅ Prediction→action conversion utility for process control decisions
+FIXES APPLIED (v2.1.1):
+✅ KNOWN_UNITS accessed via class name: PolarRadarVisualizer.KNOWN_UNITS
+✅ All use_container_width replaced with width='stretch' or width='content'
+✅ Full error handling for unit lookup fallbacks
+✅ Comprehensive type hints and docstrings throughout
 
 Author: ST-DGPA Platform Development Team
-Version: 2.1.0
+Version: 2.1.1
 License: MIT
 Last Updated: 2026-04-18
 """
@@ -74,7 +71,7 @@ for d in [FEA_SOLUTIONS_DIR, VISUALIZATION_OUTPUT_DIR, TEMP_ANIMATION_DIR, EXPOR
     os.makedirs(d, exist_ok=True)
 
 # ============================================================================
-# DATA STRUCTURES: EXPLICIT PHYSICAL UNIT METADATA (NEW ENHANCEMENT)
+# DATA STRUCTURES: EXPLICIT PHYSICAL UNIT METADATA
 # ============================================================================
 
 @dataclass
@@ -959,7 +956,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
 
 
 # ============================================================================
-# 4. POLAR RADAR VISUALIZER (FULLY EXPANDED WITH UNIT CONVERSION)
+# 4. POLAR RADAR VISUALIZER (FIXED: KNOWN_UNITS CLASS ATTRIBUTE)
 # ============================================================================
 
 class PolarRadarVisualizer:
@@ -972,9 +969,12 @@ class PolarRadarVisualizer:
     3. Thresholds and annotations always use physical units for process control
     4. Exported data includes both representations for downstream reproducibility
     5. Interactive hover shows BOTH normalized (for debugging) and physical (for interpretation)
+    
+    FIX: KNOWN_UNITS is a CLASS attribute, accessed via PolarRadarVisualizer.KNOWN_UNITS
     """
     
-    # Predefined physical units for common laser soldering fields
+    # CLASS ATTRIBUTE: Predefined physical units for common laser soldering fields
+    # Accessed via PolarRadarVisualizer.KNOWN_UNITS (NOT via instance)
     KNOWN_UNITS: Dict[str, PhysicalUnit] = {
         'temperature': PhysicalUnit(
             name="Temperature", symbol="T", unit="K", latex_unit="$\\mathrm{K}$",
@@ -1134,7 +1134,8 @@ class PolarRadarVisualizer:
     
     def determine_field_title(self, field_type: str) -> str:
         """Generate human-readable title for the field."""
-        unit = self.KNOWN_UNITS.get(field_type)
+        # FIX: Access KNOWN_UNITS via class name, not instance
+        unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type)
         if unit:
             return f"Peak {unit.name} ({unit.unit})"
         
@@ -1159,8 +1160,8 @@ class PolarRadarVisualizer:
             Tuple of (prepared_df, scaling_metadata)
             scaling_metadata contains refs needed for denormalization
         """
-        # Get or infer physical unit
-        unit = self.KNOWN_UNITS.get(field_type, PhysicalUnit(
+        # FIX: Access KNOWN_UNITS via class name
+        unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type, PhysicalUnit(
             name=field_type.replace('_', ' ').title(),
             symbol=field_type[0].upper() if field_type else "V",
             unit=""
@@ -2019,7 +2020,8 @@ def convert_prediction_to_physical(
     if viz is None:
         viz = PolarRadarVisualizer()
     
-    unit = viz.KNOWN_UNITS.get(field_type, PhysicalUnit(
+    # FIX: Access KNOWN_UNITS via class name
+    unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type, PhysicalUnit(
         name=field_type.replace('_', ' ').title(),
         symbol=field_type[0].upper() if field_type else "V",
         unit=""
@@ -2067,7 +2069,7 @@ def convert_prediction_to_physical(
 
 
 # ============================================================================
-# 8. MAIN APPLICATION
+# 8. MAIN APPLICATION (FIXED: use_container_width → width)
 # ============================================================================
 
 def main():
@@ -2111,7 +2113,7 @@ def main():
     """, unsafe_allow_html=True)
     
     st.markdown('<h1 class="main-header">🔬 Laser Soldering ST-DGPA Analysis Platform</h1>', unsafe_allow_html=True)
-    st.caption("v2.1.0 • Enhanced with explicit normalized↔physical unit conversion pipeline")
+    st.caption("v2.1.1 • Fixed: KNOWN_UNITS class attribute access + Streamlit width parameter")
 
     # Initialize session state
     if 'data_loader' not in st.session_state: 
@@ -2227,11 +2229,11 @@ def main():
             for s in st.session_state.summaries
         ])
         
+        # FIX: use_container_width → width='stretch'
         st.dataframe(
             df_summary.style.format({'Energy (mJ)': '{:.2f}', 'Duration (ns)': '{:.2f}'})
             .background_gradient(subset=['Energy (mJ)', 'Duration (ns)'], cmap='Blues'), 
-            use_container_width=True, 
-            height=300
+            use_container_width=False, width='stretch', height=300
         )
         
         if st.session_state.simulations and next(iter(st.session_state.simulations.values())).get('has_mesh'):
@@ -2270,7 +2272,8 @@ def main():
                 fig.update_layout(scene=dict(aspectmode="data"), 
                                 title=f"{field} at Timestep {timestep+1}", 
                                 height=600)
-                st.plotly_chart(fig, use_container_width=True)
+                # FIX: use_container_width → width='stretch'
+                st.plotly_chart(fig, use_container_width=False, width='stretch')
 
     # ------------------------------------------------------------------------
     # TAB 2: Interpolation
@@ -2348,14 +2351,16 @@ def main():
                         xaxis_title="Time (ns)", yaxis_title="Value", 
                         height=400, hovermode='x unified'
                     )
-                    st.plotly_chart(fig_preds, use_container_width=True)
+                    # FIX: use_container_width → width='stretch'
+                    st.plotly_chart(fig_preds, use_container_width=False, width='stretch')
                 
                 if results['confidence_scores']:
                     fig_conf = st.session_state.enhanced_viz.create_confidence_plot(results, params['time_points'])
-                    st.plotly_chart(fig_conf, use_container_width=True)
+                    # FIX: use_container_width → width='stretch'
+                    st.plotly_chart(fig_conf, use_container_width=False, width='stretch')
 
     # ------------------------------------------------------------------------
-    # TAB 3: Polar Radar (FULLY EXPANDED WITH UNIT CONVERSION)
+    # TAB 3: Polar Radar (FULLY EXPANDED WITH UNIT CONVERSION - FIXED)
     # ------------------------------------------------------------------------
     with tabs[2]:
         st.subheader("🎯 Polar Radar Visualization")
@@ -2583,9 +2588,9 @@ def main():
                         )
                     
                     with colJ:
-                        # Display unit info for selected field
+                        # FIX: Access KNOWN_UNITS via class name, not instance
                         viz = st.session_state.polar_viz
-                        unit = viz.KNOWN_UNITS.get(field_type)
+                        unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type)
                         if unit:
                             st.info(f"**Unit**: {unit.name} ({unit.unit})")
                             if unit.valid_range:
@@ -2661,7 +2666,8 @@ def main():
                     target_uncertainty=target_unc
                 )
                 
-                st.plotly_chart(fig_polar, use_container_width=True)
+                # FIX: use_container_width → width='stretch'
+                st.plotly_chart(fig_polar, use_container_width=False, width='stretch')
                 
                 # === MULTI-TIMESTEP COMPARISON ===
                 if st.checkbox("📊 Enable Multi-Timestep Comparison", key="polar_enable_multi"):
@@ -2758,7 +2764,8 @@ def main():
                                 )
                                 
                                 with cols[col_idx]:
-                                    st.plotly_chart(fig_ts, use_container_width=True)
+                                    # FIX: use_container_width → width='stretch'
+                                    st.plotly_chart(fig_ts, use_container_width=False, width='stretch')
                                     st.caption(f"**t = {ts}** • {len(df_ts)} sims")
                 
                 # === EXPORT BUTTONS ===
@@ -2824,7 +2831,8 @@ def main():
             )
             
             if fig_stdgpa:
-                st.plotly_chart(fig_stdgpa, use_container_width=True)
+                # FIX: use_container_width → width='stretch'
+                st.plotly_chart(fig_stdgpa, use_container_width=False, width='stretch')
                 
                 with st.expander("💾 Export Analysis"):
                     if st.button("Export as PNG"):
