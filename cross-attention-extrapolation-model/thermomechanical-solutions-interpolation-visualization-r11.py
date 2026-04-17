@@ -681,7 +681,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
         ], dtype=np.float32)
 
     def _compute_ett_gating(self, energy_query: float, duration_query: float,
-                           time_query: float, source_meta Optional[List] = None) -> np.ndarray:
+                           time_query: float, source_metadata: Optional[List] = None) -> np.ndarray:
         """
         Compute Energy/Duration/Time (ETT) gating weights.
         
