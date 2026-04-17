@@ -399,7 +399,7 @@ class UnifiedFEADataLoader:
             
             try:
                 mesh0 = meshio.read(vtu_files[0])
-                if not mesh0.point_
+                if not mesh0.point_data:
                     _self.load_errors.append(f"No point data in: {name}")
                     continue
 
