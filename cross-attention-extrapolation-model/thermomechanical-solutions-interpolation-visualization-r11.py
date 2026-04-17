@@ -19,9 +19,10 @@ KEY ENHANCEMENTS (v2.1.0):
 ✅ Export utilities preserving both representations for reproducibility
 ✅ Interactive hover with dual-unit display (normalized + physical)
 ✅ Prediction→action conversion utility for process control decisions
+✅ Colorbar now shows PHYSICAL units (e.g., K, MPa) while preserving perceptual colorscale
 
 Author: ST-DGPA Platform Development Team
-Version: 2.1.1
+Version: 2.1.2
 License: MIT
 Last Updated: 2026-04-18
 """
@@ -1002,6 +1003,7 @@ class PolarRadarVisualizer:
     3. Thresholds and annotations always use physical units for process control
     4. Exported data includes both representations for downstream reproducibility
     5. Interactive hover shows BOTH normalized (for debugging) and physical (for interpretation)
+    6. Colorbar shows PHYSICAL units while colorscale uses normalized [0,1] for perceptual uniformity
     """
     
     # For backward compatibility, reference the global unit mapping
@@ -1304,6 +1306,7 @@ class PolarRadarVisualizer:
         - Threshold annotations drawn in physical coordinates, converted to plot positions
         - Target query marker shows predicted physical value with uncertainty
         - Export metadata includes conversion refs for reproducibility
+        - Colorbar shows PHYSICAL units while colorscale uses normalized [0,1]
         """
         # Set default margin padding
         if margin_pad is None:
@@ -1424,8 +1427,38 @@ class PolarRadarVisualizer:
         else:
             hover_texts = None
         
-        # Determine color values: normalized for consistent colorscale, or physical for auto-scaling
-        color_values = normalized_values if normalize_colors else physical_values
+        # Determine color values for the colorscale:
+        # - If normalize_colors is True, we feed normalized values (0–1) to Plotly.
+        #   This gives a perceptually uniform color mapping.
+        # - But we will manually set the colorbar tick labels to physical units.
+        if normalize_colors and norm_ref_min is not None and norm_ref_max is not None:
+            color_values = normalized_values
+            # Prepare colorbar tick positions (in normalized space) and physical labels
+            n_ticks = 6
+            tickvals = np.linspace(0, 1, n_ticks)
+            ticktext = [unit.format_value(v) for v in np.linspace(norm_ref_min, norm_ref_max, n_ticks)]
+            cmin, cmax = 0.0, 1.0
+        else:
+            # Fallback: use physical values directly, no custom tick formatting
+            color_values = physical_values
+            tickvals = None
+            ticktext = None
+            cmin, cmax = None, None
+        
+        # Build colorbar dict
+        colorbar_dict = {
+            "title": field_title,
+            "thickness": colorbar_thickness,
+            "x": colorbar_position_x,
+            "len": 0.5,
+            "y": 0.5,
+            "yanchor": "middle"
+        }
+        if tickvals is not None and ticktext is not None:
+            colorbar_dict["tickvals"] = tickvals
+            colorbar_dict["ticktext"] = ticktext
+        else:
+            colorbar_dict["tickformat"] = f".{3}f"
         
         fig.add_trace(go.Scatterpolar(
             r=durations,
@@ -1435,15 +1468,9 @@ class PolarRadarVisualizer:
                 size=marker_sizes,
                 color=color_values,
                 colorscale=colorscale,
-                colorbar=dict(
-                    title=field_title,
-                    thickness=colorbar_thickness,
-                    x=colorbar_position_x,
-                    len=0.5,
-                    y=0.5,
-                    yanchor='middle',
-                    tickformat=f".{6}f"
-                ) if show_legend else None,
+                cmin=cmin,
+                cmax=cmax,
+                colorbar=colorbar_dict if show_legend else None,
                 line=dict(width=2, color='white'),
                 symbol=self.source_symbol,
                 showscale=show_legend
@@ -1455,7 +1482,7 @@ class PolarRadarVisualizer:
             opacity=source_marker_opacity
         ))
         
-        # === THRESHOLD ANNOTATIONS (FIXED: using 'paper' for yref) ===
+        # === THRESHOLD ANNOTATIONS (Physical Units → Plot Coordinates) ===
         if show_thresholds and unit.critical_thresholds and normalize_colors:
             if norm_ref_min is not None and norm_ref_max is not None:
                 for threshold_name, threshold_value in unit.critical_thresholds.items():
@@ -2117,7 +2144,7 @@ def main():
     """, unsafe_allow_html=True)
     
     st.markdown('<h1 class="main-header">🔬 Laser Soldering ST-DGPA Analysis Platform</h1>', unsafe_allow_html=True)
-    st.caption("v2.1.1 • Enhanced with explicit normalized↔physical unit conversion pipeline")
+    st.caption("v2.1.2 • Enhanced with explicit normalized↔physical unit conversion pipeline • Colorbar now shows physical units")
 
     # Initialize session state
     if 'data_loader' not in st.session_state: 
