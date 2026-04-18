@@ -7,7 +7,6 @@ import plotly.graph_objects as go
 import meshio
 from datetime import datetime
 import warnings
-from collections import OrderedDict
 warnings.filterwarnings('ignore')
 
 # =============================================
@@ -103,28 +102,21 @@ class UnifiedFEADataLoader:
                     'points': points, 'fields': fields, 'triangles': triangles
                 }
                 
+                # Build summary with global max across all timesteps for each field
                 summary = {
                     'name': name, 'energy': energy, 'duration': duration,
                     'timesteps': list(range(1, len(vtu_files) + 1)), 'field_stats': {}
                 }
                 for field in field_info:
                     vals = fields[field]
-                    # For vector fields, compute magnitude across all points and timesteps
                     if field_info[field][0] == "vector":
                         mag_vals = np.linalg.norm(vals, axis=2)
-                        summary['field_stats'][field] = {
-                            'min': [float(np.nanmin(mag_vals))],
-                            'max': [float(np.nanmax(mag_vals))],
-                            'mean': [float(np.nanmean(mag_vals))],
-                            'std': [float(np.nanstd(mag_vals))]
-                        }
+                        global_max = float(np.nanmax(mag_vals))
                     else:
-                        summary['field_stats'][field] = {
-                            'min': [float(np.nanmin(vals))],
-                            'max': [float(np.nanmax(vals))],
-                            'mean': [float(np.nanmean(vals))],
-                            'std': [float(np.nanstd(vals))]
-                        }
+                        global_max = float(np.nanmax(vals))
+                    summary['field_stats'][field] = {
+                        'global_max': global_max
+                    }
 
                 simulations[name] = sim_data
                 summaries.append(summary)
@@ -147,21 +139,16 @@ class UnifiedFEADataLoader:
 # =============================================
 # SUNBURST CHART HELPER FUNCTIONS
 # =============================================
-def get_global_max_peak(summary: dict, field_name: str) -> float:
-    """Return the global maximum value of a field across all timesteps."""
-    if field_name not in summary.get('field_stats', {}):
-        return 0.0
-    max_list = summary['field_stats'][field_name].get('max', [0.0])
-    return float(np.max(max_list)) if max_list else 0.0
-
 def build_sunburst_data(summaries, field_name):
-    """Build the hierarchy lists for a given field.
-    Returns: labels, parents, values, numeric_colors (for leaf nodes)
+    """
+    Build hierarchical data for sunburst chart.
+    Hierarchy: All Simulations → Pulse Duration (τ) → Energy (E) → Simulation → Field Peak
+    Returns: labels, parents, values, numeric_values_for_coloring
     """
     labels = []
     parents = []
     values = []
-    numeric_colors = []  # will be used for leaf wedges only; interior nodes get None
+    numeric_colors = []  # for leaf nodes (field peak values)
 
     # Root
     labels.append("All Simulations")
@@ -198,23 +185,23 @@ def build_sunburst_data(summaries, field_name):
                 labels.append(sim_label)
                 parents.append(e_key)
                 values.append(1)
-                numeric_colors.append(None)  # simulation node itself has no numeric value
+                numeric_colors.append(None)  # simulation node has no numeric value
 
-                # Leaf: field peak
-                peak_val = get_global_max_peak(s, field_name)
+                # Leaf: field peak value
+                peak_val = s['field_stats'].get(field_name, {}).get('global_max', 0.0)
                 leaf_label = f"{field_name}: {peak_val:.2f}"
                 labels.append(leaf_label)
                 parents.append(sim_label)
-                values.append(peak_val if peak_val > 0 else 1e-6)  # ensure positive for plotting
+                # Use the peak value for the leaf wedge size (must be positive)
+                values.append(max(peak_val, 1e-6))
                 numeric_colors.append(peak_val)
 
     return labels, parents, values, numeric_colors
 
-def build_sunburst_figure(summaries, field_name, colormap_name, highlight_sim=None):
+def create_sunburst_figure(summaries, field_name, colormap_name, highlight_sim=None):
     """Create a Plotly Sunburst figure for a given field."""
     labels, parents, values, num_colors = build_sunburst_data(summaries, field_name)
     
-    # Map numeric leaf values to actual colors using the chosen colormap
     import plotly.express as px
     
     # Get the colorscale as a list of 101 colors
@@ -247,14 +234,11 @@ def build_sunburst_figure(summaries, field_name, colormap_name, highlight_sim=No
     
     # Highlight selected simulation if requested
     if highlight_sim and highlight_sim != "None":
-        # Find indices of the simulation node and its leaf children
         for i, lbl in enumerate(labels):
             if lbl == highlight_sim:
                 color_list[i] = "red"  # simulation node
             elif parents[i] == highlight_sim:
-                color_list[i] = "red"  # leaf nodes
-        # Also ensure the leaf nodes' colors are overridden even if they were already set
-        # (the above loop already does that)
+                color_list[i] = "red"  # leaf nodes (field peaks)
     
     fig = go.Figure(go.Sunburst(
         labels=labels,
@@ -276,7 +260,7 @@ def build_sunburst_figure(summaries, field_name, colormap_name, highlight_sim=No
 # =============================================
 def main():
     st.set_page_config(
-        page_title="FEA Data Viewer",
+        page_title="FEA Data Viewer with Sunburst",
         layout="wide",
         initial_sidebar_state="expanded",
         page_icon="📊"
@@ -290,7 +274,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    st.markdown('<h1 class="main-header">📊 FEA Data Viewer</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">📊 FEA Data Viewer with Sunburst</h1>', unsafe_allow_html=True)
 
     # Session State Initialization
     if 'data_loader' not in st.session_state:
@@ -307,16 +291,16 @@ def main():
         st.markdown("### ⚙️ Data Settings")
         load_full_data = st.checkbox("Load Full Mesh", value=True, help="Load complete mesh data for 3D visualization")
         
-        # Define extended colormaps and store in session state for global access
         extended_colormaps = [
             'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis',
             'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland',
             'Bluered', 'Electric', 'Thermal', 'Balance', 'Teal', 
             'Sunset', 'Burg', 'Sunsetdark'
         ]
+        # Store colormap list in session state for global access
         st.session_state.extended_colormaps = extended_colormaps
         
-        selected_colormap = st.selectbox("Global Colormap", extended_colormaps, index=0, key="global_colormap")
+        selected_colormap = st.selectbox("Global Colormap (for 3D plots)", extended_colormaps, index=0, key="global_colormap")
 
         if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
             with st.spinner("Loading simulation data..."):
@@ -353,156 +337,93 @@ def render_data_viewer(selected_colormap):
     if not simulations:
         return
 
-    # Simulation Selection
+    # Simulation Selection for 3D view (unchanged)
     col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
-        sim_name = st.selectbox("Select Simulation", sorted(simulations.keys()), key="viewer_sim_select")
+        sim_name = st.selectbox("Select Simulation for 3D View", sorted(simulations.keys()), key="viewer_sim_select")
     sim = simulations[sim_name]
     with col2: st.metric("Energy", f"{sim['energy_mJ']:.2f} mJ")
     with col3: st.metric("Duration", f"{sim['duration_ns']:.2f} ns")
 
     if not sim.get('has_mesh', False):
         st.error("This simulation was loaded without mesh data. Please reload with 'Load Full Mesh' enabled.")
-        return
-    if 'field_info' not in sim or not sim['field_info']:
-        st.error("No field data available.")
-        return
-
-    # ================= VISUALIZATION CONTROLS =================
-    st.markdown('<h4 class="sub-header">🎛️ Visualization Controls</h4>', unsafe_allow_html=True)
-    
-    # Row 1: Field, Timestep, Aspect Ratio, Background
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        field = st.selectbox("Select Field", sorted(sim['field_info'].keys()), key="viewer_field_select")
-    with col2:
-        timestep = st.slider("Timestep", 0, sim['n_timesteps'] - 1, 0, key="viewer_timestep_slider")
-    with col3:
-        aspect_mode = st.selectbox("Aspect Ratio", ["data", "cube", "auto"], index=0, key="aspect_mode")
-    with col4:
-        bg_mode = st.selectbox("Plot Theme", ["Light", "Dark"], index=0, key="bg_mode")
-
-    # Row 2: Opacity, Point Size, Camera, Lighting
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        opacity = st.slider("🔹 Opacity", 0.0, 1.0, 0.9, 0.05, key="opacity")
-    with col2:
-        point_size = st.slider("🔹 Point Size", 1, 15, 4, key="point_size")
-    with col3:
-        camera_preset = st.selectbox("📷 Camera View", ["Isometric", "Front", "Side", "Top", "Bottom"], index=0, key="camera_preset")
-    with col4:
-        lighting_preset = st.selectbox("💡 Lighting", ["Default", "Shiny", "Matte", "High Contrast"], index=0, key="lighting_preset")
-
-    # ================= THEME & LIGHTING SETUP =================
-    lighting_map = {
-        "Default": dict(ambient=0.8, diffuse=0.8, specular=0.5, roughness=0.5),
-        "Shiny": dict(ambient=0.6, diffuse=0.9, specular=0.8, roughness=0.2),
-        "Matte": dict(ambient=0.9, diffuse=0.6, specular=0.1, roughness=0.9),
-        "High Contrast": dict(ambient=0.4, diffuse=0.9, specular=0.7, roughness=0.4)
-    }
-    lighting = lighting_map[lighting_preset]
-
-    camera_map = {
-        "Isometric": dict(eye=dict(x=1.5, y=1.5, z=1.5)),
-        "Front": dict(eye=dict(x=0, y=2, z=0.1)),
-        "Side": dict(eye=dict(x=2, y=0, z=0.1)),
-        "Top": dict(eye=dict(x=0, y=0, z=2)),
-        "Bottom": dict(eye=dict(x=0, y=0, z=-2))
-    }
-    camera = camera_map[camera_preset]
-
-    if bg_mode == "Dark":
-        plot_bgcolor, paper_bgcolor, grid_color, font_color = "rgb(17,17,17)", "rgb(17,17,17)", "rgb(40,40,40)", "white"
+        # Still show sunburst even if mesh missing
     else:
-        plot_bgcolor, paper_bgcolor, grid_color, font_color = "white", "white", "lightgray", "black"
+        if 'field_info' not in sim or not sim['field_info']:
+            st.error("No field data available for this simulation.")
+        else:
+            # ================= 3D VISUALIZATION CONTROLS (simplified) =================
+            st.markdown('<h4 class="sub-header">🎛️ 3D Visualization Controls</h4>', unsafe_allow_html=True)
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                field = st.selectbox("Select Field", sorted(sim['field_info'].keys()), key="viewer_field_select")
+            with col2:
+                timestep = st.slider("Timestep", 0, sim['n_timesteps'] - 1, 0, key="viewer_timestep_slider")
+            with col3:
+                aspect_mode = st.selectbox("Aspect Ratio", ["data", "cube", "auto"], index=0, key="aspect_mode")
+            with col4:
+                bg_mode = st.selectbox("Plot Theme", ["Light", "Dark"], index=0, key="bg_mode")
 
-    # ================= DATA PROCESSING =================
-    pts = sim['points']
-    kind, _ = sim['field_info'][field]
-    raw = sim['fields'][field][timestep]
-    
-    if kind == "scalar":
-        values = np.where(np.isnan(raw), 0, raw)
-        label = field
-    else:
-        magnitude = np.linalg.norm(raw, axis=1)
-        values = np.where(np.isnan(magnitude), 0, magnitude)
-        label = f"{field} (magnitude)"
+            # Data processing for 3D plot
+            pts = sim['points']
+            kind, _ = sim['field_info'][field]
+            raw = sim['fields'][field][timestep]
+            if kind == "scalar":
+                values = np.where(np.isnan(raw), 0, raw)
+                label = field
+            else:
+                magnitude = np.linalg.norm(raw, axis=1)
+                values = np.where(np.isnan(magnitude), 0, magnitude)
+                label = f"{field} (magnitude)"
 
-    # ================= COLOR SCALE LIMITS =================
-    st.markdown('<h5 class="sub-header">🌈 Color Scale Limits</h5>', unsafe_allow_html=True)
-    data_min, data_max = float(np.min(values)), float(np.max(values))
-    
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        auto_scale = st.checkbox("Auto Scale", value=True, key=f"auto_scale_{field}")
-    with col_b:
-        cmin = st.number_input("Min Limit", value=data_min, format="%.3f", disabled=auto_scale, key=f"cmin_{field}")
-    with col_c:
-        cmax = st.number_input("Max Limit", value=data_max, format="%.3f", disabled=auto_scale, key=f"cmax_{field}")
-    
-    if auto_scale:
-        cmin, cmax = None, None
+            # Theme setup
+            if bg_mode == "Dark":
+                plot_bgcolor, paper_bgcolor, grid_color, font_color = "rgb(17,17,17)", "rgb(17,17,17)", "rgb(40,40,40)", "white"
+            else:
+                plot_bgcolor, paper_bgcolor, grid_color, font_color = "white", "white", "lightgray", "black"
 
-    # ================= PLOTLY TRACE CONSTRUCTION =================
-    tri = sim.get('triangles')
-    trace_data = None
-    
-    if tri is not None and len(tri) > 0:
-        valid_triangles = tri[np.all(tri < len(pts), axis=1)]
-        if len(valid_triangles) > 0:
-            trace_data = go.Mesh3d(
-                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
-                i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
-                intensity=values, colorscale=selected_colormap, intensitymode='vertex',
-                cmin=cmin, cmax=cmax, opacity=opacity, lighting=lighting,
-                hovertemplate=f'<b>{label}:</b> %{{intensity:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
+            # Build 3D trace
+            tri = sim.get('triangles')
+            if tri is not None and len(tri) > 0:
+                valid_triangles = tri[np.all(tri < len(pts), axis=1)]
+                if len(valid_triangles) > 0:
+                    trace_data = go.Mesh3d(
+                        x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                        i=valid_triangles[:, 0], j=valid_triangles[:, 1], k=valid_triangles[:, 2],
+                        intensity=values, colorscale=selected_colormap, intensitymode='vertex',
+                        opacity=0.9,
+                        hovertemplate=f'<b>{label}:</b> %{{intensity:.3f}}<extra></extra>'
+                    )
+                else:
+                    trace_data = go.Scatter3d(
+                        x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                        mode='markers', marker=dict(size=4, color=values, colorscale=selected_colormap, opacity=0.9)
+                    )
+            else:
+                trace_data = go.Scatter3d(
+                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    mode='markers', marker=dict(size=4, color=values, colorscale=selected_colormap, opacity=0.9)
+                )
+
+            fig = go.Figure(data=trace_data)
+            fig.update_layout(
+                title=dict(text=f"{label} at Timestep {timestep + 1}", font=dict(size=18, color=font_color)),
+                scene=dict(aspectmode=aspect_mode,
+                           xaxis=dict(backgroundcolor=plot_bgcolor, gridcolor=grid_color, color=font_color, title="X"),
+                           yaxis=dict(backgroundcolor=plot_bgcolor, gridcolor=grid_color, color=font_color, title="Y"),
+                           zaxis=dict(backgroundcolor=plot_bgcolor, gridcolor=grid_color, color=font_color, title="Z")),
+                plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=600, margin=dict(l=0, r=0, t=50, b=0)
             )
-    
-    if trace_data is None:
-        trace_data = go.Scatter3d(
-            x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
-            mode='markers',
-            marker=dict(size=point_size, color=values, colorscale=selected_colormap, cmin=cmin, cmax=cmax, opacity=opacity),
-            hovertemplate=f'<b>{label}:</b> %{{marker.color:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
-        )
+            st.plotly_chart(fig, use_container_width=True)
 
-    # ================= LAYOUT & RENDERING =================
-    fig = go.Figure(data=trace_data)
-    fig.update_layout(
-        title=dict(text=f"{label} at Timestep {timestep + 1}", font=dict(size=18, color=font_color)),
-        scene=dict(
-            aspectmode=aspect_mode, camera=camera,
-            xaxis=dict(showbackground=True, backgroundcolor=plot_bgcolor, gridcolor=grid_color, color=font_color, title="X"),
-            yaxis=dict(showbackground=True, backgroundcolor=plot_bgcolor, gridcolor=grid_color, color=font_color, title="Y"),
-            zaxis=dict(showbackground=True, backgroundcolor=plot_bgcolor, gridcolor=grid_color, color=font_color, title="Z")
-        ),
-        plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=700, margin=dict(l=0, r=0, t=50, b=0)
-    )
-    
-    for trace in fig.data:
-        if hasattr(trace, 'colorbar') and trace.colorbar:
-            trace.colorbar.title.font.color = font_color
-            trace.colorbar.tickfont.color = font_color
-
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Field Statistics
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1: st.metric("Min", f"{np.min(values):.3f}")
-    with col2: st.metric("Max", f"{np.max(values):.3f}")
-    with col3: st.metric("Mean", f"{np.mean(values):.3f}")
-    with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
-    with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
-
-    # ================= NEW: SUNBURST CHARTS SECTION =================
+    # ================= SUNBURST CHARTS SECTION =================
     st.markdown('<h2 class="sub-header">🌳 Hierarchical Sunburst – Peaks over all timesteps</h2>', unsafe_allow_html=True)
     st.markdown("""
     This chart aggregates the **maximum peak** of each field across **all time steps** for every simulation.
     The hierarchy is: **All Simulations → Pulse Duration (τ) → Energy (E) → Simulation → Field Peak**.
     """)
 
-    # Get list of available fields (common across all simulations)
+    # Get list of available fields from summaries
     all_fields = set()
     for s in summaries:
         all_fields.update(s.get('field_stats', {}).keys())
@@ -511,7 +432,6 @@ def render_data_viewer(selected_colormap):
     if len(available_fields) < 2:
         st.warning("Need at least two fields to display two sunburst charts.")
     else:
-        # Use extended_colormaps from session state
         extended_colormaps = st.session_state.get('extended_colormaps', [
             'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis',
             'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland',
@@ -542,8 +462,8 @@ def render_data_viewer(selected_colormap):
 
         if st.button("Generate Sunburst Charts", type="primary", use_container_width=True):
             with st.spinner("Building sunburst charts..."):
-                fig1 = build_sunburst_figure(summaries, field1, colormap1, highlight_sim)
-                fig2 = build_sunburst_figure(summaries, field2, colormap2, highlight_sim)
+                fig1 = create_sunburst_figure(summaries, field1, colormap1, highlight_sim)
+                fig2 = create_sunburst_figure(summaries, field2, colormap2, highlight_sim)
                 col_left.plotly_chart(fig1, use_container_width=True)
                 col_right.plotly_chart(fig2, use_container_width=True)
 
