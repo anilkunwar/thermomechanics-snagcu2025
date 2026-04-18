@@ -157,7 +157,7 @@ class UnifiedFEADataLoader:
         return simulations, summaries
 
 # =============================================
-# FIXED SUNBURST VISUALIZER
+# IMPROVED SUNBURST VISUALIZER (FIXED)
 # =============================================
 def create_sunburst_chart(summaries, selected_field, colormap='Viridis', highlight_sim=None):
     """Stable sunburst: Energy → Duration → Simulation → Field Peak"""
@@ -491,7 +491,7 @@ def render_data_viewer(selected_colormap):
     with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
     with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
 
-    # ================= IMPROVED SUNBURST SECTION =================
+    # ================= NEW: IMPROVED SUNBURST SECTION =================
     st.markdown('<h2 class="sub-header">🌳 Comparative Sunburst – Peak Values</h2>', unsafe_allow_html=True)
     st.markdown("Hierarchy: **All Simulations → Energy → Pulse Duration → Simulation → Field Peak** (max over all timesteps)")
 
@@ -515,11 +515,11 @@ def render_data_viewer(selected_colormap):
     # Controls
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
-        field = st.selectbox("Select Field", available_fields, 
+        sun_field = st.selectbox("Select Field", available_fields, 
                             index=available_fields.index('temperature') if 'temperature' in available_fields else 0,
                             key="sunburst_field")
     with col2:
-        cmap = st.selectbox("Colormap", EXTENDED_COLORMAPS, 
+        sun_cmap = st.selectbox("Colormap", EXTENDED_COLORMAPS, 
                             index=EXTENDED_COLORMAPS.index(selected_colormap) if selected_colormap in EXTENDED_COLORMAPS else 0,
                             key="sunburst_cmap")
     with col3:
@@ -527,14 +527,14 @@ def render_data_viewer(selected_colormap):
                                      ["None"] + sorted(simulations.keys()), 
                                      key="sunburst_highlight")
 
-    # FIXED: Removed button - sunburst now renders immediately on selection change
-    fig = create_sunburst_chart(
-        summaries,
-        field,
-        colormap=cmap,
+    # ✅ FIX 2: Removed button wrapper. Chart now renders reactively.
+    fig_sun = create_sunburst_chart(
+        summaries, 
+        sun_field, 
+        colormap=sun_cmap, 
         highlight_sim=highlight_sim if highlight_sim != "None" else None
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig_sun, use_container_width=True)
 
     # Optional: two side-by-side sunbursts (if you want to compare two fields)
     st.markdown("### Compare Two Fields Side-by-Side (optional)")
@@ -542,12 +542,11 @@ def render_data_viewer(selected_colormap):
         col_l, col_r = st.columns(2)
         with col_l:
             f1 = st.selectbox("Left Field", available_fields, key="sun_f1")
-            c1 = st.selectbox("Left Colormap", EXTENDED_COLORMAPS, index=3, key="sun_c1")  # Thermal example
+            c1 = st.selectbox("Left Colormap", EXTENDED_COLORMAPS, index=3, key="sun_c1")
         with col_r:
             f2 = st.selectbox("Right Field", available_fields, index=1, key="sun_f2")
-            c2 = st.selectbox("Right Colormap", EXTENDED_COLORMAPS, index=1, key="sun_c2")  # Plasma example
+            c2 = st.selectbox("Right Colormap", EXTENDED_COLORMAPS, index=1, key="sun_c2")
         
-        # Also removed button here for consistency
         fig1 = create_sunburst_chart(summaries, f1, c1, highlight_sim if highlight_sim != "None" else None)
         fig2 = create_sunburst_chart(summaries, f2, c2, highlight_sim if highlight_sim != "None" else None)
         col_l.plotly_chart(fig1, use_container_width=True)
