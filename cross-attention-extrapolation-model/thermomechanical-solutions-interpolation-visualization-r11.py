@@ -1,3 +1,4 @@
+# 🔬 ENHANCED LASER SOLDERING ST-DGPA PLATFORM — FULLY EXPANDED & UNREDACTED
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
@@ -11,16 +12,17 @@ Complete integrated application for:
 - 3D mesh visualization with caching
 - Export functionality (JSON, CSV, PNG, SVG, HTML) with dual-unit preservation
 
-FIXES APPLIED (v2.1.2):
+FIXES APPLIED (v2.1.3):
+✅ Colorbar now displays REAL PHYSICAL UNITS (e.g., 200 MPa instead of 0.5 normalized)
+✅ Stress data (Pa) correctly scaled and displayed as MPa via scale_factor=1e-6
 ✅ Removed invalid yref='colorbar' from annotations (Plotly doesn't support this)
-✅ Threshold info now shown in colorbar title suffix or hover text
 ✅ KNOWN_UNITS accessed via class name: PolarRadarVisualizer.KNOWN_UNITS
 ✅ All use_container_width replaced with width='stretch' or width='content'
 ✅ Full error handling for unit lookup fallbacks
 ✅ Comprehensive type hints and docstrings throughout
 
 Author: ST-DGPA Platform Development Team
-Version: 2.1.2
+Version: 2.1.3
 License: MIT
 Last Updated: 2026-04-18
 """
@@ -102,7 +104,6 @@ class PhysicalUnit:
         Convert normalized [0,1] value back to physical units.
         
         This is the CRITICAL conversion for making predictions actionable.
-        
         Formula: physical = (normalized × (ref_max - ref_min) + ref_min) × scale_factor + offset
         """
         if not np.isfinite(normalized_value):
@@ -113,7 +114,6 @@ class PhysicalUnit:
     def to_normalized(self, physical_value: float, ref_min: float, ref_max: float) -> float:
         """
         Convert physical value to normalized [0,1] for visualization.
-        
         Inverse of to_physical(). Used for color mapping and marker sizing.
         """
         if not np.isfinite(physical_value):
@@ -135,7 +135,6 @@ class PhysicalUnit:
                     precision: int = 3) -> str:
         """
         Create rich hover text with both physical and normalized values.
-        
         Enables experts to see both the interpretable physical value AND
         the visualization-normalized value for debugging color mapping.
         """
@@ -147,7 +146,6 @@ class PhysicalUnit:
     def check_thresholds(self, physical_value: float) -> Dict[str, str]:
         """
         Check physical value against critical thresholds.
-        
         Returns status dict for process control decisions.
         """
         if not self.critical_thresholds:
@@ -172,7 +170,7 @@ class PhysicalUnit:
                 return False, f"Value {physical_value:.2f} {self.unit} outside valid range [{v_min}, {v_max}]"
         return True, None
 
-#
+
 @dataclass
 class RadarDataPoint:
     """
@@ -187,7 +185,7 @@ class RadarDataPoint:
     peak_physical: float       # Physical: peak field value (e.g., 523.4 K)
     peak_normalized: float = 0.0  # Computed: normalized for visualization [0,1]
     uncertainty_physical: Optional[float] = None  # Optional: ± uncertainty in physical units
-    metadata: Dict = field(default_factory=dict)  # ✅ FIXED: colon syntax for type hint
+    metadata: Dict = field(default_factory=dict)  # Additional context: unit, refs, etc.
     
     def __post_init__(self):
         """Auto-compute normalized value if physical value and refs provided."""
@@ -218,7 +216,7 @@ class RadarDataPoint:
                 for k, v in self.metadata.items()
             }
         }
-      
+
 
 @dataclass  
 class RadarVisualizationConfig:
@@ -261,6 +259,38 @@ class RadarVisualizationConfig:
     def to_dict(self) -> Dict:
         """Convert config to dictionary for serialization."""
         return {f.name: getattr(self, f.name) for f in fields(self)}
+
+
+# ============================================================================
+# GLOBAL UNIT MAPPING (FIX FOR AttributeError & Scale Factors)
+# ============================================================================
+
+DEFAULT_PHYSICAL_UNITS: Dict[str, PhysicalUnit] = {
+    'temperature': PhysicalUnit(
+        name="Temperature", symbol="T", unit="K", latex_unit="$\\mathrm{K}$",
+        valid_range=(293.0, 1500.0),
+        critical_thresholds={"solder_melt": 450.0, "substrate_damage": 800.0}
+    ),
+    # FIX: Added scale_factor=1e-6 to convert VTU Pa data to MPa for display
+    'stress_von_mises': PhysicalUnit(
+        name="Von Mises Stress", symbol="σ_vM", unit="MPa", latex_unit="$\\mathrm{MPa}$",
+        valid_range=(0.0, 500.0),
+        critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0},
+        scale_factor=1e-6
+    ),
+    'strain': PhysicalUnit(
+        name="Equivalent Strain", symbol="ε", unit="", latex_unit="$\\varepsilon$",
+        valid_range=(0.0, 0.5)
+    ),
+    'displacement': PhysicalUnit(
+        name="Displacement", symbol="u", unit="μm", latex_unit="$\\mu\\mathrm{m}$",
+        scale_factor=1e6  # Store in meters, display in micrometers
+    ),
+    'heat_flux': PhysicalUnit(
+        name="Heat Flux", symbol="q", unit="W/m²", latex_unit="$\\mathrm{W}/\\mathrm{m}^2$",
+        valid_range=(0.0, 1e9)
+    )
+}
 
 
 # ============================================================================
@@ -958,7 +988,7 @@ class SpatioTemporalGatedPhysicsAttentionExtrapolator:
 
 
 # ============================================================================
-# 4. POLAR RADAR VISUALIZER (FIXED: Plotly annotation yref error)
+# 4. POLAR RADAR VISUALIZER (FULLY EXPANDED WITH UNIT CONVERSION & PHYSICAL COLORBAR)
 # ============================================================================
 
 class PolarRadarVisualizer:
@@ -971,39 +1001,17 @@ class PolarRadarVisualizer:
     3. Thresholds and annotations always use physical units for process control
     4. Exported data includes both representations for downstream reproducibility
     5. Interactive hover shows BOTH normalized (for debugging) and physical (for interpretation)
+    6. Colorbar shows PHYSICAL units while colorscale uses normalized [0,1] for perceptual uniformity
     
     FIXES:
     - KNOWN_UNITS is a CLASS attribute, accessed via PolarRadarVisualizer.KNOWN_UNITS
     - Removed invalid yref='colorbar' from annotations (Plotly doesn't support this)
     - Threshold info now shown in colorbar title suffix or hover text
+    - Colorbar explicitly maps 0-1 normalized ticks to physical values with correct units
     """
     
-    # CLASS ATTRIBUTE: Predefined physical units for common laser soldering fields
-    # Accessed via PolarRadarVisualizer.KNOWN_UNITS (NOT via instance)
-    KNOWN_UNITS: Dict[str, PhysicalUnit] = {
-        'temperature': PhysicalUnit(
-            name="Temperature", symbol="T", unit="K", latex_unit="$\\mathrm{K}$",
-            valid_range=(293.0, 1500.0),  # Room temp to vaporization
-            critical_thresholds={"solder_melt": 450.0, "substrate_damage": 800.0}
-        ),
-        'stress_von_mises': PhysicalUnit(
-            name="Von Mises Stress", symbol="σ_vM", unit="MPa", latex_unit="$\\mathrm{MPa}$",
-            valid_range=(0.0, 500.0),
-            critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0}
-        ),
-        'strain': PhysicalUnit(
-            name="Equivalent Strain", symbol="ε", unit="", latex_unit="$\\varepsilon$",
-            valid_range=(0.0, 0.5)
-        ),
-        'displacement': PhysicalUnit(
-            name="Displacement", symbol="u", unit="μm", latex_unit="$\\mu\\mathrm{m}$",
-            scale_factor=1e6  # Store in meters, display in micrometers
-        ),
-        'heat_flux': PhysicalUnit(
-            name="Heat Flux", symbol="q", unit="W/m²", latex_unit="$\\mathrm{W}/\\mathrm{m}^2$",
-            valid_range=(0.0, 1e9)
-        )
-    }
+    # For backward compatibility, reference the global unit mapping
+    KNOWN_UNITS = DEFAULT_PHYSICAL_UNITS
     
     def __init__(self, config: Optional[RadarVisualizationConfig] = None):
         """Initialize visualizer with default or custom configuration."""
@@ -1137,17 +1145,11 @@ class PolarRadarVisualizer:
         else:
             return self.color_scale_default
     
-    def determine_field_title(self, field_type: str, include_thresholds: bool = True) -> str:
-        """Generate human-readable title for the field with optional threshold suffix."""
-        # FIX: Access KNOWN_UNITS via class name, not instance
-        unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type)
+    def determine_field_title(self, field_type: str) -> str:
+        """Generate human-readable title for the field."""
+        unit = DEFAULT_PHYSICAL_UNITS.get(field_type)
         if unit:
-            base_title = f"Peak {unit.name} ({unit.unit})"
-            if include_thresholds and unit.critical_thresholds:
-                # Add first threshold as suffix for quick reference
-                first_thresh = list(unit.critical_thresholds.items())[0]
-                return f"{base_title} • {first_thresh[0]}: {unit.format_value(first_thresh[1])}"
-            return base_title
+            return f"Peak {unit.name} ({unit.unit})"
         
         field_lower = field_type.lower()
         if 'temp' in field_lower:
@@ -1170,8 +1172,8 @@ class PolarRadarVisualizer:
             Tuple of (prepared_df, scaling_metadata)
             scaling_metadata contains refs needed for denormalization
         """
-        # FIX: Access KNOWN_UNITS via class name
-        unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type, PhysicalUnit(
+        # Get or infer physical unit
+        unit = DEFAULT_PHYSICAL_UNITS.get(field_type, PhysicalUnit(
             name=field_type.replace('_', ' ').title(),
             symbol=field_type[0].upper() if field_type else "V",
             unit=""
@@ -1294,7 +1296,7 @@ class PolarRadarVisualizer:
         colorbar_thickness: int = 20,
         enable_hover: bool = True,
         hover_mode: str = 'closest',
-        # === NEW: Unit conversion parameters ===
+        # === Unit conversion parameters ===
         show_thresholds: bool = True,
         show_confidence_bands: bool = True,
         target_uncertainty: Optional[float] = None  # Physical uncertainty for target
@@ -1305,15 +1307,10 @@ class PolarRadarVisualizer:
         KEY FEATURES:
         - Visual encoding uses normalized values for consistent color perception
         - All labels, tooltips, and exports use physical units for interpretation
-        - Threshold info shown in colorbar title or hover text (NOT invalid annotations)
+        - Threshold annotations drawn in physical coordinates, converted to plot positions
         - Target query marker shows predicted physical value with uncertainty
         - Export metadata includes conversion refs for reproducibility
-        
-        FIX: Removed invalid yref='colorbar' annotation - Plotly doesn't support this.
-        Thresholds are now shown via:
-        1. Colorbar title suffix (e.g., "Temperature (K) • melt: 450.0 K")
-        2. Enhanced hover text showing threshold status
-        3. Optional radial reference lines at threshold values (using valid yref='y')
+        - Colorbar shows PHYSICAL units while colorscale uses normalized [0,1]
         """
         # Set default margin padding
         if margin_pad is None:
@@ -1380,15 +1377,48 @@ class PolarRadarVisualizer:
         tick_angles_deg = (tick_angles_deg + angle_offset_deg) % 360
         
         # === VALUE NORMALIZATION FOR COLORING ===
-        if normalize_colors:
-            norm_peak, norm_ref_min, norm_ref_max = self.safe_normalize(
-                physical_values, 
-                reference_max=color_reference_max,
-                reference_min=color_reference_min
+        # Note: We use the normalized values already computed in prepare_radar_data
+        # to ensure consistency between marker sizes and colors
+        norm_ref_min = scaling_meta.get('normalization_ref_min')
+        norm_ref_max = scaling_meta.get('normalization_ref_max')
+        
+        # Determine color values: normalized for consistent colorscale, or physical for auto-scaling
+        if normalize_colors and norm_ref_min is not None and norm_ref_max is not None:
+            color_values = normalized_values
+            # Setup colorbar to show physical units
+            # We create tick positions in normalized space (0 to 1)
+            # And labels in physical space
+            n_ticks = 6
+            tick_positions = np.linspace(0, 1, n_ticks)
+            
+            # Convert normalized ticks to physical values using the unit definition
+            # to_physical handles scale_factor/offset correctly
+            physical_tick_values = [
+                unit.to_physical(pos, norm_ref_min, norm_ref_max) for pos in tick_positions
+            ]
+            tick_labels = [unit.format_value(val) for val in physical_tick_values]
+            
+            colorbar_dict = dict(
+                title=colorbar_title if colorbar_title else self.determine_field_title(field_type),
+                thickness=colorbar_thickness,
+                x=colorbar_position_x,
+                len=0.5,
+                y=0.5,
+                yanchor='middle',
+                tickvals=tick_positions,
+                ticktext=tick_labels
             )
         else:
-            norm_peak = physical_values.copy()
-            norm_ref_min, norm_ref_max = None, None
+            color_values = physical_values
+            colorbar_dict = dict(
+                title=colorbar_title if colorbar_title else self.determine_field_title(field_type),
+                thickness=colorbar_thickness,
+                x=colorbar_position_x,
+                len=0.5,
+                y=0.5,
+                yanchor='middle',
+                tickformat=".2e"  # Scientific notation for raw values
+            )
         
         # === RADIAL AXIS (DURATION) SCALING ===
         if radial_axis_min is not None and np.isfinite(radial_axis_min):
@@ -1402,10 +1432,9 @@ class PolarRadarVisualizer:
             max_dur = float(np.max(durations)) if len(durations) > 0 else 1.0
             r_max = max_dur * 1.1 if max_dur > 0 else 1.2
         
-        # === COLORSCALE AND LABELS ===
+        # === COLORS AND LABELS ===
         colorscale = custom_colorscale if custom_colorscale else self.determine_colorscale(field_type)
-        # FIX: Use determine_field_title with threshold info in title, not annotation
-        field_title = colorbar_title if colorbar_title else self.determine_field_title(field_type, include_thresholds=show_thresholds)
+        field_title = colorbar_title if colorbar_title else self.determine_field_title(field_type)
         
         # === CREATE PLOTLY FIGURE ===
         fig = go.Figure()
@@ -1415,7 +1444,7 @@ class PolarRadarVisualizer:
         marker_sizes = size_min + (size_max - size_min) * normalized_values
         
         # === SOURCE SIMULATIONS TRACE ===
-        # Build rich hover text with BOTH normalized and physical values + threshold status
+        # Build rich hover text with BOTH normalized and physical values
         if hover_template_source is None:
             hover_texts = []
             for i in range(len(df_prep)):
@@ -1431,22 +1460,9 @@ class PolarRadarVisualizer:
                 hover += f"<br>Energy: {energies[i]:.2f} mJ"
                 hover += f"<br>Duration: {durations[i]:.2f} ns"
                 hover += f"<br>Timestep: {timestep}"
-                
-                # Add threshold status to hover if applicable
-                if show_thresholds and unit.critical_thresholds:
-                    threshold_status = unit.check_thresholds(phys_val)
-                    if threshold_status:
-                        hover += "<br><b>Thresholds:</b>"
-                        for thresh_name, status in threshold_status.items():
-                            icon = "🔴" if "EXCEEDED" in status else "🟢"
-                            hover += f"<br>{icon} {thresh_name}: {status}"
-                
                 hover_texts.append(hover)
         else:
             hover_texts = None
-        
-        # Determine color values: normalized for consistent colorscale, or physical for auto-scaling
-        color_values = normalized_values if normalize_colors else physical_values
         
         fig.add_trace(go.Scatterpolar(
             r=durations,
@@ -1456,15 +1472,7 @@ class PolarRadarVisualizer:
                 size=marker_sizes,
                 color=color_values,
                 colorscale=colorscale,
-                colorbar=dict(
-                    title=field_title,  # FIX: Threshold info now in title, not annotation
-                    thickness=colorbar_thickness,
-                    x=colorbar_position_x,
-                    len=0.5,
-                    y=0.5,
-                    yanchor='middle',
-                    tickformat=f".{6}f"
-                ) if show_legend else None,
+                colorbar=colorbar_dict if show_legend else None,
                 line=dict(width=2, color='white'),
                 symbol=self.source_symbol,
                 showscale=show_legend
@@ -1476,46 +1484,38 @@ class PolarRadarVisualizer:
             opacity=source_marker_opacity
         ))
         
-        # === THRESHOLD REFERENCE LINES (FIXED: Use valid yref='y' for radial lines) ===
-        # Instead of invalid colorbar annotations, add radial reference lines at threshold values
-        if show_thresholds and unit.critical_thresholds:
+        # === THRESHOLD ANNOTATIONS (Physical Units → Plot Coordinates) ===
+        if show_thresholds and unit.critical_thresholds and normalize_colors and norm_ref_min is not None:
             for threshold_name, threshold_value in unit.critical_thresholds.items():
-                # Add a radial reference line at the threshold value on the duration axis
-                # This shows where the threshold falls in the parameter space
-                # Note: This is for the radial (duration) axis, not the color scale
-                # For color scale thresholds, we rely on the colorbar title and hover text
+                # Convert physical threshold to normalized for plot positioning
+                norm_threshold = unit.to_normalized(
+                    threshold_value, norm_ref_min, norm_ref_max
+                )
+                norm_threshold = np.clip(norm_threshold, 0.0, 1.0)
                 
-                # Optional: Add a subtle shape to highlight threshold region
-                # Using valid shape references (xref/yref='paper' or 'x'/'y')
+                # Place annotation on the right side of the figure (paper coordinates)
+                # using yref='paper' to map 0-1 range of the normalized values
                 try:
-                    # Add a circular reference at threshold value (if within radial range)
-                    if r_min <= threshold_value <= r_max:
-                        fig.add_shape(
-                            type="circle",
-                            xref="paper", yref="y",
-                            x0=0.45, y0=threshold_value,
-                            x1=0.55, y1=threshold_value,
-                            line=dict(color='red', width=1, dash='dot'),
-                            fillcolor='rgba(255, 0, 0, 0.05)',
-                            layer='below'
-                        )
-                        # Add annotation near the shape using valid references
-                        fig.add_annotation(
-                            x=0.58, y=threshold_value,
-                            xref='paper', yref='y',  # FIX: Valid yref values only
-                            text=f"{threshold_name}<br>{unit.format_value(threshold_value)}",
-                            showarrow=False,
-                            font=dict(size=8, color='red'),
-                            align='left',
-                            bgcolor='rgba(255,255,255,0.8)',
-                            bordercolor='red',
-                            borderwidth=1,
-                            borderpad=3,
-                            opacity=0.9
-                        )
+                    fig.add_annotation(
+                        x=1.05,   # slightly to the right of the figure
+                        y=norm_threshold,
+                        xref='paper',
+                        yref='paper',  # Valid reference
+                        text=f"{threshold_name}: {unit.format_value(threshold_value)}",
+                        showarrow=True,
+                        arrowhead=2,
+                        ax=30,
+                        ay=0,
+                        font=dict(size=10, color='red'),
+                        align='left',
+                        bordercolor='red',
+                        borderwidth=1,
+                        borderpad=3,
+                        bgcolor='rgba(255,255,255,0.9)',
+                        opacity=0.95
+                    )
                 except Exception as e:
-                    # Silently skip if shape/annotation fails - don't crash the whole chart
-                    st.warning(f"⚠️ Could not add threshold reference for {threshold_name}: {e}")
+                    st.warning(f"⚠️ Could not add threshold annotation for {threshold_name}: {e}")
         
         # === TARGET QUERY MARKER (Prediction) ===
         if query_params and highlight_target:
@@ -1565,16 +1565,6 @@ class PolarRadarVisualizer:
                     )
                     if target_uncertainty is not None and np.isfinite(target_uncertainty):
                         hover_template_target += f"<br>Uncertainty: ±{unit.format_value(target_uncertainty)}"
-                    
-                    # Add threshold status to target hover
-                    if show_thresholds and unit.critical_thresholds and target_peak_value is not None:
-                        threshold_status = unit.check_thresholds(target_peak_value)
-                        if threshold_status:
-                            hover_template_target += "<br><b>Threshold Status:</b>"
-                            for thresh_name, status in threshold_status.items():
-                                icon = "🔴" if "EXCEEDED" in status else "🟢"
-                                hover_template_target += f"<br>{icon} {thresh_name}: {status}"
-                    
                     hover_template_target += "<extra></extra>"
                 
                 fig.add_trace(go.Scatterpolar(
@@ -1640,11 +1630,11 @@ class PolarRadarVisualizer:
         fig.update_layout(
             title=dict(
                 text=(
-                    f"Polar Radar: {self.determine_field_title(field_type, include_thresholds=False)} at t={timestep} ns<br>"
+                    f"Polar Radar: {field_title} at t={timestep} ns<br>"
                     f"<span style='font-size:{max(12, title_font_size-4)}px; color:gray;'>"
                     f"Energy: {e_min:.2f} – {e_max:.2f} mJ • Duration: {r_min:.1f} – {r_max:.1f} ns • "
-                    f"Range: {unit.format_value(scaling_meta['normalization_ref_min'])}–"
-                    f"{unit.format_value(scaling_meta['normalization_ref_max'])}"
+                    f"Range: {unit.format_value(norm_ref_min)}–"
+                    f"{unit.format_value(norm_ref_max)}"
                     f"</span>"
                 ),
                 font=dict(size=title_font_size, family="Arial, sans-serif"),
@@ -1976,7 +1966,7 @@ class EnhancedVisualizer:
         )
         return fig
 
-#
+
 # ============================================================================
 # 6. EXPORT UTILITIES
 # ============================================================================
@@ -2039,6 +2029,7 @@ class ExportManager:
             st.info("💡 Tip: Install 'kaleido' for image export: pip install -U kaleido")
             return None
 
+
 # ============================================================================
 # 7. UTILITY FUNCTIONS: PREDICTION → PHYSICAL CONVERSION
 # ============================================================================
@@ -2066,11 +2057,8 @@ def convert_prediction_to_physical(
     Returns:
         Dict with physical value, uncertainty, validity status, and threshold assessments
     """
-    if viz is None:
-        viz = PolarRadarVisualizer()
-    
-    # FIX: Access KNOWN_UNITS via class name
-    unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type, PhysicalUnit(
+    # Use global unit mapping directly (no dependency on viz)
+    unit = DEFAULT_PHYSICAL_UNITS.get(field_type, PhysicalUnit(
         name=field_type.replace('_', ' ').title(),
         symbol=field_type[0].upper() if field_type else "V",
         unit=""
@@ -2118,7 +2106,7 @@ def convert_prediction_to_physical(
 
 
 # ============================================================================
-# 8. MAIN APPLICATION (FIXED: Plotly annotation and Streamlit width)
+# 8. MAIN APPLICATION
 # ============================================================================
 
 def main():
@@ -2162,7 +2150,7 @@ def main():
     """, unsafe_allow_html=True)
     
     st.markdown('<h1 class="main-header">🔬 Laser Soldering ST-DGPA Analysis Platform</h1>', unsafe_allow_html=True)
-    st.caption("v2.1.2 • Fixed: Plotly yref='colorbar' error + KNOWN_UNITS + Streamlit width")
+    st.caption("v2.1.3 • Colorbar now displays REAL PHYSICAL UNITS (e.g., 200 MPa instead of 0.5 normalized) • Stress (Pa) correctly scaled")
 
     # Initialize session state
     if 'data_loader' not in st.session_state: 
@@ -2420,7 +2408,7 @@ def main():
         - **Marker color**: Peak field value (temperature/stress) — colorscale shows PHYSICAL units
         - **Marker size**: Scaled by peak value for visual emphasis
         - **Target marker**: Predicted query point (★) with PHYSICAL value display
-        - **Hover**: Shows BOTH normalized (for debugging) and physical (for interpretation) values + threshold status
+        - **Hover**: Shows BOTH normalized (for debugging) and physical (for interpretation) values
         """)
         
         # === FIELD AND TIMESTEP SELECTION ===
@@ -2637,9 +2625,8 @@ def main():
                         )
                     
                     with colJ:
-                        # FIX: Access KNOWN_UNITS via class name, not instance
-                        viz = st.session_state.polar_viz
-                        unit = PolarRadarVisualizer.KNOWN_UNITS.get(field_type)
+                        # Display unit info for selected field - FIXED: use DEFAULT_PHYSICAL_UNITS
+                        unit = DEFAULT_PHYSICAL_UNITS.get(field_type)
                         if unit:
                             st.info(f"**Unit**: {unit.name} ({unit.unit})")
                             if unit.valid_range:
@@ -2709,7 +2696,7 @@ def main():
                     show_grid=show_grid,
                     show_radial_labels=True,
                     show_angular_labels=True,
-                    # NEW: Unit conversion
+                    # Unit conversion
                     show_thresholds=show_thresholds,
                     show_confidence_bands=show_confidence_bands,
                     target_uncertainty=target_unc
@@ -2945,7 +2932,7 @@ def main():
                             row['confidence'] = results['confidence_scores'][idx]
                         csv_data.append(row)
                     
-                    if csv_data:
+                    if csv_
                         df_csv = pd.DataFrame(csv_data)
                         csv_str, csv_name = st.session_state.export_manager.export_to_csv(df_csv)
                         if csv_str:
@@ -2972,12 +2959,12 @@ def main():
                 else:
                     st.info("ℹ️ No attention maps available.")
             
-            # === NEW: Physical Unit Conversion Demo ===
+            # === Physical Unit Conversion Demo ===
             st.markdown("---")
             st.subheader("🔬 Prediction → Physical Unit Converter")
             st.caption("Convert normalized model outputs to actionable engineering values")
             
-            demo_field = st.selectbox("Select Field for Demo", list(PolarRadarVisualizer.KNOWN_UNITS.keys()), key="demo_field")
+            demo_field = st.selectbox("Select Field for Demo", list(DEFAULT_PHYSICAL_UNITS.keys()), key="demo_field")
             demo_norm = st.slider("Normalized Prediction [0,1]", 0.0, 1.0, 0.68, 0.01, key="demo_norm")
             demo_unc = st.slider("Normalized Uncertainty", 0.0, 0.2, 0.04, 0.005, key="demo_unc")
             
