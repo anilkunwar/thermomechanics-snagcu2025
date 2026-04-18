@@ -157,11 +157,10 @@ class UnifiedFEADataLoader:
         return simulations, summaries
 
 # =============================================
-# IMPROVED SUNBURST VISUALIZER (FIXED)
+# FIXED SUNBURST VISUALIZER (stable hierarchy)
 # =============================================
 def create_sunburst_chart(summaries, selected_field, colormap='Viridis', highlight_sim=None):
     """Stable sunburst: Energy → Duration → Simulation → Field Peak"""
-
     labels = []
     parents = []
     values = []
@@ -475,7 +474,7 @@ def render_data_viewer(selected_colormap):
         plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=700, margin=dict(l=0, r=0, t=50, b=0)
     )
     
-    # FIXED: Changed 'for trace in fig.' to 'for trace in fig.data:'
+    # FIXED: syntax error (was 'for trace in fig.')
     for trace in fig.data:
         if hasattr(trace, 'colorbar') and trace.colorbar:
             trace.colorbar.title.font.color = font_color
@@ -491,12 +490,9 @@ def render_data_viewer(selected_colormap):
     with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
     with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
 
-    # ================= NEW: IMPROVED SUNBURST SECTION =================
+    # ================= IMPROVED SUNBURST SECTION (auto-update, no button) =================
     st.markdown('<h2 class="sub-header">🌳 Comparative Sunburst – Peak Values</h2>', unsafe_allow_html=True)
     st.markdown("Hierarchy: **All Simulations → Energy → Pulse Duration → Simulation → Field Peak** (max over all timesteps)")
-
-    summaries = st.session_state.summaries
-    simulations = st.session_state.simulations
 
     if not summaries:
         st.warning("No summary data available.")
@@ -512,31 +508,39 @@ def render_data_viewer(selected_colormap):
         st.warning("No fields found for sunburst.")
         return
 
-    # Controls
+    # Controls for sunburst (auto-update)
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
-        sun_field = st.selectbox("Select Field", available_fields, 
-                            index=available_fields.index('temperature') if 'temperature' in available_fields else 0,
-                            key="sunburst_field")
+        sunburst_field = st.selectbox(
+            "Select Field for Sunburst",
+            available_fields,
+            index=available_fields.index('temperature') if 'temperature' in available_fields else 0,
+            key="sunburst_field"
+        )
     with col2:
-        sun_cmap = st.selectbox("Colormap", EXTENDED_COLORMAPS, 
-                            index=EXTENDED_COLORMAPS.index(selected_colormap) if selected_colormap in EXTENDED_COLORMAPS else 0,
-                            key="sunburst_cmap")
+        sunburst_cmap = st.selectbox(
+            "Sunburst Colormap",
+            EXTENDED_COLORMAPS,
+            index=EXTENDED_COLORMAPS.index(selected_colormap) if selected_colormap in EXTENDED_COLORMAPS else 0,
+            key="sunburst_cmap"
+        )
     with col3:
-        highlight_sim = st.selectbox("Highlight Simulation (optional)", 
-                                     ["None"] + sorted(simulations.keys()), 
-                                     key="sunburst_highlight")
+        highlight_sim = st.selectbox(
+            "Highlight Simulation (optional)",
+            ["None"] + sorted(simulations.keys()),
+            key="sunburst_highlight"
+        )
 
-    # ✅ FIX 2: Removed button wrapper. Chart now renders reactively.
-    fig_sun = create_sunburst_chart(
-        summaries, 
-        sun_field, 
-        colormap=sun_cmap, 
+    # Generate sunburst automatically (no button)
+    fig_sunburst = create_sunburst_chart(
+        summaries,
+        sunburst_field,
+        colormap=sunburst_cmap,
         highlight_sim=highlight_sim if highlight_sim != "None" else None
     )
-    st.plotly_chart(fig_sun, use_container_width=True)
+    st.plotly_chart(fig_sunburst, use_container_width=True)
 
-    # Optional: two side-by-side sunbursts (if you want to compare two fields)
+    # Optional: two side-by-side sunbursts
     st.markdown("### Compare Two Fields Side-by-Side (optional)")
     if len(available_fields) >= 2 and st.checkbox("Show two sunbursts"):
         col_l, col_r = st.columns(2)
@@ -547,10 +551,12 @@ def render_data_viewer(selected_colormap):
             f2 = st.selectbox("Right Field", available_fields, index=1, key="sun_f2")
             c2 = st.selectbox("Right Colormap", EXTENDED_COLORMAPS, index=1, key="sun_c2")
         
-        fig1 = create_sunburst_chart(summaries, f1, c1, highlight_sim if highlight_sim != "None" else None)
-        fig2 = create_sunburst_chart(summaries, f2, c2, highlight_sim if highlight_sim != "None" else None)
-        col_l.plotly_chart(fig1, use_container_width=True)
-        col_r.plotly_chart(fig2, use_container_width=True)
+        if st.button("Generate Two Sunbursts", use_container_width=True):
+            with st.spinner("Building charts..."):
+                fig1 = create_sunburst_chart(summaries, f1, c1, highlight_sim if highlight_sim != "None" else None)
+                fig2 = create_sunburst_chart(summaries, f2, c2, highlight_sim if highlight_sim != "None" else None)
+                col_l.plotly_chart(fig1, use_container_width=True)
+                col_r.plotly_chart(fig2, use_container_width=True)
 
 if __name__ == "__main__":
     main()
