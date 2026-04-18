@@ -29,7 +29,7 @@ FEA_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "fea_solutions")
 os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 
 # =============================================
-# UNIFIED DATA LOADER
+# UNIFIED DATA LOADER (from CODE 1, enhanced with proper summary stats)
 # =============================================
 class UnifiedFEADataLoader:
     """Enhanced data loader for FEA simulations"""
@@ -114,7 +114,7 @@ class UnifiedFEADataLoader:
                     'points': points, 'fields': fields, 'triangles': triangles
                 }
                 
-                # Summary statistics (global min/max/mean/std over all timesteps & points)
+                # ========== Build proper summary statistics (like CODE 2's loader) ==========
                 summary = {
                     'name': name, 'energy': energy, 'duration': duration,
                     'timesteps': list(range(1, len(vtu_files) + 1)), 'field_stats': {}
@@ -123,7 +123,8 @@ class UnifiedFEADataLoader:
                     vals = fields[field]
                     # For vector fields, compute magnitude across all points and timesteps
                     if field_info[field][0] == "vector":
-                        mag_vals = np.linalg.norm(vals, axis=2)
+                        # Compute magnitude for all timesteps and points
+                        mag_vals = np.linalg.norm(vals, axis=2)  # shape (n_timesteps, n_points)
                         summary['field_stats'][field] = {
                             'min': [float(np.nanmin(mag_vals))],
                             'max': [float(np.nanmax(mag_vals))],
@@ -157,7 +158,7 @@ class UnifiedFEADataLoader:
         return simulations, summaries
 
 # =============================================
-# IMPROVED SUNBURST VISUALIZER
+# IMPROVED SUNBURST VISUALIZER (unchanged from CODE 2)
 # =============================================
 def create_sunburst_chart(summaries, selected_field, colormap='Viridis', highlight_sim=None):
     """Create a clean hierarchical sunburst: Energy → Duration → Simulation → Field Peak"""
@@ -465,7 +466,7 @@ def render_data_viewer(selected_colormap):
         plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=700, margin=dict(l=0, r=0, t=50, b=0)
     )
     
-    # FIXED: Changed 'for trace in fig.' to 'for trace in fig.data:'
+    # Fix the incomplete for-loop (syntax error from original CODE 2)
     for trace in fig.data:
         if hasattr(trace, 'colorbar') and trace.colorbar:
             trace.colorbar.title.font.color = font_color
