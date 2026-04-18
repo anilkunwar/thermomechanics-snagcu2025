@@ -114,14 +114,12 @@ class UnifiedFEADataLoader:
                     'points': points, 'fields': fields, 'triangles': triangles
                 }
                 
-                # Summary statistics (global min/max/mean/std over all timesteps & points)
                 summary = {
                     'name': name, 'energy': energy, 'duration': duration,
                     'timesteps': list(range(1, len(vtu_files) + 1)), 'field_stats': {}
                 }
                 for field in field_info:
                     vals = fields[field]
-                    # For vector fields, compute magnitude across all points and timesteps
                     if field_info[field][0] == "vector":
                         mag_vals = np.linalg.norm(vals, axis=2)
                         summary['field_stats'][field] = {
@@ -157,94 +155,160 @@ class UnifiedFEADataLoader:
         return simulations, summaries
 
 # =============================================
-# ROBUST SUNBURST VISUALIZER (FIXED)
+# ENHANCED SUNBURST VISUALIZER
 # =============================================
-def create_sunburst_chart(summaries, selected_field, colormap='Viridis', highlight_sim=None):
+def create_sunburst_chart(summaries, selected_field, colormap='Viridis', highlight_sim=None,
+                          font_size_root=16, font_size_energy=14, font_size_tau=12, font_size_sim=10):
     """
-    Stable sunburst: Energy → Duration → Simulation → Field Peak
-    Enforces branchvalues="total" by using ONLY peak values and aggregating upward.
+    Enhanced sunburst with hierarchical coloring, custom labels, per-level font sizes,
+    and dedicated colorbars for each hierarchy level.
     """
-    labels, parents, values, colors = [], [], [], []
-    node_map = {}
-
-    def add_node(lbl, par, val, col):
-        labels.append(lbl)
-        parents.append(par)
-        values.append(val)
-        colors.append(col)
-        node_map[lbl] = len(labels) - 1
-
-    # Root
-    add_node("All Simulations", "", 0, "#1f77b4")
+    labels, parents, ids, values, colors, levels = [], [], [], [], [], []
+    e_indices = {}
+    d_indices = {}
     
-    # Organize data hierarchically to avoid duplicate label collisions
+    # Root Node
+    labels.append("All Simulations as FEM")
+    parents.append("")
+    ids.append("root")
+    values.append(0)
+    colors.append("#E0E0E0")
+    levels.append(0)
+    root_idx = 0
+
+    # Collect stats for normalization
+    all_energies = [s['energy'] for s in summaries]
+    all_taus = [s['duration'] for s in summaries]
+    all_peaks = []
+    for s in summaries:
+        p = s.get('field_stats', {}).get(selected_field, {}).get('max', [0])[0]
+        all_peaks.append(float(p) if p > 0 else 1e-3)
+
+    e_min, e_max = min(all_energies), max(all_energies)
+    d_min, d_max = min(all_taus), max(all_taus)
+    p_min, p_max = min(all_peaks), max(all_peaks)
+
+    # Sample colormaps for each hierarchy
+    cmap_e = px.colors.sample_colorscale('YlOrRd', 101)
+    cmap_d = px.colors.sample_colorscale('Blues', 101)
+    cmap_p = px.colors.sample_colorscale(colormap, 101)
+
+    def norm_val(v, vmin, vmax):
+        return max(0.0, min(1.0, (v - vmin) / (vmax - vmin))) if vmax > vmin else 0.5
+
+    # Group data hierarchically
     tree = {}
     for s in summaries:
-        e = f"{s['energy']:.1f} mJ"
-        d = f"τ: {s['duration']:.1f} ns"
+        e = s['energy']
+        d = s['duration']
         sim = s['name']
-        peak = s.get('field_stats', {}).get(selected_field, {}).get('max', [0])[0]
-        peak = float(peak) if peak > 0 else 1e-3
+        peak = float(s.get('field_stats', {}).get(selected_field, {}).get('max', [0])[0])
+        if peak <= 0: peak = 1e-3
         tree.setdefault(e, {}).setdefault(d, {})[sim] = peak
 
-    # Build hierarchy & aggregate values upward
-    total_root = 0.0
-    for e in sorted(tree.keys(), key=lambda x: float(x.split()[0])):
-        if e not in node_map: add_node(e, "All Simulations", 0, "#ff7f0e")
-        e_sum = 0.0
-        
-        for d in sorted(tree[e].keys(), key=lambda x: float(x.split()[1])):
-            # Use combined key internally to guarantee unique parent mapping
-            dur_key = f"{e}|{d}"
-            if dur_key not in node_map: add_node(dur_key, e, 0, "#2ca02c")
-            d_sum = 0.0
-            
+    sorted_energies = sorted(set(all_energies))
+    sorted_taus = sorted(set(all_taus))
+
+    # Build Hierarchy
+    for e in sorted_energies:
+        e_lbl = f"E = {e:.1f} mJ"
+        e_id = f"E_{e}"
+        e_idx = len(labels)
+        labels.append(e_lbl)
+        parents.append("root")
+        ids.append(e_id)
+        values.append(0)
+        colors.append(cmap_e[int(norm_val(e, e_min, e_max) * 100)])
+        levels.append(1)
+        e_indices[e] = e_idx
+
+        for d in sorted_taus:
+            if d not in tree[e]: continue
+            d_lbl = f"τ = {d:.1f} ns"
+            d_id = f"E_{e}_T_{d}"
+            d_idx = len(labels)
+            labels.append(d_lbl)
+            parents.append(e_id) # Plotly resolves via IDs if provided
+            ids.append(d_id)
+            values.append(0)
+            colors.append(cmap_d[int(norm_val(d, d_min, d_max) * 100)])
+            levels.append(2)
+            d_indices[(e, d)] = d_idx
+
             for sim, peak in tree[e][d].items():
-                add_node(sim, dur_key, peak, "#d62728" if highlight_sim == sim else "#9467bd")
-                d_sum += peak
-                e_sum += peak
-            
-            # Set duration node value = sum of its children
-            values[node_map[dur_key]] = d_sum
-            
-        # Set energy node value = sum of its duration children
-        values[node_map[e]] = e_sum
-        total_root += e_sum
-        
-    values[0] = total_root
+                sim_lbl = f"{sim} (Peak: {peak:.2f})"
+                s_id = f"E_{e}_T_{d}_S_{sim}"
+                s_idx = len(labels)
+                labels.append(sim_lbl)
+                parents.append(d_id)
+                ids.append(s_id)
+                values.append(peak)
+                colors.append(cmap_p[int(norm_val(peak, p_min, p_max) * 100)])
+                levels.append(3)
 
-    # Apply continuous colormap ONLY to leaf (simulation) nodes
-    child_set = set(parents)
-    leaf_indices = [i for i, l in enumerate(labels) if l not in child_set and l != ""]
-    
-    if leaf_indices:
-        leaf_vals = [values[i] for i in leaf_indices]
-        vmin, vmax = min(leaf_vals), max(leaf_vals)
-        norm = lambda v: (v - vmin) / (vmax - vmin) if vmax > vmin else 0.5
-        
-        try:
-            cmap_colors = px.colors.sample_colorscale(colormap, np.linspace(0, 1, 101))
-        except:
-            cmap_colors = px.colors.sample_colorscale("Viridis", np.linspace(0, 1, 101))
-            
-        for i in leaf_indices:
-            idx = int(norm(values[i]) * 100)
-            colors[i] = cmap_colors[idx]
+    # Aggregate values upward
+    for (e, d), d_idx in d_indices.items():
+        d_sum = sum(tree[e][d].values())
+        values[d_idx] = d_sum
+        if e in e_indices:
+            values[e_indices[e]] += d_sum
 
+    # Assign font sizes based on hierarchy level
+    font_sizes = [
+        font_size_root if l == 0 else 
+        font_size_energy if l == 1 else 
+        font_size_tau if l == 2 else 
+        font_size_sim 
+        for l in levels
+    ]
+
+    # Create Sunburst Trace
     fig = go.Figure(go.Sunburst(
+        ids=ids,
         labels=labels,
         parents=parents,
         values=values,
-        marker=dict(colors=colors, line=dict(color='white', width=1)),
         branchvalues="total",
-        hovertemplate='<b>%{label}</b><br>Peak: %{value:.3f}<extra></extra>'
+        marker=dict(colors=colors, line=dict(color='white', width=1.5)),
+        textfont=dict(size=font_sizes, family="sans-serif"),
+        hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'
     ))
-    
+
+    # Layout adjustments to accommodate multiple colorbars
     fig.update_layout(
-        title=f"Peak {selected_field} Across Simulations",
-        height=650,
-        margin=dict(t=40, l=10, r=10, b=10)
+        margin=dict(t=40, l=10, r=220, b=10),
+        paper_bgcolor="rgba(0,0,0,0)"
     )
+
+    # Add dedicated colorbars for each hierarchy level using dummy traces
+    for title, cmap, cmin, cmax, y_pos in [
+        ("Energy (mJ)", 'YlOrRd', e_min, e_max, 0.88),
+        ("Pulse Width (ns)", 'Blues', d_min, d_max, 0.58),
+        (f"Peak {selected_field}", colormap, p_min, p_max, 0.28)
+    ]:
+        fig.add_trace(go.Scatter(
+            x=[0], y=[0], mode='markers',
+            marker=dict(
+                showscale=True,
+                colorbar=dict(
+                    title=title,
+                    title_font=dict(size=11),
+                    tickfont=dict(size=10),
+                    len=0.3,
+                    thickness=16,
+                    x=1.02,
+                    y=y_pos,
+                    xanchor='left',
+                    yanchor='top',
+                    outlinewidth=0
+                ),
+                colorscale=cmap,
+                cmin=cmin,
+                cmax=cmax
+            ),
+            showlegend=False
+        ))
+
     return fig
 
 # =============================================
@@ -447,7 +511,6 @@ def render_data_viewer(selected_colormap):
         plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=700, margin=dict(l=0, r=0, t=50, b=0)
     )
     
-    # FIXED: Proper iteration over traces for colorbar styling
     for trace in fig.data:
         if hasattr(trace, 'colorbar') and trace.colorbar:
             trace.colorbar.title.font.color = font_color
@@ -465,7 +528,7 @@ def render_data_viewer(selected_colormap):
 
     # ================= SUNBURST SECTION (REACTIVE) =================
     st.markdown('<h2 class="sub-header">🌳 Comparative Sunburst – Peak Values</h2>', unsafe_allow_html=True)
-    st.markdown("Hierarchy: **All Simulations → Energy → Pulse Duration → Simulation** (values = aggregated peaks)")
+    st.markdown("Hierarchy: **All Simulations as FEM → Energy → Pulse Duration → Simulation** (values = aggregated peaks)")
 
     summaries = st.session_state.summaries
     simulations = st.session_state.simulations
@@ -499,12 +562,28 @@ def render_data_viewer(selected_colormap):
                                      ["None"] + sorted(simulations.keys()), 
                                      key="sunburst_highlight")
 
+    # Font Size Controls
+    st.markdown("### 🖋️ Label Font Sizes")
+    c_fs1, c_fs2, c_fs3, c_fs4 = st.columns(4)
+    with c_fs1:
+        fs_root = st.slider("FEM Root", 10, 24, 16, key="fs_root")
+    with c_fs2:
+        fs_energy = st.slider("Energy (E=)", 10, 22, 14, key="fs_energy")
+    with c_fs3:
+        fs_tau = st.slider("Pulse (τ=)", 10, 20, 12, key="fs_tau")
+    with c_fs4:
+        fs_sim = st.slider("Simulation", 8, 18, 10, key="fs_sim")
+
     # ✅ Chart renders reactively without button wrapper
     fig_sun = create_sunburst_chart(
         summaries, 
         sun_field, 
         colormap=sun_cmap, 
-        highlight_sim=highlight_sim if highlight_sim != "None" else None
+        highlight_sim=highlight_sim if highlight_sim != "None" else None,
+        font_size_root=fs_root,
+        font_size_energy=fs_energy,
+        font_size_tau=fs_tau,
+        font_size_sim=fs_sim
     )
     st.plotly_chart(fig_sun, use_container_width=True)
 
@@ -519,8 +598,10 @@ def render_data_viewer(selected_colormap):
             f2 = st.selectbox("Right Field", available_fields, index=1, key="sun_f2")
             c2 = st.selectbox("Right Colormap", EXTENDED_COLORMAPS, index=1, key="sun_c2")
         
-        fig1 = create_sunburst_chart(summaries, f1, c1, highlight_sim if highlight_sim != "None" else None)
-        fig2 = create_sunburst_chart(summaries, f2, c2, highlight_sim if highlight_sim != "None" else None)
+        fig1 = create_sunburst_chart(summaries, f1, c1, highlight_sim if highlight_sim != "None" else None,
+                                     font_size_root=fs_root, font_size_energy=fs_energy, font_size_tau=fs_tau, font_size_sim=fs_sim)
+        fig2 = create_sunburst_chart(summaries, f2, c2, highlight_sim if highlight_sim != "None" else None,
+                                     font_size_root=fs_root, font_size_energy=fs_energy, font_size_tau=fs_tau, font_size_sim=fs_sim)
         col_l.plotly_chart(fig1, use_container_width=True)
         col_r.plotly_chart(fig2, use_container_width=True)
 
