@@ -61,7 +61,7 @@ class UnifiedFEADataLoader:
 
         for folder_idx, folder in enumerate(folders):
             name = os.path.basename(folder)
-            energy, duration = _self.parse_folder_name(folder)
+            energy, duration = _self.parse_folder_name(name)
             if energy is None:
                 continue
 
@@ -102,7 +102,7 @@ class UnifiedFEADataLoader:
                     try:
                         mesh = meshio.read(vtu_files[t])
                         for key in field_info:
-                            if key in mesh.point_data:
+                            if key in mesh.point_
                                 fields[key][t] = mesh.point_data[key].astype(np.float32)
                     except Exception as e:
                         st.warning(f"Error loading timestep {t} in {name}: {e}")
@@ -125,17 +125,17 @@ class UnifiedFEADataLoader:
                     if field_info[field][0] == "vector":
                         mag_vals = np.linalg.norm(vals, axis=2)
                         summary['field_stats'][field] = {
-                            'min': float(np.nanmin(mag_vals)),
-                            'max': float(np.nanmax(mag_vals)),
-                            'mean': float(np.nanmean(mag_vals)),
-                            'std': float(np.nanstd(mag_vals))
+                            'min': [float(np.nanmin(mag_vals))],
+                            'max': [float(np.nanmax(mag_vals))],
+                            'mean': [float(np.nanmean(mag_vals))],
+                            'std': [float(np.nanstd(mag_vals))]
                         }
                     else:
                         summary['field_stats'][field] = {
-                            'min': float(np.nanmin(vals)),
-                            'max': float(np.nanmax(vals)),
-                            'mean': float(np.nanmean(vals)),
-                            'std': float(np.nanstd(vals))
+                            'min': [float(np.nanmin(vals))],
+                            'max': [float(np.nanmax(vals))],
+                            'mean': [float(np.nanmean(vals))],
+                            'std': [float(np.nanstd(vals))]
                         }
 
                 simulations[name] = sim_data
@@ -212,15 +212,14 @@ def create_sunburst_chart(summaries, selected_field, colormap='Viridis', highlig
 
                 # Leaf: Field peak value
                 if selected_field in s.get('field_stats', {}):
-                    peak = s['field_stats'][selected_field].get('max', 0.0)
+                    peak = s['field_stats'][selected_field].get('max', [0])[0]
                 else:
                     peak = 0.0
                 
                 leaf_label = f"{selected_field}: {peak:.2f}"
                 labels.append(leaf_label)
                 parents.append(sim_label)
-                # Plotly requires positive values; use a tiny epsilon if peak <= 0
-                values.append(max(peak, 1e-6))
+                values.append(max(peak, 1e-6))   # Plotly requires positive values
                 
                 # Leaf color will be set later via colorscale
                 colors.append(None)   # placeholder — we'll override with colorscale
@@ -466,7 +465,7 @@ def render_data_viewer(selected_colormap):
         plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=700, margin=dict(l=0, r=0, t=50, b=0)
     )
     
-    for trace in fig.data:
+    for trace in fig.
         if hasattr(trace, 'colorbar') and trace.colorbar:
             trace.colorbar.title.font.color = font_color
             trace.colorbar.tickfont.color = font_color
@@ -481,15 +480,18 @@ def render_data_viewer(selected_colormap):
     with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
     with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
 
-    # ================= SUNBURST CHARTS SECTION =================
+    # ================= NEW: IMPROVED SUNBURST SECTION =================
     st.markdown('<h2 class="sub-header">🌳 Comparative Sunburst – Peak Values</h2>', unsafe_allow_html=True)
     st.markdown("Hierarchy: **All Simulations → Energy → Pulse Duration → Simulation → Field Peak** (max over all timesteps)")
 
+    summaries = st.session_state.summaries
+    simulations = st.session_state.simulations
+
     if not summaries:
-        st.warning("No summary data available for sunburst.")
+        st.warning("No summary data available.")
         return
 
-    # Get all available fields from summaries
+    # Get all available fields
     all_fields = set()
     for s in summaries:
         all_fields.update(s.get('field_stats', {}).keys())
@@ -499,50 +501,48 @@ def render_data_viewer(selected_colormap):
         st.warning("No fields found for sunburst.")
         return
 
-    # Controls for single sunburst
+    # Controls
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
-        field_sun = st.selectbox("Select Field", available_fields,
-                                 index=available_fields.index('temperature') if 'temperature' in available_fields else 0,
-                                 key="sunburst_field")
+        field = st.selectbox("Select Field", available_fields, 
+                            index=available_fields.index('temperature') if 'temperature' in available_fields else 0,
+                            key="sunburst_field")
     with col2:
-        cmap_sun = st.selectbox("Colormap", EXTENDED_COLORMAPS,
-                                index=EXTENDED_COLORMAPS.index(selected_colormap) if selected_colormap in EXTENDED_COLORMAPS else 0,
-                                key="sunburst_cmap")
+        cmap = st.selectbox("Colormap", EXTENDED_COLORMAPS, 
+                            index=EXTENDED_COLORMAPS.index(selected_colormap) if selected_colormap in EXTENDED_COLORMAPS else 0,
+                            key="sunburst_cmap")
     with col3:
-        highlight_sim = st.selectbox("Highlight Simulation (optional)",
-                                     ["None"] + sorted(simulations.keys()),
+        highlight_sim = st.selectbox("Highlight Simulation (optional)", 
+                                     ["None"] + sorted(simulations.keys()), 
                                      key="sunburst_highlight")
 
     if st.button("Generate Sunburst", type="primary", use_container_width=True):
         with st.spinner("Generating sunburst chart..."):
-            fig_sun = create_sunburst_chart(
-                summaries,
-                field_sun,
-                colormap=cmap_sun,
+            fig = create_sunburst_chart(
+                summaries, 
+                field, 
+                colormap=cmap, 
                 highlight_sim=highlight_sim if highlight_sim != "None" else None
             )
-            st.plotly_chart(fig_sun, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
 
-    # Optional side‑by‑side comparison
-    st.markdown("### Compare Two Fields Side‑by‑Side")
-    if len(available_fields) >= 2 and st.checkbox("Show two sunbursts", key="show_two_sunbursts"):
-        colL, colR = st.columns(2)
-        with colL:
+    # Optional: two side-by-side sunbursts (if you want to compare two fields)
+    st.markdown("### Compare Two Fields Side-by-Side (optional)")
+    if len(available_fields) >= 2 and st.checkbox("Show two sunbursts"):
+        col_l, col_r = st.columns(2)
+        with col_l:
             f1 = st.selectbox("Left Field", available_fields, key="sun_f1")
-            c1 = st.selectbox("Left Colormap", EXTENDED_COLORMAPS, index=3, key="sun_c1")
-        with colR:
+            c1 = st.selectbox("Left Colormap", EXTENDED_COLORMAPS, index=3, key="sun_c1")  # Thermal example
+        with col_r:
             f2 = st.selectbox("Right Field", available_fields, index=1, key="sun_f2")
-            c2 = st.selectbox("Right Colormap", EXTENDED_COLORMAPS, index=1, key="sun_c2")
+            c2 = st.selectbox("Right Colormap", EXTENDED_COLORMAPS, index=1, key="sun_c2")  # Plasma example
         
         if st.button("Generate Two Sunbursts", use_container_width=True):
             with st.spinner("Building charts..."):
-                fig1 = create_sunburst_chart(summaries, f1, c1,
-                                             highlight_sim if highlight_sim != "None" else None)
-                fig2 = create_sunburst_chart(summaries, f2, c2,
-                                             highlight_sim if highlight_sim != "None" else None)
-                colL.plotly_chart(fig1, use_container_width=True)
-                colR.plotly_chart(fig2, use_container_width=True)
+                fig1 = create_sunburst_chart(summaries, f1, c1, highlight_sim if highlight_sim != "None" else None)
+                fig2 = create_sunburst_chart(summaries, f2, c2, highlight_sim if highlight_sim != "None" else None)
+                col_l.plotly_chart(fig1, use_container_width=True)
+                col_r.plotly_chart(fig2, use_container_width=True)
 
 if __name__ == "__main__":
     main()
