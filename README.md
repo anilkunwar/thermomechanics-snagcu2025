@@ -84,7 +84,7 @@
 
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionviewer25-streamlit-red)](https://thermomechanical-solutions-data-viewer25.streamlit.app/) (customizable color bars and controllable opacity, color bars edge values setting function and color maps perform correctly, hierarchical radar/sunburst chart as solution viewer  with provisions of field peak values, working)
 
-   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionviewer26-streamlit-red)](https://thermomechanical-solutions-data-viewer26.streamlit.app/) (customizable color bars and controllable opacity, color bars edge values setting function and color maps perform correctly, hierarchical radar/sunburst chart as solution viewer  with provisions of field peak values, not working)
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionviewer26-streamlit-red)](https://thermomechanical-solutions-data-viewer26.streamlit.app/) (customizable color bars and controllable opacity, color bars edge values setting function and color maps perform correctly, hierarchical radar/sunburst chart as solution viewer  with provisions of field peak values, working)
    
   
    Robust Visualizations 
