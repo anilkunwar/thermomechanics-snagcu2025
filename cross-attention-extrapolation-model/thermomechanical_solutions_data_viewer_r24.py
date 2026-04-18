@@ -29,7 +29,7 @@ FEA_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "fea_solutions")
 os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 
 # =============================================
-# UNIFIED DATA LOADER (from CODE 1, enhanced with proper summary stats)
+# UNIFIED DATA LOADER
 # =============================================
 class UnifiedFEADataLoader:
     """Enhanced data loader for FEA simulations"""
@@ -114,7 +114,7 @@ class UnifiedFEADataLoader:
                     'points': points, 'fields': fields, 'triangles': triangles
                 }
                 
-                # ========== Build proper summary statistics (like CODE 2's loader) ==========
+                # Summary statistics (global min/max/mean/std over all timesteps & points)
                 summary = {
                     'name': name, 'energy': energy, 'duration': duration,
                     'timesteps': list(range(1, len(vtu_files) + 1)), 'field_stats': {}
@@ -123,8 +123,7 @@ class UnifiedFEADataLoader:
                     vals = fields[field]
                     # For vector fields, compute magnitude across all points and timesteps
                     if field_info[field][0] == "vector":
-                        # Compute magnitude for all timesteps and points
-                        mag_vals = np.linalg.norm(vals, axis=2)  # shape (n_timesteps, n_points)
+                        mag_vals = np.linalg.norm(vals, axis=2)
                         summary['field_stats'][field] = {
                             'min': [float(np.nanmin(mag_vals))],
                             'max': [float(np.nanmax(mag_vals))],
@@ -158,36 +157,39 @@ class UnifiedFEADataLoader:
         return simulations, summaries
 
 # =============================================
-# IMPROVED SUNBURST VISUALIZER (unchanged from CODE 2)
+# FIXED SUNBURST VISUALIZER
 # =============================================
 def create_sunburst_chart(summaries, selected_field, colormap='Viridis', highlight_sim=None):
-    """Create a clean hierarchical sunburst: Energy → Duration → Simulation → Field Peak"""
+    """Stable sunburst: Energy → Duration → Simulation → Field Peak"""
+
     labels = []
     parents = []
     values = []
-    colors = []          # final color list for all nodes
+    colors = []
 
     # Root
     labels.append("All Simulations")
     parents.append("")
-    values.append(len(summaries))
-    colors.append("#1f77b4")   # nice blue for root
+    values.append(0)  # will accumulate
+    colors.append("#1f77b4")
 
-    # Group by Energy first (primary parameter)
+    # Group by energy
     energy_groups = {}
     for s in summaries:
         e_key = f"{s['energy']:.1f} mJ"
-        if e_key not in energy_groups:
-            energy_groups[e_key] = []
-        energy_groups[e_key].append(s)
+        energy_groups.setdefault(e_key, []).append(s)
+
+    total_count = 0
 
     for e_key, e_sims in sorted(energy_groups.items(), key=lambda x: float(x[0].split()[0])):
         labels.append(f"Energy: {e_key}")
         parents.append("All Simulations")
-        values.append(len(e_sims))
-        colors.append("#ff7f0e")   # orange for energy level
+        values.append(0)
+        colors.append("#ff7f0e")
 
-        # Group by duration under each energy
+        energy_count = 0
+
+        # Group by duration
         duration_groups = {}
         for s in e_sims:
             tau_key = f"τ: {s['duration']:.1f} ns"
@@ -196,74 +198,81 @@ def create_sunburst_chart(summaries, selected_field, colormap='Viridis', highlig
         for tau_key, tau_sims in sorted(duration_groups.items(), key=lambda x: float(x[0].split()[1])):
             labels.append(tau_key)
             parents.append(f"Energy: {e_key}")
-            values.append(len(tau_sims))
-            colors.append("#2ca02c")   # green for duration
+            values.append(0)
+            colors.append("#2ca02c")
+
+            duration_count = 0
 
             for s in tau_sims:
                 sim_label = s['name']
+
+                # Simulation node
                 labels.append(sim_label)
                 parents.append(tau_key)
-                values.append(1)
-                
-                # Highlight target simulation
-                if highlight_sim and sim_label == highlight_sim:
-                    colors.append("#d62728")   # red
-                else:
-                    colors.append("#9467bd")   # purple
+                values.append(0)
 
-                # Leaf: Field peak value
-                if selected_field in s.get('field_stats', {}):
-                    peak = s['field_stats'][selected_field].get('max', [0])[0]
+                if highlight_sim and sim_label == highlight_sim:
+                    colors.append("#d62728")
                 else:
-                    peak = 0.0
-                
+                    colors.append("#9467bd")
+
+                # Leaf: field peak
+                peak = s.get('field_stats', {}).get(selected_field, {}).get('max', [0])[0]
+                peak = float(peak) if peak and peak > 0 else 1e-3  # avoid zeros
+
                 leaf_label = f"{selected_field}: {peak:.2f}"
                 labels.append(leaf_label)
                 parents.append(sim_label)
-                values.append(max(peak, 1e-6))   # Plotly requires positive values
-                
-                # Leaf color will be set later via colorscale
-                colors.append(None)   # placeholder — we'll override with colorscale
+                values.append(peak)
+                colors.append(None)  # will assign later
 
-    # === Apply continuous colorscale only to leaf nodes ===
-    leaf_values = [v for i, v in enumerate(values) if colors[i] is None]
+                # accumulate counts
+                values[-2] += peak        # simulation gets child value
+                duration_count += peak
+
+            values[-(len(tau_sims)*2 + 1)] = duration_count  # duration node
+
+            energy_count += duration_count
+
+        values[-(len(duration_groups)*1 + len(e_sims)*2 + 1)] = energy_count  # energy node
+
+        total_count += energy_count
+
+    values[0] = total_count  # root
+
+    # === Color mapping for leaves ===
+    leaf_indices = [i for i, c in enumerate(colors) if c is None]
+    leaf_values = [values[i] for i in leaf_indices]
+
     if leaf_values:
         vmin, vmax = min(leaf_values), max(leaf_values)
         norm = lambda x: (x - vmin) / (vmax - vmin) if vmax > vmin else 0.5
-        
-        # Sample the chosen colormap
+
         try:
             color_scale = px.colors.sample_colorscale(colormap, np.linspace(0, 1, 101))
         except:
             color_scale = px.colors.sample_colorscale("Viridis", np.linspace(0, 1, 101))
-        
-        for i, val in enumerate(values):
-            if colors[i] is None:   # this is a leaf
-                norm_val = norm(val)
-                idx = int(norm_val * 100)
-                colors[i] = color_scale[idx]
 
-    # === Create figure ===
+        for i in leaf_indices:
+            idx = int(norm(values[i]) * 100)
+            colors[i] = color_scale[idx]
+
+    # === Plot ===
     fig = go.Figure(go.Sunburst(
         labels=labels,
         parents=parents,
         values=values,
-        marker=dict(colors=colors, line=dict(color='white', width=1.5)),
-        branchvalues="total",
+        marker=dict(colors=colors, line=dict(color='white', width=1)),
+        branchvalues="total",  # now VALID because hierarchy is consistent
         hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>',
-        textinfo="label+value",
-        textfont=dict(size=11)
     ))
 
-    title = f"Peak {selected_field} across Simulations"
-    if highlight_sim and highlight_sim != "None":
-        title += f"  (Target: {highlight_sim})"
-
     fig.update_layout(
-        title=dict(text=title, font=dict(size=18)),
-        height=680,
+        title=f"Peak {selected_field} across Simulations",
+        height=700,
         margin=dict(t=50, l=10, r=10, b=10)
     )
+
     return fig
 
 # =============================================
@@ -466,7 +475,7 @@ def render_data_viewer(selected_colormap):
         plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=700, margin=dict(l=0, r=0, t=50, b=0)
     )
     
-    # Fix the incomplete for-loop (syntax error from original CODE 2)
+    # FIXED: Changed 'for trace in fig.' to 'for trace in fig.data:'
     for trace in fig.data:
         if hasattr(trace, 'colorbar') and trace.colorbar:
             trace.colorbar.title.font.color = font_color
@@ -482,7 +491,7 @@ def render_data_viewer(selected_colormap):
     with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
     with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
 
-    # ================= NEW: IMPROVED SUNBURST SECTION =================
+    # ================= IMPROVED SUNBURST SECTION =================
     st.markdown('<h2 class="sub-header">🌳 Comparative Sunburst – Peak Values</h2>', unsafe_allow_html=True)
     st.markdown("Hierarchy: **All Simulations → Energy → Pulse Duration → Simulation → Field Peak** (max over all timesteps)")
 
@@ -518,15 +527,14 @@ def render_data_viewer(selected_colormap):
                                      ["None"] + sorted(simulations.keys()), 
                                      key="sunburst_highlight")
 
-    if st.button("Generate Sunburst", type="primary", use_container_width=True):
-        with st.spinner("Generating sunburst chart..."):
-            fig = create_sunburst_chart(
-                summaries, 
-                field, 
-                colormap=cmap, 
-                highlight_sim=highlight_sim if highlight_sim != "None" else None
-            )
-            st.plotly_chart(fig, use_container_width=True)
+    # FIXED: Removed button - sunburst now renders immediately on selection change
+    fig = create_sunburst_chart(
+        summaries,
+        field,
+        colormap=cmap,
+        highlight_sim=highlight_sim if highlight_sim != "None" else None
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
     # Optional: two side-by-side sunbursts (if you want to compare two fields)
     st.markdown("### Compare Two Fields Side-by-Side (optional)")
@@ -539,12 +547,11 @@ def render_data_viewer(selected_colormap):
             f2 = st.selectbox("Right Field", available_fields, index=1, key="sun_f2")
             c2 = st.selectbox("Right Colormap", EXTENDED_COLORMAPS, index=1, key="sun_c2")  # Plasma example
         
-        if st.button("Generate Two Sunbursts", use_container_width=True):
-            with st.spinner("Building charts..."):
-                fig1 = create_sunburst_chart(summaries, f1, c1, highlight_sim if highlight_sim != "None" else None)
-                fig2 = create_sunburst_chart(summaries, f2, c2, highlight_sim if highlight_sim != "None" else None)
-                col_l.plotly_chart(fig1, use_container_width=True)
-                col_r.plotly_chart(fig2, use_container_width=True)
+        # Also removed button here for consistency
+        fig1 = create_sunburst_chart(summaries, f1, c1, highlight_sim if highlight_sim != "None" else None)
+        fig2 = create_sunburst_chart(summaries, f2, c2, highlight_sim if highlight_sim != "None" else None)
+        col_l.plotly_chart(fig1, use_container_width=True)
+        col_r.plotly_chart(fig2, use_container_width=True)
 
 if __name__ == "__main__":
     main()
