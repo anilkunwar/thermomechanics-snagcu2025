@@ -13,6 +13,15 @@ from collections import OrderedDict
 warnings.filterwarnings('ignore')
 
 # =============================================
+# CONSTANTS (moved to global scope for reuse)
+# =============================================
+EXTENDED_COLORMAPS = [
+    'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis',
+    'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland',
+    'Bluered', 'Electric', 'Thermal', 'Balance', 'Teal', 'Sunset', 'Burg'
+]
+
+# =============================================
 # PATH CONFIGURATION
 # =============================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -314,12 +323,7 @@ def main():
         st.markdown("### ⚙️ Data Settings")
         load_full_data = st.checkbox("Load Full Mesh", value=True, help="Load complete mesh data for 3D visualization")
         
-        extended_colormaps = [
-            'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis',
-            'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland',
-            'Bluered', 'Electric', 'Thermal', 'Balance', 'Teal', 'Sunset', 'Burg'
-        ]
-        selected_colormap = st.selectbox("Colormap", extended_colormaps, index=0, key="global_colormap")
+        selected_colormap = st.selectbox("Colormap", EXTENDED_COLORMAPS, index=0, key="global_colormap")
 
         if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
             with st.spinner("Loading simulation data..."):
@@ -519,8 +523,9 @@ def render_data_viewer(selected_colormap):
             # Default to 'temperature' if available, otherwise first field
             default_idx1 = available_fields.index('temperature') if 'temperature' in available_fields else 0
             field1 = st.selectbox("Left Sunburst Field", available_fields, index=default_idx1, key="sunburst_field1")
-            colormap1 = st.selectbox("Colormap for " + field1, extended_colormaps, 
-                                     index=extended_colormaps.index("Thermal") if "Thermal" in extended_colormaps else 0, 
+            # Use the global EXTENDED_COLORMAPS constant (defined at module top)
+            colormap1 = st.selectbox("Colormap for " + field1, EXTENDED_COLORMAPS, 
+                                     index=EXTENDED_COLORMAPS.index("Thermal") if "Thermal" in EXTENDED_COLORMAPS else 0, 
                                      key="sunburst_cmap1")
         with col_right:
             # Default to 'vonMises' or 'principal stress' or second field
@@ -535,8 +540,8 @@ def render_data_viewer(selected_colormap):
                 default_field2 = available_fields[0]
             default_idx2 = available_fields.index(default_field2)
             field2 = st.selectbox("Right Sunburst Field", available_fields, index=default_idx2, key="sunburst_field2")
-            colormap2 = st.selectbox("Colormap for " + field2, extended_colormaps,
-                                     index=extended_colormaps.index("Plasma") if "Plasma" in extended_colormaps else 0,
+            colormap2 = st.selectbox("Colormap for " + field2, EXTENDED_COLORMAPS,
+                                     index=EXTENDED_COLORMAPS.index("Plasma") if "Plasma" in EXTENDED_COLORMAPS else 0,
                                      key="sunburst_cmap2")
 
         highlight_sim = st.selectbox("Highlight a specific simulation (optional)", 
