@@ -1,6 +1,3 @@
-Here is the complete, expanded code with **independent colormap selectors for each hierarchy level** (Root, Energy, Pulse Width, Field). The sunburst function and UI have been updated to support fully customizable color schemes per attribute, while preserving all previous fixes (ID mapping, value aggregation, font sliders, and robust layout).
-
-```python
 import streamlit as st
 import os
 import glob
@@ -666,4 +663,4 @@ def render_data_viewer(selected_colormap):
 
 if __name__ == "__main__":
     main()
-```
+
