@@ -157,77 +157,94 @@ class UnifiedFEADataLoader:
         return simulations, summaries
 
 # =============================================
-# PURE PHYSICAL HIERARCHY SUNBURST (RECOMMENDED)
+# FIXED SUNBURST WITH UNIQUE IDS
 # =============================================
 def create_sunburst_chart(summaries, selected_field, colormap='Viridis', highlight_sim=None):
     """
-    Scientific sunburst using pure physical hierarchy.
-    All values = peak field values (no count/peak mixing).
+    Scientific sunburst with globally unique node IDs.
+    Uses unique internal IDs while keeping display labels clean.
     Hierarchy: All Simulations → Energy → Duration → Simulation
     """
-    labels, parents, values, colors = [], [], [], []
+    ids = []        # unique internal identifiers
+    labels = []     # display labels (can have duplicates)
+    parents = []    # parent IDs (must reference ids[], not labels[])
+    values = []     # peak field values
+    colors = []     # node colors
 
     # Root
+    ids.append("root")
     labels.append("All Simulations")
     parents.append("")
     values.append(0)  # will accumulate
     colors.append("#1f77b4")
 
-    total = 0
-
-    # Track created nodes to avoid duplicates
-    energy_nodes = {}
-    duration_nodes = {}
+    # Track created nodes
+    energy_nodes = {}      # energy_id -> index in arrays
+    duration_nodes = {}    # duration_id -> index in arrays
 
     for s in summaries:
         sim_label = s['name']
         energy_val = s['energy']
         duration_val = s['duration']
         
-        energy_label = f"{energy_val:.1f} mJ"
-        duration_label = f"{duration_val:.1f} ns"
+        # Create unique IDs and clean display labels
+        energy_id = f"E{energy_val:.2f}"
+        energy_display = f"{energy_val:.1f} mJ"
+        
+        duration_id = f"E{energy_val:.2f}|D{duration_val:.2f}"
+        duration_display = f"τ: {duration_val:.1f} ns"
+        
+        sim_id = f"SIM:{sim_label}"
 
         # Get peak value for this field
         peak = s.get('field_stats', {}).get(selected_field, {}).get('max', [0])[0]
         peak = float(peak) if peak and peak > 0 else 1e-3  # avoid zeros
 
-        # Energy node (create if not exists)
-        if energy_label not in energy_nodes:
-            labels.append(energy_label)
-            parents.append("All Simulations")
+        # --- Energy node (create if not exists) ---
+        if energy_id not in energy_nodes:
+            ids.append(energy_id)
+            labels.append(energy_display)
+            parents.append("root")
             values.append(0)  # will accumulate
             colors.append("#ff7f0e")
-            energy_nodes[energy_label] = len(labels) - 1
+            energy_nodes[energy_id] = len(ids) - 1
+        energy_idx = energy_nodes[energy_id]
 
-        # Duration node (unique per energy)
-        dur_key = f"{energy_label}|{duration_label}"
-        if dur_key not in duration_nodes:
-            labels.append(duration_label)
-            parents.append(energy_label)
+        # --- Duration node (create if not exists) ---
+        if duration_id not in duration_nodes:
+            ids.append(duration_id)
+            labels.append(duration_display)
+            parents.append(energy_id)  # 🔥 FIXED: use energy_id, not energy_display
             values.append(0)  # will accumulate
             colors.append("#2ca02c")
-            duration_nodes[dur_key] = len(labels) - 1
+            duration_nodes[duration_id] = len(ids) - 1
+        duration_idx = duration_nodes[duration_id]
 
-        # Simulation node (leaf)
+        # --- Simulation node (leaf) ---
+        ids.append(sim_id)
         labels.append(sim_label)
-        parents.append(duration_label)
+        parents.append(duration_id)  # 🔥 FIXED: use duration_id, not duration_display
         values.append(peak)
         
         if highlight_sim == sim_label:
             colors.append("#d62728")  # red highlight
         else:
-            colors.append("#9467bd")  # purple
+            colors.append("#9467bd")  # purple (will be overwritten for leaves)
 
         # Accumulate up the hierarchy
-        values[0] += peak  # root
-        values[energy_nodes[energy_label]] += peak  # energy
-        values[duration_nodes[dur_key]] += peak  # duration
-        total += peak
+        values[0] += peak           # root
+        values[energy_idx] += peak  # energy
+        values[duration_idx] += peak  # duration
 
-    # Apply continuous colorscale to leaves only (simulation nodes)
-    # Find leaf indices (nodes with no children)
-    has_children = set(parents[1:])  # exclude root
-    leaf_indices = [i for i in range(len(labels)) if labels[i] not in has_children]
+    # --- Sanity check for duplicates ---
+    if len(ids) != len(set(ids)):
+        duplicates = [id for id in ids if ids.count(id) > 1]
+        st.warning(f"Duplicate IDs detected: {set(duplicates)}")
+
+    # --- Apply continuous colorscale to leaves only ---
+    # Leaves are nodes with no children (not appearing in parents list)
+    parent_set = set(parents)
+    leaf_indices = [i for i in range(len(ids)) if ids[i] not in parent_set]
     
     leaf_values = [values[i] for i in leaf_indices]
     if leaf_values:
@@ -245,9 +262,11 @@ def create_sunburst_chart(summaries, selected_field, colormap='Viridis', highlig
                 idx = int(norm(values[i]) * 100)
                 colors[i] = color_scale[idx]
 
+    # --- Create figure ---
     fig = go.Figure(go.Sunburst(
-        labels=labels,
-        parents=parents,
+        ids=ids,              # unique internal IDs
+        labels=labels,        # display labels (can be duplicate-looking)
+        parents=parents,      # parent IDs (must match ids[])
         values=values,
         branchvalues="total",
         marker=dict(
