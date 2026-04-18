@@ -22,7 +22,7 @@ KEY ENHANCEMENTS (v2.1.0):
 ✅ Colorbar now shows PHYSICAL units (e.g., K, MPa) while preserving perceptual colorscale
 
 Author: ST-DGPA Platform Development Team
-Version: 2.1.2
+Version: 2.1.3
 License: MIT
 Last Updated: 2026-04-18
 """
@@ -185,9 +185,29 @@ DEFAULT_PHYSICAL_UNITS: Dict[str, PhysicalUnit] = {
         valid_range=(293.0, 1500.0),
         critical_thresholds={"solder_melt": 450.0, "substrate_damage": 800.0}
     ),
+    # Stress fields – raw data in Pa, display in MPa (scale_factor = 1e-6)
     'stress_von_mises': PhysicalUnit(
         name="Von Mises Stress", symbol="σ_vM", unit="MPa", latex_unit="$\\mathrm{MPa}$",
-        valid_range=(0.0, 500.0),
+        scale_factor=1e-6,  # Convert Pa → MPa for display
+        valid_range=(0.0, 800.0),  # MPa (800 MPa = 800e6 Pa)
+        critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0}
+    ),
+    'stress': PhysicalUnit(
+        name="Stress", symbol="σ", unit="MPa", latex_unit="$\\mathrm{MPa}$",
+        scale_factor=1e-6,
+        valid_range=(0.0, 800.0),
+        critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0}
+    ),
+    'equivalent_stress': PhysicalUnit(
+        name="Equivalent Stress", symbol="σ_eq", unit="MPa", latex_unit="$\\mathrm{MPa}$",
+        scale_factor=1e-6,
+        valid_range=(0.0, 800.0),
+        critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0}
+    ),
+    'mises': PhysicalUnit(
+        name="Mises Stress", symbol="σ_Mises", unit="MPa", latex_unit="$\\mathrm{MPa}$",
+        scale_factor=1e-6,
+        valid_range=(0.0, 800.0),
         critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0}
     ),
     'strain': PhysicalUnit(
@@ -196,7 +216,7 @@ DEFAULT_PHYSICAL_UNITS: Dict[str, PhysicalUnit] = {
     ),
     'displacement': PhysicalUnit(
         name="Displacement", symbol="u", unit="μm", latex_unit="$\\mu\\mathrm{m}$",
-        scale_factor=1e6
+        scale_factor=1e6  # meters → micrometers
     ),
     'heat_flux': PhysicalUnit(
         name="Heat Flux", symbol="q", unit="W/m²", latex_unit="$\\mathrm{W}/\\mathrm{m}^2$",
@@ -1430,13 +1450,15 @@ class PolarRadarVisualizer:
         # Determine color values for the colorscale:
         # - If normalize_colors is True, we feed normalized values (0–1) to Plotly.
         #   This gives a perceptually uniform color mapping.
-        # - But we will manually set the colorbar tick labels to physical units.
+        # - We will manually set the colorbar tick labels to physical units.
         if normalize_colors and norm_ref_min is not None and norm_ref_max is not None:
             color_values = normalized_values
-            # Prepare colorbar tick positions (in normalized space) and physical labels
+            # Convert the raw physical reference range (norm_ref_min, norm_ref_max) to display units
+            phys_min = norm_ref_min * unit.scale_factor + unit.offset
+            phys_max = norm_ref_max * unit.scale_factor + unit.offset
             n_ticks = 6
             tickvals = np.linspace(0, 1, n_ticks)
-            ticktext = [unit.format_value(v) for v in np.linspace(norm_ref_min, norm_ref_max, n_ticks)]
+            ticktext = [unit.format_value(v) for v in np.linspace(phys_min, phys_max, n_ticks)]
             cmin, cmax = 0.0, 1.0
         else:
             # Fallback: use physical values directly, no custom tick formatting
@@ -1486,8 +1508,13 @@ class PolarRadarVisualizer:
         if show_thresholds and unit.critical_thresholds and normalize_colors:
             if norm_ref_min is not None and norm_ref_max is not None:
                 for threshold_name, threshold_value in unit.critical_thresholds.items():
+                    # threshold_value is already in display units (MPa for stress)
+                    # Convert to normalized space using the raw physical reference range
+                    # because to_normalized expects raw physical values.
+                    # We need to convert threshold_value (display) back to raw physical
+                    raw_threshold = (threshold_value - unit.offset) / unit.scale_factor
                     norm_threshold = unit.to_normalized(
-                        threshold_value, norm_ref_min, norm_ref_max
+                        raw_threshold, norm_ref_min, norm_ref_max
                     )
                     norm_threshold = np.clip(norm_threshold, 0.0, 1.0)
                     
@@ -1496,7 +1523,7 @@ class PolarRadarVisualizer:
                         x=1.05,   # slightly to the right of the figure
                         y=norm_threshold,
                         xref='paper',
-                        yref='paper',  # <-- FIXED: 'paper' instead of 'colorbar'
+                        yref='paper',
                         text=f"{threshold_name}: {unit.format_value(threshold_value)}",
                         showarrow=True,
                         arrowhead=2,
@@ -1529,13 +1556,13 @@ class PolarRadarVisualizer:
                 # Determine target marker color based on physical value
                 if target_peak_value is not None and np.isfinite(target_peak_value):
                     if normalize_colors and norm_ref_min is not None and norm_ref_max is not None:
-                        norm_target = unit.to_normalized(
-                            target_peak_value, norm_ref_min, norm_ref_max
-                        )
+                        # target_peak_value is in display units (MPa) – convert to raw physical
+                        raw_target = (target_peak_value - unit.offset) / unit.scale_factor
+                        norm_target = (raw_target - norm_ref_min) / (norm_ref_max - norm_ref_min)
                         norm_target = np.clip(norm_target, 0, 1)
                         target_color = px.colors.sample_colorscale(colorscale, [norm_target])[0]
                     else:
-                        # Fallback: scale relative to source data range
+                        # Fallback: scale relative to source data range (raw physical)
                         p_min = np.min(physical_values)
                         p_max = np.max(physical_values)
                         p_range = p_max - p_min
@@ -1621,14 +1648,21 @@ class PolarRadarVisualizer:
         )
         
         # === MAIN LAYOUT ===
+        # Compute display range for title
+        if normalize_colors and norm_ref_min is not None and norm_ref_max is not None:
+            title_phys_min = norm_ref_min * unit.scale_factor + unit.offset
+            title_phys_max = norm_ref_max * unit.scale_factor + unit.offset
+            title_range_str = f"{unit.format_value(title_phys_min)}–{unit.format_value(title_phys_max)}"
+        else:
+            title_range_str = "N/A"
+        
         fig.update_layout(
             title=dict(
                 text=(
                     f"Polar Radar: {field_title} at t={timestep} ns<br>"
                     f"<span style='font-size:{max(12, title_font_size-4)}px; color:gray;'>"
                     f"Energy: {e_min:.2f} – {e_max:.2f} mJ • Duration: {r_min:.1f} – {r_max:.1f} ns • "
-                    f"Range: {unit.format_value(scaling_meta['normalization_ref_min'])}–"
-                    f"{unit.format_value(scaling_meta['normalization_ref_max'])}"
+                    f"Range: {title_range_str}"
                     f"</span>"
                 ),
                 font=dict(size=title_font_size, family="Arial, sans-serif"),
@@ -2044,7 +2078,7 @@ def convert_prediction_to_physical(
     Args:
         normalized_prediction: Model output in [0,1]
         field_type: Field name (e.g., 'temperature', 'stress_von_mises')
-        ref_min/ref_max: Normalization references used during training
+        ref_min/ref_max: Normalization references used during training (raw physical values)
         uncertainty_normalized: Optional normalized uncertainty
         viz: Optional PolarRadarVisualizer instance for unit lookup
         
@@ -2058,8 +2092,9 @@ def convert_prediction_to_physical(
         unit=""
     ))
     
-    # Convert normalized to physical
-    physical_value = unit.to_physical(normalized_prediction, ref_min, ref_max)
+    # Convert normalized to physical (raw physical, then apply scale factor)
+    raw_physical = ref_min + normalized_prediction * (ref_max - ref_min)
+    physical_value = raw_physical * unit.scale_factor + unit.offset
     
     result = {
         'physical_value': physical_value,
@@ -2069,16 +2104,16 @@ def convert_prediction_to_physical(
         'warnings': []
     }
     
-    # Check against physical validity range
+    # Check against physical validity range (already in display units)
     valid, warning = unit.is_valid(physical_value)
     if not valid and warning:
         result['is_valid'] = False
         result['warnings'].append(warning)
     
-    # Convert uncertainty if provided
+    # Convert uncertainty if provided (uncertainty propagates linearly)
     if uncertainty_normalized is not None and np.isfinite(uncertainty_normalized):
-        # Uncertainty propagates linearly through the affine transform
-        unc_physical = uncertainty_normalized * (ref_max - ref_min) * unit.scale_factor
+        raw_unc = uncertainty_normalized * (ref_max - ref_min)
+        unc_physical = raw_unc * unit.scale_factor
         result['uncertainty_physical'] = unc_physical
         result['formatted_with_unc'] = f"{unit.format_value(physical_value)} ± {unit.format_value(unc_physical)}"
     
@@ -2144,7 +2179,7 @@ def main():
     """, unsafe_allow_html=True)
     
     st.markdown('<h1 class="main-header">🔬 Laser Soldering ST-DGPA Analysis Platform</h1>', unsafe_allow_html=True)
-    st.caption("v2.1.2 • Enhanced with explicit normalized↔physical unit conversion pipeline • Colorbar now shows physical units")
+    st.caption("v2.1.3 • Enhanced with explicit normalized↔physical unit conversion pipeline • Colorbar shows physical units (MPa, K, etc.)")
 
     # Initialize session state
     if 'data_loader' not in st.session_state: 
@@ -2956,7 +2991,7 @@ def main():
             demo_unc = st.slider("Normalized Uncertainty", 0.0, 0.2, 0.04, 0.005, key="demo_unc")
             
             # Get refs from current interpolation or use defaults
-            ref_min, ref_max = 400.0, 700.0  # Default for temperature
+            ref_min, ref_max = 400.0, 700.0  # Default for temperature (raw physical, K)
             if st.session_state.interpolation_results and demo_field in st.session_state.interpolation_results.get('field_predictions', {}):
                 preds = st.session_state.interpolation_results['field_predictions'][demo_field]
                 if preds['mean']:
