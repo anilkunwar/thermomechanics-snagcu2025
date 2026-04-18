@@ -19,10 +19,15 @@ KEY ENHANCEMENTS (v2.1.0):
 ✅ Export utilities preserving both representations for reproducibility
 ✅ Interactive hover with dual-unit display (normalized + physical)
 ✅ Prediction→action conversion utility for process control decisions
-✅ Colorbar now shows PHYSICAL units (e.g., K, MPa) while preserving perceptual colorscale
+✅ Colorbar now shows PHYSICAL units (e.g., K, Pa) while preserving perceptual colorscale
+
+FIX (v2.1.4):
+✅ Stress fields now correctly displayed in Pa with scientific notation
+✅ Thresholds updated to Pa values (e.g., 200e6 Pa)
+✅ Increased right margin to prevent threshold annotation overlap
 
 Author: ST-DGPA Platform Development Team
-Version: 2.1.3
+Version: 2.1.4
 License: MIT
 Last Updated: 2026-04-18
 """
@@ -84,7 +89,7 @@ class PhysicalUnit:
     Metadata class for physical quantities with unit conversion support.
     
     This enables reversible conversion between normalized [0,1] visualization
-    values and physical units (K, MPa, μm, etc.) with proper handling of:
+    values and physical units (K, Pa, μm, etc.) with proper handling of:
     - Scale factors (e.g., meters → micrometers: ×1e6)
     - Offset transforms (e.g., Celsius → Kelvin: +273.15)
     - Validity ranges for scientific sanity checking
@@ -131,7 +136,11 @@ class PhysicalUnit:
         """Format physical value with unit symbol for display."""
         if not np.isfinite(value):
             return f"N/A {self.unit}"
-        return f"{value:.{precision}f} {self.unit}"
+        # Use scientific notation for large numbers (e.g., Pa values)
+        if abs(value) >= 1e5 or (abs(value) < 1e-3 and value != 0):
+            return f"{value:.{precision}e} {self.unit}"
+        else:
+            return f"{value:.{precision}f} {self.unit}"
     
     def format_hover(self, name: str, value: float, normalized: Optional[float] = None, 
                     precision: int = 3) -> str:
@@ -171,7 +180,7 @@ class PhysicalUnit:
         if self.valid_range:
             v_min, v_max = self.valid_range
             if not (v_min <= physical_value <= v_max):
-                return False, f"Value {physical_value:.2f} {self.unit} outside valid range [{v_min}, {v_max}]"
+                return False, f"Value {self.format_value(physical_value)} outside valid range [{self.format_value(v_min)}, {self.format_value(v_max)}]"
         return True, None
 
 
@@ -185,30 +194,33 @@ DEFAULT_PHYSICAL_UNITS: Dict[str, PhysicalUnit] = {
         valid_range=(293.0, 1500.0),
         critical_thresholds={"solder_melt": 450.0, "substrate_damage": 800.0}
     ),
-    # Stress fields – raw data in Pa, display in MPa (scale_factor = 1e-6)
+    # Stress fields – raw data in Pa, display in Pa (scientific notation)
     'stress_von_mises': PhysicalUnit(
-        name="Von Mises Stress", symbol="σ_vM", unit="MPa", latex_unit="$\\mathrm{MPa}$",
-        scale_factor=1e-6,  # Convert Pa → MPa for display
-        valid_range=(0.0, 800.0),  # MPa (800 MPa = 800e6 Pa)
-        critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0}
+        name="Von Mises Stress", symbol="σ_vM", unit="Pa", latex_unit="$\\mathrm{Pa}$",
+        scale_factor=1.0,   # No conversion, keep as Pa
+        valid_range=(0.0, 800e6),   # 800 MPa = 8e8 Pa
+        critical_thresholds={
+            "yield_strength": 200e6,      # 200 MPa
+            "ultimate_strength": 350e6    # 350 MPa
+        }
     ),
     'stress': PhysicalUnit(
-        name="Stress", symbol="σ", unit="MPa", latex_unit="$\\mathrm{MPa}$",
-        scale_factor=1e-6,
-        valid_range=(0.0, 800.0),
-        critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0}
+        name="Stress", symbol="σ", unit="Pa", latex_unit="$\\mathrm{Pa}$",
+        scale_factor=1.0,
+        valid_range=(0.0, 800e6),
+        critical_thresholds={"yield_strength": 200e6, "ultimate_strength": 350e6}
     ),
     'equivalent_stress': PhysicalUnit(
-        name="Equivalent Stress", symbol="σ_eq", unit="MPa", latex_unit="$\\mathrm{MPa}$",
-        scale_factor=1e-6,
-        valid_range=(0.0, 800.0),
-        critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0}
+        name="Equivalent Stress", symbol="σ_eq", unit="Pa", latex_unit="$\\mathrm{Pa}$",
+        scale_factor=1.0,
+        valid_range=(0.0, 800e6),
+        critical_thresholds={"yield_strength": 200e6, "ultimate_strength": 350e6}
     ),
     'mises': PhysicalUnit(
-        name="Mises Stress", symbol="σ_Mises", unit="MPa", latex_unit="$\\mathrm{MPa}$",
-        scale_factor=1e-6,
-        valid_range=(0.0, 800.0),
-        critical_thresholds={"yield_strength": 200.0, "ultimate_strength": 350.0}
+        name="Mises Stress", symbol="σ_Mises", unit="Pa", latex_unit="$\\mathrm{Pa}$",
+        scale_factor=1.0,
+        valid_range=(0.0, 800e6),
+        critical_thresholds={"yield_strength": 200e6, "ultimate_strength": 350e6}
     ),
     'strain': PhysicalUnit(
         name="Equivalent Strain", symbol="ε", unit="", latex_unit="$\\varepsilon$",
@@ -1171,7 +1183,7 @@ class PolarRadarVisualizer:
         if 'temp' in field_lower:
             return "Peak Temperature (K)"
         elif 'stress' in field_lower or 'von' in field_lower:
-            return "Peak von Mises Stress (MPa)"
+            return "Peak von Mises Stress (Pa)"
         elif 'strain' in field_lower:
             return "Peak Strain"
         elif 'displacement' in field_lower:
@@ -1328,9 +1340,9 @@ class PolarRadarVisualizer:
         - Export metadata includes conversion refs for reproducibility
         - Colorbar shows PHYSICAL units while colorscale uses normalized [0,1]
         """
-        # Set default margin padding
+        # Set default margin padding (increased right margin to avoid threshold overlap)
         if margin_pad is None:
-            margin_pad = {'l': 60, 'r': 80, 't': 80, 'b': 60}
+            margin_pad = {'l': 60, 'r': 120, 't': 80, 'b': 60}  # increased right margin
         
         # Handle empty DataFrame
         if df is None or df.empty:
@@ -1453,9 +1465,9 @@ class PolarRadarVisualizer:
         # - We will manually set the colorbar tick labels to physical units.
         if normalize_colors and norm_ref_min is not None and norm_ref_max is not None:
             color_values = normalized_values
-            # Convert the raw physical reference range (norm_ref_min, norm_ref_max) to display units
-            phys_min = norm_ref_min * unit.scale_factor + unit.offset
-            phys_max = norm_ref_max * unit.scale_factor + unit.offset
+            # Physical range for colorbar (raw physical values, already in Pa)
+            phys_min = norm_ref_min
+            phys_max = norm_ref_max
             n_ticks = 6
             tickvals = np.linspace(0, 1, n_ticks)
             ticktext = [unit.format_value(v) for v in np.linspace(phys_min, phys_max, n_ticks)]
@@ -1508,14 +1520,8 @@ class PolarRadarVisualizer:
         if show_thresholds and unit.critical_thresholds and normalize_colors:
             if norm_ref_min is not None and norm_ref_max is not None:
                 for threshold_name, threshold_value in unit.critical_thresholds.items():
-                    # threshold_value is already in display units (MPa for stress)
-                    # Convert to normalized space using the raw physical reference range
-                    # because to_normalized expects raw physical values.
-                    # We need to convert threshold_value (display) back to raw physical
-                    raw_threshold = (threshold_value - unit.offset) / unit.scale_factor
-                    norm_threshold = unit.to_normalized(
-                        raw_threshold, norm_ref_min, norm_ref_max
-                    )
+                    # threshold_value is already in physical units (Pa for stress)
+                    norm_threshold = (threshold_value - norm_ref_min) / (norm_ref_max - norm_ref_min)
                     norm_threshold = np.clip(norm_threshold, 0.0, 1.0)
                     
                     # Place annotation on the right side of the figure (paper coordinates)
@@ -1556,13 +1562,11 @@ class PolarRadarVisualizer:
                 # Determine target marker color based on physical value
                 if target_peak_value is not None and np.isfinite(target_peak_value):
                     if normalize_colors and norm_ref_min is not None and norm_ref_max is not None:
-                        # target_peak_value is in display units (MPa) – convert to raw physical
-                        raw_target = (target_peak_value - unit.offset) / unit.scale_factor
-                        norm_target = (raw_target - norm_ref_min) / (norm_ref_max - norm_ref_min)
+                        norm_target = (target_peak_value - norm_ref_min) / (norm_ref_max - norm_ref_min)
                         norm_target = np.clip(norm_target, 0, 1)
                         target_color = px.colors.sample_colorscale(colorscale, [norm_target])[0]
                     else:
-                        # Fallback: scale relative to source data range (raw physical)
+                        # Fallback: scale relative to source data range
                         p_min = np.min(physical_values)
                         p_max = np.max(physical_values)
                         p_range = p_max - p_min
@@ -1648,11 +1652,9 @@ class PolarRadarVisualizer:
         )
         
         # === MAIN LAYOUT ===
-        # Compute display range for title
+        # Compute display range for title (raw physical values, already in correct unit)
         if normalize_colors and norm_ref_min is not None and norm_ref_max is not None:
-            title_phys_min = norm_ref_min * unit.scale_factor + unit.offset
-            title_phys_max = norm_ref_max * unit.scale_factor + unit.offset
-            title_range_str = f"{unit.format_value(title_phys_min)}–{unit.format_value(title_phys_max)}"
+            title_range_str = f"{unit.format_value(norm_ref_min)}–{unit.format_value(norm_ref_max)}"
         else:
             title_range_str = "N/A"
         
@@ -2179,7 +2181,7 @@ def main():
     """, unsafe_allow_html=True)
     
     st.markdown('<h1 class="main-header">🔬 Laser Soldering ST-DGPA Analysis Platform</h1>', unsafe_allow_html=True)
-    st.caption("v2.1.3 • Enhanced with explicit normalized↔physical unit conversion pipeline • Colorbar shows physical units (MPa, K, etc.)")
+    st.caption("v2.1.4 • Stress displayed in Pa with scientific notation • Fixed colorbar unit mismatch • Increased right margin for threshold annotations")
 
     # Initialize session state
     if 'data_loader' not in st.session_state: 
@@ -2523,7 +2525,7 @@ def main():
                     f"📊 Data ranges: "
                     f"Energy {df_polar['Energy'].min():.2f}–{df_polar['Energy'].max():.2f} mJ | "
                     f"Duration {df_polar['Duration'].min():.2f}–{df_polar['Duration'].max():.2f} ns | "
-                    f"Peak {df_polar['Peak_Value'].min():.3f}–{df_polar['Peak_Value'].max():.3f}"
+                    f"Peak {df_polar['Peak_Value'].min():.3e}–{df_polar['Peak_Value'].max():.3e}"
                 )
                 
                 # === STYLING EXPANDER ===
@@ -2677,7 +2679,7 @@ def main():
                             target_peak = float(preds['max'][t_idx])
                             if 'std' in preds and t_idx < len(preds['std']):
                                 target_unc = float(preds['std'][t_idx])
-                            st.info(f"🎯 Target predicted peak for `{field_type}`: **{target_peak:.4f}**")
+                            st.info(f"🎯 Target predicted peak for `{field_type}`: **{target_peak:.4e}**")
                 
                 # === CREATE AND DISPLAY CHART ===
                 viz = st.session_state.polar_viz
@@ -2697,7 +2699,7 @@ def main():
                     radial_tick_font_size=radial_tick_font,
                     angular_tick_font_size=angular_tick_font,
                     title_font_size=title_font_size,
-                    margin_pad={'l': 60, 'r': 80, 't': margin_top, 'b': 60},
+                    margin_pad={'l': 60, 'r': 120, 't': margin_top, 'b': 60},  # increased right margin
                     # Scaling
                     energy_min=custom_energy_min,
                     energy_max=custom_energy_max,
