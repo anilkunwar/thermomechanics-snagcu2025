@@ -4,17 +4,22 @@ import glob
 import re
 import numpy as np
 import plotly.graph_objects as go
+import plotly.express as px
 import meshio
 from datetime import datetime
 import warnings
 from collections import OrderedDict
-import pandas as pd
-import plotly.express as px
-from io import BytesIO
-import base64
-import hashlib
-import tempfile
+
 warnings.filterwarnings('ignore')
+
+# =============================================
+# CONSTANTS (moved to global scope for reuse)
+# =============================================
+EXTENDED_COLORMAPS = [
+    'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis',
+    'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland',
+    'Bluered', 'Electric', 'Thermal', 'Balance', 'Teal', 'Sunset', 'Burg'
+]
 
 # =============================================
 # PATH CONFIGURATION
@@ -24,7 +29,7 @@ FEA_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "fea_solutions")
 os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 
 # =============================================
-# UNIFIED DATA LOADER (from CODE 21, enhanced)
+# UNIFIED DATA LOADER
 # =============================================
 class UnifiedFEADataLoader:
     """Enhanced data loader for FEA simulations"""
@@ -109,11 +114,32 @@ class UnifiedFEADataLoader:
                     'points': points, 'fields': fields, 'triangles': triangles
                 }
                 
-                # Build summary statistics for this simulation (for comparative analysis)
-                summary = _self._build_summary(name, energy, duration, vtu_files, field_info)
-                summaries.append(summary)
-                
+                # Summary statistics (global min/max/mean/std over all timesteps & points)
+                summary = {
+                    'name': name, 'energy': energy, 'duration': duration,
+                    'timesteps': list(range(1, len(vtu_files) + 1)), 'field_stats': {}
+                }
+                for field in field_info:
+                    vals = fields[field]
+                    # For vector fields, compute magnitude across all points and timesteps
+                    if field_info[field][0] == "vector":
+                        mag_vals = np.linalg.norm(vals, axis=2)
+                        summary['field_stats'][field] = {
+                            'min': [float(np.nanmin(mag_vals))],
+                            'max': [float(np.nanmax(mag_vals))],
+                            'mean': [float(np.nanmean(mag_vals))],
+                            'std': [float(np.nanstd(mag_vals))]
+                        }
+                    else:
+                        summary['field_stats'][field] = {
+                            'min': [float(np.nanmin(vals))],
+                            'max': [float(np.nanmax(vals))],
+                            'mean': [float(np.nanmean(vals))],
+                            'std': [float(np.nanstd(vals))]
+                        }
+
                 simulations[name] = sim_data
+                summaries.append(summary)
             except Exception as e:
                 st.warning(f"Error loading {name}: {str(e)}")
                 continue
@@ -130,273 +156,143 @@ class UnifiedFEADataLoader:
 
         return simulations, summaries
 
-    def _build_summary(self, name, energy, duration, vtu_files, field_info):
-        """Build summary statistics for comparative analysis"""
-        summary = {
-            'name': name,
-            'energy': energy,
-            'duration': duration,
-            'timesteps': list(range(1, len(vtu_files)+1)),
-            'field_stats': {}
-        }
-        # Placeholder – real implementation would extract statistics from VTU files
-        # For now, we'll create dummy stats to avoid errors; actual viewer uses simulations directly.
-        # In a full integration, you would compute min/max/mean/std per field from the loaded fields.
-        # Since we have the fields in simulations, we can fill summary later. Here we keep it minimal.
-        for field in field_info.keys():
-            summary['field_stats'][field] = {
-                'min': [0], 'max': [0], 'mean': [0], 'std': [0], 'q25': [0], 'q50': [0], 'q75': [0]
-            }
-        return summary
+# =============================================
+# SUNBURST CHART HELPER FUNCTIONS
+# =============================================
+def get_global_max_peak(summary: dict, field_name: str) -> float:
+    """Return the global maximum value of a field across all timesteps."""
+    if field_name not in summary.get('field_stats', {}):
+        return 0.0
+    max_list = summary['field_stats'][field_name].get('max', [0.0])
+    return float(np.max(max_list)) if max_list else 0.0
 
-# =============================================
-# ADVANCED VISUALIZER (Sunburst, Radar, etc.)
-# =============================================
-class EnhancedVisualizer:
-    """Provides additional comparative charts like sunburst and radar"""
-    
-    @staticmethod
-    def create_sunburst_chart(summaries, selected_field='temperature', highlight_sim=None):
-        """Create enhanced sunburst chart with highlighted target simulation"""
-        labels = []
-        parents = []
-        values = []
-        colors = []
-        
-        # Root node
-        labels.append("All Simulations")
-        parents.append("")
-        values.append(len(summaries))
-        colors.append("#1f77b4")
-        
-        # Group by energy first
+def build_sunburst_data(summaries, field_name):
+    """
+    Builds the hierarchy lists for a given field.
+    Hierarchy: All Simulations → Pulse Duration (τ) → Energy (E) → Simulation → Field Peak (leaf)
+    Returns: labels, parents, values, numeric_colors (for leaf nodes only, interior = None)
+    """
+    labels = []
+    parents = []
+    values = []
+    numeric_colors = []  # None for interior nodes, peak value for leaf nodes
+
+    # Root
+    labels.append("All Simulations")
+    parents.append("")
+    values.append(len(summaries))
+    numeric_colors.append(None)
+
+    # Group by pulse duration (τ)
+    duration_groups = {}
+    for s in summaries:
+        tau_key = f"τ: {s['duration']:.1f} ns"
+        duration_groups.setdefault(tau_key, []).append(s)
+
+    for tau_key, tau_sims in sorted(duration_groups.items()):
+        labels.append(tau_key)
+        parents.append("All Simulations")
+        values.append(len(tau_sims))
+        numeric_colors.append(None)
+
+        # Group by energy under this duration
         energy_groups = {}
-        for summary in summaries:
-            energy_key = f"{summary['energy']:.1f} mJ"
-            if energy_key not in energy_groups:
-                energy_groups[energy_key] = []
-            energy_groups[energy_key].append(summary)
-        
-        # Add energy level nodes
-        for energy_key, energy_sims in energy_groups.items():
-            labels.append(f"Energy: {energy_key}")
-            parents.append("All Simulations")
-            values.append(len(energy_sims))
-            colors.append("#ff7f0e" if highlight_sim and any(s['name'] == highlight_sim for s in energy_sims) else "#2ca02c")
-            
-            # Add duration nodes for each energy group
-            for summary in energy_sims:
-                duration_key = f"τ: {summary['duration']:.1f} ns"
-                sim_label = f"{summary['name']}"
+        for s in tau_sims:
+            e_key = f"E: {s['energy']:.1f} mJ"
+            energy_groups.setdefault(e_key, []).append(s)
+
+        for e_key, e_sims in sorted(energy_groups.items()):
+            labels.append(e_key)
+            parents.append(tau_key)
+            values.append(len(e_sims))
+            numeric_colors.append(None)
+
+            for s in e_sims:
+                sim_label = s['name']
                 labels.append(sim_label)
-                parents.append(f"Energy: {energy_key}")
+                parents.append(e_key)
                 values.append(1)
-                
-                # Highlight target simulation
-                if highlight_sim and summary['name'] == highlight_sim:
-                    colors.append("#d62728")  # Red for target
-                else:
-                    colors.append("#9467bd")  # Purple for others
-                
-                # Add field statistics if available
-                if selected_field in summary['field_stats']:
-                    stats = summary['field_stats'][selected_field]
-                    if stats['max']:
-                        avg_max = np.mean(stats['max']) if isinstance(stats['max'], list) else stats['max']
-                        field_label = f"{selected_field}: {avg_max:.1f}"
-                        labels.append(field_label)
-                        parents.append(sim_label)
-                        values.append(avg_max if avg_max > 0 else 1e-6)
-                        colors.append("#8c564b")  # Brown for field values
-        
-        # Ensure all values are positive
-        values = [max(v, 1e-6) for v in values]
-        
-        fig = go.Figure(go.Sunburst(
-            labels=labels,
-            parents=parents,
-            values=values,
-            branchvalues="total",
-            marker=dict(
-                colors=colors,
-                colorscale='Viridis',
-                line=dict(width=2, color='white')
-            ),
-            hovertemplate='<b>%{label}</b><br>Value: %{value:.2f}<br>Parent: %{parent}<extra></extra>',
-            textinfo="label+value",
-            textfont=dict(size=12)
-        ))
-        
-        title = f"Simulation Hierarchy - {selected_field}"
-        if highlight_sim:
-            title += f" (Target: {highlight_sim})"
-        
-        fig.update_layout(
-            title=title,
-            height=700,
-            margin=dict(t=50, b=20, l=20, r=20)
-        )
-        
-        return fig
+                numeric_colors.append(None)   # simulation node itself has no numeric value
+
+                # Leaf node: field peak
+                peak_val = get_global_max_peak(s, field_name)
+                leaf_label = f"{field_name}: {peak_val:.2f}"
+                labels.append(leaf_label)
+                parents.append(sim_label)
+                # Ensure positive value for plotting (Plotly requires >0)
+                values.append(peak_val if peak_val > 0 else 1e-6)
+                numeric_colors.append(peak_val)
+
+    return labels, parents, values, numeric_colors
+
+def create_sunburst_figure(summaries, field_name, colormap, highlight_sim=None):
+    """
+    Creates a Plotly Sunburst figure for the given field.
+    Interior nodes are colored light gray, leaf nodes use the provided colormap.
+    If highlight_sim is given, that simulation node and its leaf nodes are colored red.
+    """
+    labels, parents, values, num_colors = build_sunburst_data(summaries, field_name)
     
-    @staticmethod
-    def create_radar_chart(summaries, simulation_names, target_sim=None):
-        """Create enhanced radar chart with highlighted target simulation"""
-        # Determine available fields
-        all_fields = set()
-        for summary in summaries:
-            all_fields.update(summary['field_stats'].keys())
-        
-        if not all_fields:
-            return go.Figure()
-        
-        # Select top 6 fields for clarity
-        selected_fields = list(all_fields)[:6]
-        
-        fig = go.Figure()
-        
-        for sim_name in simulation_names:
-            # Find summary
-            summary = next((s for s in summaries if s['name'] == sim_name), None)
-            if not summary:
-                continue
-            
-            r_values = []
-            theta_values = []
-            
-            for field in selected_fields:
-                if field in summary['field_stats']:
-                    stats = summary['field_stats'][field]
-                    # Use mean value across timesteps
-                    if stats['mean']:
-                        avg_value = np.mean(stats['mean']) if isinstance(stats['mean'], list) else stats['mean']
-                        r_values.append(avg_value if avg_value > 0 else 1e-6)
-                        theta_values.append(f"{field[:15]}...")
-                    else:
-                        r_values.append(1e-6)
-                        theta_values.append(f"{field[:15]}...")
-                else:
-                    r_values.append(1e-6)
-                    theta_values.append(f"{field[:15]}...")
-            
-            # Highlight target simulation
-            line_width = 4 if target_sim and sim_name == target_sim else 2
-            fill_opacity = 0.6 if target_sim and sim_name == target_sim else 0.3
-            color = 'red' if target_sim and sim_name == target_sim else None
-            
-            fig.add_trace(go.Scatterpolar(
-                r=r_values,
-                theta=theta_values,
-                fill='toself',
-                name=sim_name,
-                line=dict(width=line_width, color=color),
-                fillcolor=f'rgba(255,0,0,{fill_opacity})' if color else None,
-                opacity=0.8
-            ))
-        
-        if fig.data:
-            # Find maximum value for scaling
-            max_values = []
-            for trace in fig.data:
-                max_values.append(max(trace.r))
-            
-            if max_values:
-                max_r = max(max_values)
-                
-                fig.update_layout(
-                    polar=dict(
-                        radialaxis=dict(
-                            visible=True,
-                            range=[0, max_r * 1.2],
-                            tickfont=dict(size=10),
-                            gridcolor='lightgray',
-                            linecolor='gray'
-                        ),
-                        angularaxis=dict(
-                            tickfont=dict(size=11),
-                            rotation=90,
-                            direction="clockwise"
-                        ),
-                        bgcolor='white',
-                        gridshape='circular'
-                    ),
-                    showlegend=True,
-                    title="Radar Chart: Simulation Comparison",
-                    height=600,
-                    legend=dict(
-                        yanchor="top",
-                        y=0.99,
-                        xanchor="left",
-                        x=1.05
-                    )
-                )
-        
-        return fig
+    # Build a list of color strings for each wedge
+    # First, get the range of leaf values (exclude None)
+    leaf_vals = [v for v in num_colors if v is not None]
+    if leaf_vals:
+        vmin, vmax = min(leaf_vals), max(leaf_vals)
+    else:
+        vmin, vmax = 0, 1
     
-    @staticmethod
-    def create_field_evolution_comparison(summaries, simulation_names, selected_field, target_sim=None):
-        """Create field evolution comparison plot"""
-        fig = go.Figure()
-        
-        for sim_name in simulation_names:
-            summary = next((s for s in summaries if s['name'] == sim_name), None)
-            
-            if summary and selected_field in summary['field_stats']:
-                stats = summary['field_stats'][selected_field]
-                
-                # Highlight target simulation
-                line_width = 4 if target_sim and sim_name == target_sim else 2
-                line_dash = 'solid' if target_sim and sim_name == target_sim else 'dash'
-                
-                # Plot mean
-                if stats['mean'] and isinstance(stats['mean'], list):
-                    fig.add_trace(go.Scatter(
-                        x=summary['timesteps'],
-                        y=stats['mean'],
-                        mode='lines+markers',
-                        name=f"{sim_name} (mean)",
-                        line=dict(width=line_width, dash=line_dash),
-                        opacity=0.8
-                    ))
-                    
-                    # Add confidence band (mean ± std)
-                    if stats['std'] and isinstance(stats['std'], list):
-                        y_upper = np.array(stats['mean']) + np.array(stats['std'])
-                        y_lower = np.array(stats['mean']) - np.array(stats['std'])
-                        fig.add_trace(go.Scatter(
-                            x=summary['timesteps'] + summary['timesteps'][::-1],
-                            y=np.concatenate([y_upper, y_lower[::-1]]),
-                            fill='toself',
-                            fillcolor=f'rgba(128,128,128,{0.1 if target_sim and sim_name == target_sim else 0.05})',
-                            line=dict(color='rgba(255,255,255,0)'),
-                            showlegend=False,
-                            name=f"{sim_name} ± std"
-                        ))
-        
-        if fig.data:
-            fig.update_layout(
-                title=f"{selected_field} Evolution Comparison",
-                xaxis_title="Timestep (ns)",
-                yaxis_title=f"{selected_field} Value",
-                hovermode="x unified",
-                height=500,
-                showlegend=True,
-                legend=dict(
-                    yanchor="top",
-                    y=0.99,
-                    xanchor="left",
-                    x=1.02
-                )
-            )
-        
-        return fig
+    # Sample the colormap (Plotly Express provides named colorscales)
+    if colormap in px.colors.named_colorscales():
+        colorscale = px.colors.sample_colorscale(colormap, [i/100 for i in range(101)])
+    else:
+        colorscale = px.colors.sample_colorscale("Viridis", [i/100 for i in range(101)])
+    
+    color_list = []
+    for val in num_colors:
+        if val is None:
+            # Interior node: light gray
+            color_list.append("#CCCCCC")
+        else:
+            # Normalize value to [0,1] within the leaf range
+            if vmax > vmin:
+                norm = (val - vmin) / (vmax - vmin)
+            else:
+                norm = 0.5
+            idx = int(norm * 100)
+            idx = min(idx, 100)
+            color_list.append(colorscale[idx])
+    
+    # Highlight the selected simulation if requested
+    if highlight_sim and highlight_sim != "None":
+        for i, lbl in enumerate(labels):
+            if lbl == highlight_sim:
+                color_list[i] = "red"          # simulation node
+            elif parents[i] == highlight_sim:
+                color_list[i] = "red"          # its leaf nodes (field peaks)
+    
+    # Create the figure
+    fig = go.Figure(go.Sunburst(
+        labels=labels,
+        parents=parents,
+        values=values,
+        marker=dict(colors=color_list),
+        branchvalues="total",
+        hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        title=dict(text=f"Peak {field_name} (max over all timesteps)", font=dict(size=16)),
+        height=600,
+        margin=dict(t=40, l=10, r=10, b=10)
+    )
+    return fig
 
 # =============================================
-# MAIN APPLICATION (extended with Comparative Analysis)
+# MAIN APPLICATION
 # =============================================
 def main():
     st.set_page_config(
-        page_title="FEA Data Viewer with Comparative Analysis",
+        page_title="FEA Data Viewer",
         layout="wide",
         initial_sidebar_state="expanded",
         page_icon="📊"
@@ -410,7 +306,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    st.markdown('<h1 class="main-header">📊 FEA Data Viewer with Comparative Analysis</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">📊 FEA Data Viewer</h1>', unsafe_allow_html=True)
 
     # Session State Initialization
     if 'data_loader' not in st.session_state:
@@ -421,32 +317,13 @@ def main():
         st.session_state.simulations = {}
     if 'summaries' not in st.session_state:
         st.session_state.summaries = []
-    if 'visualizer' not in st.session_state:
-        st.session_state.visualizer = EnhancedVisualizer()
-    if 'current_mode' not in st.session_state:
-        st.session_state.current_mode = "Data Viewer"
 
     # Sidebar
     with st.sidebar:
-        st.markdown("### ⚙️ Navigation")
-        app_mode = st.radio(
-            "Select Mode",
-            ["Data Viewer", "Comparative Analysis"],
-            index=0 if st.session_state.current_mode == "Data Viewer" else 1,
-            key="nav_mode"
-        )
-        st.session_state.current_mode = app_mode
-        
-        st.markdown("---")
         st.markdown("### ⚙️ Data Settings")
         load_full_data = st.checkbox("Load Full Mesh", value=True, help="Load complete mesh data for 3D visualization")
         
-        extended_colormaps = [
-            'Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis',
-            'Rainbow', 'Jet', 'Hot', 'Cool', 'Portland',
-            'Bluered', 'Electric', 'Thermal', 'Balance', 'Teal', 'Sunset', 'Burg'
-        ]
-        selected_colormap = st.selectbox("Colormap", extended_colormaps, index=0, key="global_colormap")
+        selected_colormap = st.selectbox("Colormap", EXTENDED_COLORMAPS, index=0, key="global_colormap")
 
         if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
             with st.spinner("Loading simulation data..."):
@@ -473,18 +350,13 @@ def main():
         """, unsafe_allow_html=True)
         return
 
-    if st.session_state.current_mode == "Data Viewer":
-        render_data_viewer(st.session_state.get('global_colormap', 'Viridis'))
-    else:
-        render_comparative_analysis()
+    render_data_viewer(st.session_state.get('global_colormap', 'Viridis'))
 
-# ----------------------------------------------------------------------
-# Data Viewer (original CODE 21 with minor adjustments)
-# ----------------------------------------------------------------------
 def render_data_viewer(selected_colormap):
     st.markdown('<h2 class="sub-header">📁 Data Viewer</h2>', unsafe_allow_html=True)
     
     simulations = st.session_state.simulations
+    summaries = st.session_state.summaries
     if not simulations:
         return
 
@@ -615,7 +487,6 @@ def render_data_viewer(selected_colormap):
         plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=700, margin=dict(l=0, r=0, t=50, b=0)
     )
     
-    # Sync colorbar font with theme
     for trace in fig.data:
         if hasattr(trace, 'colorbar') and trace.colorbar:
             trace.colorbar.title.font.color = font_color
@@ -631,215 +502,58 @@ def render_data_viewer(selected_colormap):
     with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
     with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
 
-# ----------------------------------------------------------------------
-# Comparative Analysis (with Sunburst chart from CODE 22)
-# ----------------------------------------------------------------------
-def render_comparative_analysis():
-    st.markdown('<h2 class="sub-header">📊 Comparative Analysis</h2>', unsafe_allow_html=True)
-    
-    simulations = st.session_state.simulations
-    summaries = st.session_state.summaries
-    
-    if not summaries:
-        st.warning("No summary data available for comparative analysis. Please reload simulations.")
-        return
-    
-    # Target simulation selection
-    st.markdown('<h3 class="sub-header">🎯 Select Target Simulation</h3>', unsafe_allow_html=True)
-    
-    available_simulations = sorted(simulations.keys())
-    
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        target_simulation = st.selectbox(
-            "Select target simulation for highlighting",
-            available_simulations,
-            key="target_sim_select",
-            help="This simulation will be highlighted in all visualizations"
-        )
-    
-    with col2:
-        n_comparisons = st.number_input(
-            "Number of comparisons",
-            min_value=1,
-            max_value=10,
-            value=5,
-            step=1,
-            key="n_comparisons"
-        )
-    
-    # Select comparison simulations (excluding target)
-    comparison_sims = [sim for sim in available_simulations if sim != target_simulation]
-    selected_comparisons = st.multiselect(
-        "Select simulations for comparison",
-        comparison_sims,
-        default=comparison_sims[:min(n_comparisons - 1, len(comparison_sims))],
-        help="Select simulations to compare with the target"
-    )
-    
-    # Include target in visualization list
-    visualization_sims = [target_simulation] + selected_comparisons
-    
-    if not visualization_sims:
-        st.info("Please select at least one simulation for comparison.")
-        return
-    
-    # Field selection
-    st.markdown('<h3 class="sub-header">📈 Select Field for Analysis</h3>', unsafe_allow_html=True)
-    
-    # Get available fields from selected simulations
-    available_fields = set()
-    for sim_name in visualization_sims:
-        if sim_name in simulations:
-            available_fields.update(simulations[sim_name]['field_info'].keys())
-    
-    if not available_fields:
-        st.error("No field data available for selected simulations.")
-        return
-    
-    selected_field = st.selectbox(
-        "Select field for analysis",
-        sorted(available_fields),
-        key="comparison_field",
-        help="Choose a field to compare across simulations"
-    )
-    
-    # Visualization tabs
-    tab1, tab2, tab3 = st.tabs(["📊 Sunburst", "🎯 Radar", "⏱️ Evolution"])
-    
-    with tab1:
-        st.markdown("##### 📊 Hierarchical Sunburst Chart")
-        # We need to build richer summaries for the sunburst (with actual field statistics)
-        # For demonstration, we'll enhance the summaries on the fly using loaded simulation data
-        enhanced_summaries = []
-        for summary in summaries:
-            sim_name = summary['name']
-            if sim_name in simulations:
-                sim = simulations[sim_name]
-                # Build field stats from loaded fields
-                field_stats = {}
-                for fld in sim['field_info'].keys():
-                    field_data = sim['fields'][fld]
-                    # Compute stats across all timesteps
-                    if field_data.ndim == 2:  # scalar field
-                        all_vals = field_data.flatten()
-                        all_vals = all_vals[~np.isnan(all_vals)]
-                        if len(all_vals) > 0:
-                            field_stats[fld] = {
-                                'min': [float(np.min(all_vals))],
-                                'max': [float(np.max(all_vals))],
-                                'mean': [float(np.mean(all_vals))],
-                                'std': [float(np.std(all_vals))],
-                                'q25': [float(np.percentile(all_vals, 25))],
-                                'q50': [float(np.percentile(all_vals, 50))],
-                                'q75': [float(np.percentile(all_vals, 75))]
-                            }
-                        else:
-                            field_stats[fld] = {'min':[0],'max':[0],'mean':[0],'std':[0],'q25':[0],'q50':[0],'q75':[0]}
-                    else:  # vector field
-                        # compute magnitude across all points and timesteps
-                        mag_vals = np.linalg.norm(field_data, axis=2).flatten()
-                        mag_vals = mag_vals[~np.isnan(mag_vals)]
-                        if len(mag_vals) > 0:
-                            field_stats[fld] = {
-                                'min': [float(np.min(mag_vals))],
-                                'max': [float(np.max(mag_vals))],
-                                'mean': [float(np.mean(mag_vals))],
-                                'std': [float(np.std(mag_vals))],
-                                'q25': [float(np.percentile(mag_vals, 25))],
-                                'q50': [float(np.percentile(mag_vals, 50))],
-                                'q75': [float(np.percentile(mag_vals, 75))]
-                            }
-                        else:
-                            field_stats[fld] = {'min':[0],'max':[0],'mean':[0],'std':[0],'q25':[0],'q50':[0],'q75':[0]}
-                enhanced_summaries.append({
-                    'name': sim_name,
-                    'energy': summary['energy'],
-                    'duration': summary['duration'],
-                    'timesteps': summary['timesteps'],
-                    'field_stats': field_stats
-                })
+    # ================= NEW: SUNBURST CHARTS SECTION =================
+    st.markdown('<h2 class="sub-header">🌳 Hierarchical Sunburst – Peaks over all timesteps</h2>', unsafe_allow_html=True)
+    st.markdown("""
+    This chart aggregates the **maximum peak** of each field across **all time steps** for every simulation.
+    The hierarchy is: **All Simulations → Pulse Duration (τ) → Energy (E) → Simulation → Field Peak**.
+    """)
+
+    # Determine available fields (common across all simulations)
+    all_fields = set()
+    for s in summaries:
+        all_fields.update(s.get('field_stats', {}).keys())
+    available_fields = sorted(all_fields)
+
+    if len(available_fields) < 2:
+        st.warning("Need at least two fields to display two sunburst charts.")
+    else:
+        col_left, col_right = st.columns(2)
+        with col_left:
+            # Default to 'temperature' if available, otherwise first field
+            default_idx1 = available_fields.index('temperature') if 'temperature' in available_fields else 0
+            field1 = st.selectbox("Left Sunburst Field", available_fields, index=default_idx1, key="sunburst_field1")
+            # Use the global EXTENDED_COLORMAPS constant (defined at module top)
+            colormap1 = st.selectbox("Colormap for " + field1, EXTENDED_COLORMAPS, 
+                                     index=EXTENDED_COLORMAPS.index("Thermal") if "Thermal" in EXTENDED_COLORMAPS else 0, 
+                                     key="sunburst_cmap1")
+        with col_right:
+            # Default to 'vonMises' or 'principal stress' or second field
+            default_field2 = None
+            for candidate in ['vonMises', 'principal stress', 'stress']:
+                if candidate in available_fields:
+                    default_field2 = candidate
+                    break
+            if default_field2 is None and len(available_fields) > 1:
+                default_field2 = available_fields[1]
             else:
-                # fallback
-                enhanced_summaries.append(summary)
-        
-        sunburst_fig = st.session_state.visualizer.create_sunburst_chart(
-            enhanced_summaries,
-            selected_field,
-            highlight_sim=target_simulation
-        )
-        if sunburst_fig.data:
-            st.plotly_chart(sunburst_fig, use_container_width=True)
-        else:
-            st.info("Insufficient data for sunburst chart")
-    
-    with tab2:
-        st.markdown("##### 🎯 Multi-Field Radar Comparison")
-        radar_fig = st.session_state.visualizer.create_radar_chart(
-            enhanced_summaries,
-            visualization_sims,
-            target_sim=target_simulation
-        )
-        if radar_fig.data:
-            st.plotly_chart(radar_fig, use_container_width=True)
-        else:
-            st.info("Insufficient data for radar chart")
-    
-    with tab3:
-        st.markdown("##### ⏱️ Field Evolution Over Time")
-        evolution_fig = st.session_state.visualizer.create_field_evolution_comparison(
-            enhanced_summaries,
-            visualization_sims,
-            selected_field,
-            target_sim=target_simulation
-        )
-        if evolution_fig.data:
-            st.plotly_chart(evolution_fig, use_container_width=True)
-        else:
-            st.info(f"No {selected_field} data available for selected simulations")
-    
-    # Comparative statistics table
-    st.markdown('<h3 class="sub-header">📋 Comparative Statistics</h3>', unsafe_allow_html=True)
-    
-    stats_data = []
-    for sim_name in visualization_sims:
-        # find summary
-        summary = next((s for s in enhanced_summaries if s['name'] == sim_name), None)
-        if summary and selected_field in summary['field_stats']:
-            stats = summary['field_stats'][selected_field]
-            row = {
-                'Simulation': sim_name,
-                'Type': 'Target' if sim_name == target_simulation else 'Comparison',
-                'Energy (mJ)': summary['energy'],
-                'Duration (ns)': summary['duration'],
-                f'Mean {selected_field}': stats['mean'][0] if stats['mean'] else 0,
-                f'Max {selected_field}': stats['max'][0] if stats['max'] else 0,
-                f'Std Dev {selected_field}': stats['std'][0] if stats['std'] else 0,
-            }
-            stats_data.append(row)
-    
-    if stats_data:
-        df_stats = pd.DataFrame(stats_data)
-        def highlight_target(row):
-            if row['Type'] == 'Target':
-                return ['background-color: #ffcccc'] * len(row)
-            return [''] * len(row)
-        styled_df = df_stats.style.apply(highlight_target, axis=1)
-        format_dict = {col: "{:.3f}" for col in df_stats.columns if col not in ['Simulation','Type','Energy (mJ)','Duration (ns)']}
-        format_dict['Energy (mJ)'] = "{:.2f}"
-        format_dict['Duration (ns)'] = "{:.2f}"
-        styled_df = styled_df.format(format_dict)
-        st.dataframe(styled_df, use_container_width=True)
-        
-        # Export
-        csv = df_stats.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Comparison as CSV",
-            data=csv,
-            file_name=f"comparison_{selected_field}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+                default_field2 = available_fields[0]
+            default_idx2 = available_fields.index(default_field2)
+            field2 = st.selectbox("Right Sunburst Field", available_fields, index=default_idx2, key="sunburst_field2")
+            colormap2 = st.selectbox("Colormap for " + field2, EXTENDED_COLORMAPS,
+                                     index=EXTENDED_COLORMAPS.index("Plasma") if "Plasma" in EXTENDED_COLORMAPS else 0,
+                                     key="sunburst_cmap2")
+
+        highlight_sim = st.selectbox("Highlight a specific simulation (optional)", 
+                                     ["None"] + sorted(simulations.keys()), 
+                                     key="sunburst_highlight")
+
+        if st.button("Generate Sunburst Charts", type="primary", use_container_width=True):
+            with st.spinner("Building sunburst charts..."):
+                fig1 = create_sunburst_figure(summaries, field1, colormap1, highlight_sim)
+                fig2 = create_sunburst_figure(summaries, field2, colormap2, highlight_sim)
+                col_left.plotly_chart(fig1, use_container_width=True)
+                col_right.plotly_chart(fig2, use_container_width=True)
 
 if __name__ == "__main__":
     main()
