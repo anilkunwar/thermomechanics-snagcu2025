@@ -5,11 +5,13 @@ import re
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import plotly.io as pio
 import meshio
-from datetime import datetime
+import io
 import warnings
+from datetime import datetime
 from collections import OrderedDict
-from typing import List, Dict, Any, Optional, Tuple
+from PIL import Image
 
 warnings.filterwarnings('ignore')
 
@@ -31,337 +33,318 @@ FEA_SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "fea_solutions")
 os.makedirs(FEA_SOLUTIONS_DIR, exist_ok=True)
 
 # =============================================
-# ERROR LOGGING
+# UNIFIED DATA LOADER
 # =============================================
-if 'error_log' not in st.session_state:
-    st.session_state.error_log = []
+class UnifiedFEADataLoader:
+    """Enhanced data loader for FEA simulations"""
+    def __init__(self):
+        self.simulations = {}
+        self.summaries = []
+        self.available_fields = set()
 
-def log_warning(msg: str):
-    st.session_state.error_log.append(f"{datetime.now()}: {msg}")
-
-# =============================================
-# UNIFIED DATA LOADER (WITH CACHE FIX)
-# =============================================
-@st.cache_data(show_spinner="Loading simulation data...")
-def load_all_simulations(fea_solutions_dir: str, load_full_mesh: bool = True, max_points: int = 50000):
-    """Standalone cached function to avoid session state issues."""
-    simulations = {}
-    summaries = []
-    folders = glob.glob(os.path.join(fea_solutions_dir, "q*mJ-delta*ns"))
-    
-    if not folders:
-        st.warning(f"No simulation folders found in {fea_solutions_dir}")
-        return simulations, summaries
-
-    def parse_folder_name(folder: str):
+    def parse_folder_name(self, folder: str):
+        """q0p5mJ-delta4p2ns → (0.5, 4.2)"""
         match = re.match(r"q([\dp\.]+)mJ-delta([\dp\.]+)ns", folder)
         if not match:
             return None, None
         e, d = match.groups()
         return float(e.replace("p", ".")), float(d.replace("p", "."))
 
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    @st.cache_data(show_spinner="Loading simulation data...")
+    def load_all_simulations(_self, load_full_mesh=True):
+        simulations = {}
+        summaries = []
+        folders = glob.glob(os.path.join(FEA_SOLUTIONS_DIR, "q*mJ-delta*ns"))
+        
+        if not folders:
+            st.warning(f"No simulation folders found in {FEA_SOLUTIONS_DIR}")
+            return simulations, summaries
 
-    for folder_idx, folder in enumerate(folders):
-        name = os.path.basename(folder)
-        energy, duration = parse_folder_name(name)
-        if energy is None:
-            continue
+        progress_bar = st.progress(0)
+        status_text = st.empty()
 
-        vtu_files = sorted(glob.glob(os.path.join(folder, "a_t????.vtu")))
-        if not vtu_files:
-            continue
-
-        status_text.text(f"Loading {name}... ({len(vtu_files)} files)")
-        try:
-            mesh0 = meshio.read(vtu_files[0])
-            if not mesh0.point_data:
-                log_warning(f"No point data in {name}")
+        for folder_idx, folder in enumerate(folders):
+            name = os.path.basename(folder)
+            energy, duration = _self.parse_folder_name(name)
+            if energy is None:
                 continue
 
-            points = mesh0.points.astype(np.float32)
-            n_pts = len(points)
+            vtu_files = sorted(glob.glob(os.path.join(folder, "a_t????.vtu")))
+            if not vtu_files:
+                continue
 
-            # Decimate points if needed
-            if load_full_mesh and max_points and n_pts > max_points:
-                idx = np.random.choice(n_pts, max_points, replace=False)
-                points = points[idx]
-                # Remap triangles? Simpler: fallback to scatter if decimated
-                triangles = None
-                log_warning(f"Decimated {name} from {n_pts} to {max_points} points")
-            else:
+            status_text.text(f"Loading {name}... ({len(vtu_files)} files)")
+            try:
+                mesh0 = meshio.read(vtu_files[0])
+                if not mesh0.point_
+                    st.warning(f"No point data in {name}")
+                    continue
+
+                points = mesh0.points.astype(np.float32)
+                n_pts = len(points)
+                
                 triangles = None
                 for cell_block in mesh0.cells:
                     if cell_block.type == "triangle":
                         triangles = cell_block.data.astype(np.int32)
-                        if load_full_mesh and max_points and n_pts > max_points:
-                            # Keep only triangles with all indices in decimated set
-                            mask = np.isin(triangles, idx).all(axis=1)
-                            triangles = triangles[mask]
-                            # Remap indices
-                            remap = {old: new for new, old in enumerate(idx)}
-                            triangles = np.vectorize(remap.get)(triangles)
                         break
 
-            fields = {}
-            field_info = {}
-            for key in mesh0.point_data.keys():
-                arr = mesh0.point_data[key].astype(np.float32)
-                if load_full_mesh and max_points and n_pts > max_points:
-                    arr = arr[idx]
-                if arr.ndim == 1:
-                    field_info[key] = ("scalar", 1)
-                    fields[key] = np.full((len(vtu_files), len(arr)), np.nan, dtype=np.float32)
-                else:
-                    field_info[key] = ("vector", arr.shape[1])
-                    fields[key] = np.full((len(vtu_files), len(arr), arr.shape[1]), np.nan, dtype=np.float32)
-                fields[key][0] = arr
+                fields = {}
+                field_info = {}
+                for key in mesh0.point_data.keys():
+                    arr = mesh0.point_data[key].astype(np.float32)
+                    if arr.ndim == 1:
+                        field_info[key] = ("scalar", 1)
+                        fields[key] = np.full((len(vtu_files), n_pts), np.nan, dtype=np.float32)
+                    else:
+                        field_info[key] = ("vector", arr.shape[1])
+                        fields[key] = np.full((len(vtu_files), n_pts, arr.shape[1]), np.nan, dtype=np.float32)
+                    fields[key][0] = arr
+                    _self.available_fields.add(key)
 
-            for t in range(1, len(vtu_files)):
-                try:
-                    mesh = meshio.read(vtu_files[t])
-                    for key in field_info:
-                        if key in mesh.point_data:
-                            val = mesh.point_data[key].astype(np.float32)
-                            if load_full_mesh and max_points and n_pts > max_points:
-                                val = val[idx]
-                            fields[key][t] = val
-                except Exception as e:
-                    log_warning(f"Error loading timestep {t} in {name}: {e}")
+                for t in range(1, len(vtu_files)):
+                    try:
+                        mesh = meshio.read(vtu_files[t])
+                        for key in field_info:
+                            if key in mesh.point_
+                                fields[key][t] = mesh.point_data[key].astype(np.float32)
+                    except Exception as e:
+                        st.warning(f"Error loading timestep {t} in {name}: {e}")
 
-            sim_data = {
-                'name': name, 'energy_mJ': energy, 'duration_ns': duration,
-                'n_timesteps': len(vtu_files), 'vtu_files': vtu_files,
-                'field_info': field_info, 'has_mesh': load_full_mesh,
-                'points': points, 'fields': fields, 'triangles': triangles
-            }
+                sim_data = {
+                    'name': name, 'energy_mJ': energy, 'duration_ns': duration,
+                    'n_timesteps': len(vtu_files), 'vtu_files': vtu_files,
+                    'field_info': field_info, 'has_mesh': load_full_mesh,
+                    'points': points, 'fields': fields, 'triangles': triangles
+                }
+                
+                summary = {
+                    'name': name, 'energy': energy, 'duration': duration,
+                    'timesteps': list(range(1, len(vtu_files) + 1)), 'field_stats': {}
+                }
+                for field in field_info:
+                    vals = fields[field]
+                    if field_info[field][0] == "vector":
+                        mag_vals = np.linalg.norm(vals, axis=2)
+                        summary['field_stats'][field] = {
+                            'min': [float(np.nanmin(mag_vals))],
+                            'max': [float(np.nanmax(mag_vals))],
+                            'mean': [float(np.nanmean(mag_vals))],
+                            'std': [float(np.nanstd(mag_vals))]
+                        }
+                    else:
+                        summary['field_stats'][field] = {
+                            'min': [float(np.nanmin(vals))],
+                            'max': [float(np.nanmax(vals))],
+                            'mean': [float(np.nanmean(vals))],
+                            'std': [float(np.nanstd(vals))]
+                        }
+
+                simulations[name] = sim_data
+                summaries.append(summary)
+            except Exception as e:
+                st.warning(f"Error loading {name}: {str(e)}")
+                continue
             
-            summary = {
-                'name': name, 'energy': energy, 'duration': duration,
-                'timesteps': list(range(1, len(vtu_files) + 1)), 'field_stats': {}
-            }
-            for field in field_info:
-                vals = fields[field]
-                if field_info[field][0] == "vector":
-                    mag_vals = np.linalg.norm(vals, axis=2)
-                    summary['field_stats'][field] = {
-                        'min': float(np.nanmin(mag_vals)),
-                        'max': float(np.nanmax(mag_vals)),
-                        'mean': float(np.nanmean(mag_vals)),
-                        'std': float(np.nanstd(mag_vals))
-                    }
-                else:
-                    summary['field_stats'][field] = {
-                        'min': float(np.nanmin(vals)),
-                        'max': float(np.nanmax(vals)),
-                        'mean': float(np.nanmean(vals)),
-                        'std': float(np.nanstd(vals))
-                    }
+            progress_bar.progress((folder_idx + 1) / len(folders))
 
-            simulations[name] = sim_data
-            summaries.append(summary)
-        except Exception as e:
-            log_warning(f"Error loading {name}: {str(e)}")
-            continue
-        
-        progress_bar.progress((folder_idx + 1) / len(folders))
+        progress_bar.empty()
+        status_text.empty()
 
-    progress_bar.empty()
-    status_text.empty()
+        if simulations:
+            st.success(f"✅ Loaded {len(simulations)} simulations")
+        else:
+            st.error("❌ No simulations loaded successfully")
 
-    if simulations:
-        st.success(f"✅ Loaded {len(simulations)} simulations")
-    else:
-        st.error("❌ No simulations loaded successfully")
-
-    return simulations, summaries
+        return simulations, summaries
 
 # =============================================
-# ENHANCED SUNBURST VISUALIZER
+# HELPER FOR SAFE STRING FORMATTING
 # =============================================
-def create_sunburst_chart(
-    summaries: List[Dict],
-    selected_field: str,
-    hierarchy: List[str] = ['energy', 'duration', 'name'],  # configurable
-    cmaps: Dict[str, str] = None,  # per level colormap
-    norm_mode: str = 'global',  # 'global', 'per_parent', 'percentile'
-    percentile_clip: Tuple[float, float] = (2, 98),
-    label_formats: Dict[str, str] = None,  # e.g., {'energy': 'E = {value:.1f} mJ', ...}
-    show_labels: Dict[str, bool] = None,
-    font_sizes: Dict[str, int] = None,
-    highlight_sim: Optional[str] = None,
-    leaf_value_as_label: bool = True,
-    colorbar_side: str = 'split'  # 'split' -> left/right, else 'right'
-):
-    """
-    Flexible sunburst with configurable hierarchy, per-level colormaps,
-    label formatting, and visibility toggles.
-    """
-    # Defaults
-    if cmaps is None:
-        cmaps = {'root': 'Greys', 'energy': 'YlOrRd', 'duration': 'Blues', 'name': 'Viridis'}
-    if label_formats is None:
-        label_formats = {
-            'root': 'All Simulations',
-            'energy': 'E = {value:.1f} mJ',
-            'duration': 'τ = {value:.1f} ns',
-            'name': '{value:.3f}'  # will be peak value
-        }
-    if show_labels is None:
-        show_labels = {'root': True, 'energy': True, 'duration': True, 'name': True}
-    if font_sizes is None:
-        font_sizes = {'root': 16, 'energy': 14, 'duration': 12, 'name': 10}
+def safe_format(fmt, **kwargs):
+    try:
+        return fmt.format(**kwargs)
+    except Exception:
+        return fmt
 
-    # Build tree and collect values
-    all_energies = []
-    all_durations = []
+# =============================================
+# ENHANCED SUNBURST VISUALIZER (SPLIT COLORBARS & CUSTOM LABELS)
+# =============================================
+def create_sunburst_chart(summaries, selected_field, 
+                          cmap_root='Greys', cmap_energy='YlOrRd', cmap_tau='Blues', cmap_field='Viridis',
+                          highlight_sim=None,
+                          font_size_root=16, font_size_energy=14, font_size_tau=12, font_size_sim=10,
+                          show_labels_root=True, show_labels_energy=True, show_labels_tau=True, show_labels_sim=True,
+                          fmt_root="All Simulations as FEM",
+                          fmt_energy="E = {energy:.1f} mJ",
+                          fmt_tau="τ = {tau:.1f} ns",
+                          fmt_sim="Peak: {peak:.3f}"):
+    """
+    Fully customizable Sunburst with:
+    - Independent colormaps per hierarchy
+    - Split colorbars (2 left, 2 right)
+    - Custom label formatting per level
+    - Label visibility toggles per level
+    - Leaf nodes display actual peak values instead of filenames
+    - Strict ID mapping & branchvalues="total" compliance
+    """
+    labels, parents, ids, values, colors, levels = [], [], [], [], [], []
+    e_indices = {}
+    d_indices = {}
+    
+    # 1. Root Node
+    ids.append("root")
+    root_lbl = safe_format(fmt_root) if show_labels_root else ""
+    labels.append(root_lbl)
+    parents.append("") 
+    values.append(0)   
+    colors.append("#E0E0E0") 
+    levels.append(0)
+    root_idx = 0
+    
+    # 2. Data Collection for Normalization
+    all_energies = [s['energy'] for s in summaries]
+    all_taus = [s['duration'] for s in summaries]
     all_peaks = []
+    
     tree = {}
-    sim_index = 0
     for s in summaries:
         e = s['energy']
         d = s['duration']
         sim = s['name']
-        peak = float(s.get('field_stats', {}).get(selected_field, {}).get('max', 0))
-        if peak <= 0:
-            peak = 1e-6
-        all_energies.append(e)
-        all_durations.append(d)
+        peak = float(s.get('field_stats', {}).get(selected_field, {}).get('max', [0])[0])
+        if peak <= 0: peak = 1e-3
         all_peaks.append(peak)
-        tree.setdefault(e, {}).setdefault(d, {})[sim] = (peak, sim_index)
-        sim_index += 1
+        tree.setdefault(e, {}).setdefault(d, {})[sim] = peak
 
-    if not all_energies:
-        return go.Figure()
+    if not all_energies: all_energies = [0]
+    if not all_taus: all_taus = [0]
+    if not all_peaks: all_peaks = [0]
 
-    # Normalization helpers
+    e_min, e_max = min(all_energies), max(all_energies)
+    d_min, d_max = min(all_taus), max(all_taus)
+    p_min, p_max = min(all_peaks), max(all_peaks)
+
+    # 3. Independent Color Map Sampling
+    cmap_root_colors = px.colors.sample_colorscale(cmap_root, 101)
+    cmap_e = px.colors.sample_colorscale(cmap_energy, 101)
+    cmap_d = px.colors.sample_colorscale(cmap_tau, 101)
+    cmap_p = px.colors.sample_colorscale(cmap_field, 101)
+
     def norm_val(v, vmin, vmax):
         return max(0.0, min(1.0, (v - vmin) / (vmax - vmin))) if vmax > vmin else 0.5
 
-    if norm_mode == 'percentile':
-        e_min, e_max = np.percentile(all_energies, percentile_clip[0]), np.percentile(all_energies, percentile_clip[1])
-        d_min, d_max = np.percentile(all_durations, percentile_clip[0]), np.percentile(all_durations, percentile_clip[1])
-        p_min, p_max = np.percentile(all_peaks, percentile_clip[0]), np.percentile(all_peaks, percentile_clip[1])
-    else:  # global
-        e_min, e_max = min(all_energies), max(all_energies)
-        d_min, d_max = min(all_durations), max(all_durations)
-        p_min, p_max = min(all_peaks), max(all_peaks)
-
-    # Sample colormaps
-    cmap_root = px.colors.sample_colorscale(cmaps.get('root', 'Greys'), 101)
-    cmap_energy = px.colors.sample_colorscale(cmaps.get('energy', 'YlOrRd'), 101)
-    cmap_duration = px.colors.sample_colorscale(cmaps.get('duration', 'Blues'), 101)
-    cmap_leaf = px.colors.sample_colorscale(cmaps.get('name', 'Viridis'), 101)
-
-    labels, parents, ids, values, colors, levels = [], [], [], [], [], []
-    e_indices = {}
-    d_indices = {}
-
-    # Root
-    root_id = "root"
-    ids.append(root_id)
-    root_label = label_formats.get('root', 'All Simulations')
-    labels.append(root_label if show_labels.get('root', True) else "")
-    parents.append("")
-    values.append(0)
-    colors.append(cmap_root[50])
-    levels.append(0)
-
-    # Energy level
+    # 4. Hierarchy Construction
     sorted_energies = sorted(set(all_energies))
+    colors[root_idx] = cmap_root_colors[50]
+    
     for e in sorted_energies:
+        e_lbl = safe_format(fmt_energy, energy=e) if show_labels_energy else f"E = {e:.1f} mJ"
         e_id = f"E_{e}"
-        e_label = label_formats.get('energy', 'E = {value:.1f} mJ').format(value=e)
+        e_idx = len(labels)
+        
+        # Add Energy Node
         ids.append(e_id)
-        labels.append(e_label if show_labels.get('energy', True) else "")
-        parents.append(root_id)
+        labels.append(e_lbl)
+        parents.append("root")
         values.append(0)
-        colors.append(cmap_energy[int(norm_val(e, e_min, e_max) * 100)])
+        colors.append(cmap_e[int(norm_val(e, e_min, e_max) * 100)])
         levels.append(1)
-        e_indices[e] = len(labels) - 1
+        e_indices[e] = e_idx
+        
+        # Iterate only taus present for this energy
+        if e in tree:
+            sorted_taus_for_e = sorted(tree[e].keys())
+            
+            for d in sorted_taus_for_e:
+                d_lbl = safe_format(fmt_tau, tau=d) if show_labels_tau else f"τ = {d:.1f} ns"
+                d_id = f"{e_id}_T_{d}"
+                d_idx = len(labels)
+                
+                # Add Tau Node
+                ids.append(d_id)
+                labels.append(d_lbl)
+                parents.append(e_id)
+                values.append(0)
+                colors.append(cmap_d[int(norm_val(d, d_min, d_max) * 100)])
+                levels.append(2)
+                d_indices[(e, d)] = d_idx
+                
+                sims_for_d = tree[e][d]
+                for sim, peak in sims_for_d.items():
+                    # Add Simulation Node (Leaf)
+                    s_lbl = safe_format(fmt_sim, peak=peak) if show_labels_sim else f"{peak:.3f}"
+                    s_id = f"{d_id}_S_{sim}"
+                    s_idx = len(labels)
+                    
+                    ids.append(s_id)
+                    labels.append(s_lbl)
+                    parents.append(d_id)
+                    values.append(peak)
+                    colors.append(cmap_p[int(norm_val(peak, p_min, p_max) * 100)])
+                    levels.append(3)
 
-        if e not in tree:
-            continue
-        sorted_durations = sorted(tree[e].keys())
-        for d in sorted_durations:
-            d_id = f"{e_id}_D_{d}"
-            d_label = label_formats.get('duration', 'τ = {value:.1f} ns').format(value=d)
-            ids.append(d_id)
-            labels.append(d_label if show_labels.get('duration', True) else "")
-            parents.append(e_id)
-            values.append(0)
-            colors.append(cmap_duration[int(norm_val(d, d_min, d_max) * 100)])
-            levels.append(2)
-            d_indices[(e, d)] = len(labels) - 1
-
-            for sim, (peak, idx) in tree[e][d].items():
-                leaf_id = f"{d_id}_S_{idx}"
-                if leaf_value_as_label:
-                    leaf_label = label_formats.get('name', '{value:.3f}').format(value=peak)
-                else:
-                    leaf_label = sim
-                ids.append(leaf_id)
-                labels.append(leaf_label if show_labels.get('name', True) else "")
-                parents.append(d_id)
-                values.append(peak)
-                colors.append(cmap_leaf[int(norm_val(peak, p_min, p_max) * 100)])
-                levels.append(3)
-
-    # Upward aggregation
-    # Leaves already have values
+    # 5. CRITICAL FIX: Upward Aggregation (Strict branchvalues="total" compliance)
     for (e, d), d_idx in d_indices.items():
         if e in tree and d in tree[e]:
-            d_sum = sum(tree[e][d].values(), 0)[0]  # sum peaks
-            values[d_idx] = d_sum
+            values[d_idx] = sum(tree[e][d].values())
+            
     for e, e_idx in e_indices.items():
-        e_sum = 0
-        if e in tree:
-            for d in tree[e]:
-                d_idx = d_indices.get((e, d))
-                if d_idx is not None:
-                    e_sum += values[d_idx]
+        e_sum = sum(values[d_indices.get((e, d), 0)] for d in tree[e] if (e, d) in d_indices)
         values[e_idx] = e_sum
-    values[0] = sum(values[e_idx] for e_idx in e_indices.values())
+        
+    values[root_idx] = sum(values[e_idx] for e_idx in e_indices.values())
 
-    # Build figure
+    # 6. Font Size Assignment
+    font_sizes = []
+    for l in levels:
+        if l == 0: font_sizes.append(font_size_root)
+        elif l == 1: font_sizes.append(font_size_energy)
+        elif l == 2: font_sizes.append(font_size_tau)
+        else: font_sizes.append(font_size_sim)
+
+    # 7. Create Figure
     fig = go.Figure(go.Sunburst(
-        ids=ids, labels=labels, parents=parents, values=values,
+        ids=ids,
+        labels=labels,
+        parents=parents,
+        values=values,
         branchvalues="total",
         marker=dict(colors=colors, line=dict(color='white', width=1.5)),
-        textfont=dict(size=[font_sizes.get(lvl, 12) for lvl in ['root','energy','duration','name'] for _ in range(levels.count(0) if lvl=='root' else levels.count(1) if lvl=='energy' else levels.count(2) if lvl=='duration' else levels.count(3))],
+        textfont=dict(size=font_sizes, family="sans-serif"),
         hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'
     ))
+    
+    # 8. Layout & Split Colorbars
+    fig.update_layout(
+        margin=dict(l=150, r=150, t=40, b=10),
+        paper_bgcolor="rgba(0,0,0,0)"
+    )
 
-    # Colorbars
-    colorbar_data = []
-    if colorbar_side == 'split':
-        # Left: root and energy
-        colorbar_data.append(("FEM Root", cmaps.get('root', 'Greys'), 0, 1, 0.96, 'left'))
-        colorbar_data.append(("Energy (mJ)", cmaps.get('energy', 'YlOrRd'), e_min, e_max, 0.74, 'left'))
-        # Right: duration and field
-        colorbar_data.append(("Pulse Width (ns)", cmaps.get('duration', 'Blues'), d_min, d_max, 0.51, 'right'))
-        colorbar_data.append((f"Peak {selected_field}", cmaps.get('name', 'Viridis'), p_min, p_max, 0.28, 'right'))
-    else:
-        # all on right
-        y_positions = [0.96, 0.74, 0.51, 0.28]
-        for (title, cmap, cmin, cmax, ypos), side in zip(colorbar_data, ['right']*4):
-            colorbar_data.append((title, cmap, cmin, cmax, ypos, side))
+    # 4 Independent Colorbars: 2 Left, 2 Right
+    colorbar_positions = [
+        # Left Side
+        ("Root", cmap_root, 0, 1, -0.12, 0.88, 'right'),
+        ("Energy (mJ)", cmap_energy, e_min, e_max, -0.12, 0.62, 'right'),
+        # Right Side
+        ("Pulse Width (ns)", cmap_tau, d_min, d_max, 1.12, 0.88, 'left'),
+        (f"Peak {selected_field}", cmap_field, p_min, p_max, 1.12, 0.62, 'left')
+    ]
 
-    for title, cmap, cmin, cmax, y_pos, side in colorbar_data:
+    for title, cmap, cmin, cmax, x_pos, y_pos, anchor in colorbar_positions:
         fig.add_trace(go.Scatter(
             x=[0], y=[0], mode='markers',
             marker=dict(
                 showscale=True,
                 colorbar=dict(
                     title=title,
-                    title_font=dict(size=10),
-                    tickfont=dict(size=9),
-                    len=0.18,
-                    thickness=14,
-                    x=1.01 if side == 'right' else -0.05,
+                    title_font=dict(size=11),
+                    tickfont=dict(size=10),
+                    len=0.2,
+                    thickness=15,
+                    x=x_pos,
                     y=y_pos,
-                    xanchor='left' if side == 'right' else 'right',
+                    xanchor=anchor,
                     yanchor='top',
                     outlinewidth=0,
                     bordercolor="rgba(0,0,0,0.1)",
@@ -371,8 +354,7 @@ def create_sunburst_chart(
                 cmin=cmin,
                 cmax=cmax
             ),
-            showlegend=False,
-            marker=dict(size=0, opacity=0)  # invisible
+            showlegend=False
         ))
 
     return fig
@@ -398,7 +380,9 @@ def main():
 
     st.markdown('<h1 class="main-header">📊 FEA Data Viewer</h1>', unsafe_allow_html=True)
 
-    # Session state
+    # Session State Initialization
+    if 'data_loader' not in st.session_state:
+        st.session_state.data_loader = UnifiedFEADataLoader()
     if 'data_loaded' not in st.session_state:
         st.session_state.data_loaded = False
     if 'simulations' not in st.session_state:
@@ -409,16 +393,16 @@ def main():
     # Sidebar
     with st.sidebar:
         st.markdown("### ⚙️ Data Settings")
-        load_full_mesh = st.checkbox("Load Full Mesh", value=True, help="Load complete mesh data for 3D visualization")
-        max_points = st.number_input("Max points per mesh (decimation)", min_value=1000, max_value=200000, value=50000, step=5000, disabled=not load_full_mesh)
-        default_colormap = st.selectbox("Default Colormap (3D View)", EXTENDED_COLORMAPS, index=0, key="global_colormap")
+        load_full_data = st.checkbox("Load Full Mesh", value=True, help="Load complete mesh data for 3D visualization")
+        
+        selected_colormap = st.selectbox("Default Colormap (3D View)", EXTENDED_COLORMAPS, index=0, key="global_colormap")
 
         if st.button("🔄 Load All Simulations", type="primary", use_container_width=True):
             with st.spinner("Loading simulation data..."):
-                sims, sums = load_all_simulations(FEA_SOLUTIONS_DIR, load_full_mesh=load_full_mesh, max_points=max_points)
-                st.session_state.simulations = sims
-                st.session_state.summaries = sums
-                st.session_state.data_loaded = bool(sims)
+                simulations, summaries = st.session_state.data_loader.load_all_simulations(load_full_mesh=load_full_data)
+                st.session_state.simulations = simulations
+                st.session_state.summaries = summaries
+                st.session_state.data_loaded = bool(simulations)
 
         if st.session_state.data_loaded:
             st.markdown("---")
@@ -428,14 +412,14 @@ def main():
                 energies = [s['energy'] for s in st.session_state.summaries]
                 st.metric("Energy Range", f"{min(energies):.1f} - {max(energies):.1f} mJ")
 
-        # Error log expander
-        if st.session_state.error_log:
-            with st.expander("⚠️ Error/Warning Log"):
-                for msg in st.session_state.error_log[-10:]:
-                    st.text(msg)
-
+    # Main Content
     if not st.session_state.data_loaded:
-        st.info("Click 'Load All Simulations' in the sidebar to begin.")
+        st.markdown("""
+        <div class="control-box" style="border-left-color: #ff9800; background: #fff3e0;">
+            <h3>⚠️ No Data Loaded</h3>
+            <p>Please load simulations using the "Load All Simulations" button in the sidebar.</p>
+        </div>
+        """, unsafe_allow_html=True)
         return
 
     render_data_viewer(st.session_state.get('global_colormap', 'Viridis'))
@@ -448,7 +432,7 @@ def render_data_viewer(selected_colormap):
     if not simulations:
         return
 
-    # Simulation selection
+    # Simulation Selection
     col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
         sim_name = st.selectbox("Select Simulation", sorted(simulations.keys()), key="viewer_sim_select")
@@ -463,7 +447,7 @@ def render_data_viewer(selected_colormap):
         st.error("No field data available.")
         return
 
-    # 3D Visualization Controls
+    # ================= VISUALIZATION CONTROLS =================
     st.markdown('<h4 class="sub-header">🎛️ 3D Visualization Controls</h4>', unsafe_allow_html=True)
     
     col1, col2, col3, col4 = st.columns(4)
@@ -486,7 +470,7 @@ def render_data_viewer(selected_colormap):
     with col4:
         lighting_preset = st.selectbox("💡 Lighting", ["Default", "Shiny", "Matte", "High Contrast"], index=0, key="lighting_preset")
 
-    # Theme & lighting
+    # ================= THEME & LIGHTING SETUP =================
     lighting_map = {
         "Default": dict(ambient=0.8, diffuse=0.8, specular=0.5, roughness=0.5),
         "Shiny": dict(ambient=0.6, diffuse=0.9, specular=0.8, roughness=0.2),
@@ -509,7 +493,7 @@ def render_data_viewer(selected_colormap):
     else:
         plot_bgcolor, paper_bgcolor, grid_color, font_color = "white", "white", "lightgray", "black"
 
-    # Data processing
+    # ================= DATA PROCESSING =================
     pts = sim['points']
     kind, _ = sim['field_info'][field]
     raw = sim['fields'][field][timestep]
@@ -522,7 +506,7 @@ def render_data_viewer(selected_colormap):
         values = np.where(np.isnan(magnitude), 0, magnitude)
         label = f"{field} (magnitude)"
 
-    # Color scale limits
+    # ================= COLOR SCALE LIMITS =================
     st.markdown('<h5 class="sub-header">🌈 Color Scale Limits</h5>', unsafe_allow_html=True)
     data_min, data_max = float(np.min(values)), float(np.max(values))
     
@@ -537,7 +521,7 @@ def render_data_viewer(selected_colormap):
     if auto_scale:
         cmin, cmax = None, None
 
-    # Build 3D trace
+    # ================= PLOTLY TRACE CONSTRUCTION =================
     tri = sim.get('triangles')
     trace_data = None
     
@@ -560,6 +544,7 @@ def render_data_viewer(selected_colormap):
             hovertemplate=f'<b>{label}:</b> %{{marker.color:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
         )
 
+    # ================= LAYOUT & RENDERING =================
     fig = go.Figure(data=trace_data)
     fig.update_layout(
         title=dict(text=f"{label} at Timestep {timestep + 1}", font=dict(size=18, color=font_color)),
@@ -572,14 +557,14 @@ def render_data_viewer(selected_colormap):
         plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=700, margin=dict(l=0, r=0, t=50, b=0)
     )
     
-    for trace in fig.data:
+    for trace in fig.
         if hasattr(trace, 'colorbar') and trace.colorbar:
             trace.colorbar.title.font.color = font_color
             trace.colorbar.tickfont.color = font_color
 
     st.plotly_chart(fig, use_container_width=True)
     
-    # Statistics
+    # Field Statistics
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1: st.metric("Min", f"{np.min(values):.3f}")
     with col2: st.metric("Max", f"{np.max(values):.3f}")
@@ -587,14 +572,15 @@ def render_data_viewer(selected_colormap):
     with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
     with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
 
-    # ================= SUNBURST SECTION =================
+    # ================= SUNBURST SECTION (REACTIVE) =================
     st.markdown('<h2 class="sub-header">🌳 Comparative Sunburst – Peak Values</h2>', unsafe_allow_html=True)
-    st.markdown("Hierarchy: **FEM Root → Energy → Pulse Duration → Simulation** (configurable)")
+    st.markdown("Hierarchy: **FEM Root → Energy → Pulse Duration → Simulation**")
 
     if not summaries:
         st.warning("No summary data available.")
         return
 
+    # Get all available fields
     all_fields = set()
     for s in summaries:
         all_fields.update(s.get('field_stats', {}).keys())
@@ -604,7 +590,7 @@ def render_data_viewer(selected_colormap):
         st.warning("No fields found for sunburst.")
         return
 
-    # Sunburst controls
+    # Controls
     col1, col2 = st.columns([3, 2])
     with col1:
         sun_field = st.selectbox("Select Field", available_fields, 
@@ -614,10 +600,11 @@ def render_data_viewer(selected_colormap):
                                      ["None"] + sorted(simulations.keys()), 
                                      key="sunburst_highlight")
     with col2:
-        norm_mode = st.selectbox("Color Normalization", ['global', 'percentile'], index=0, key="norm_mode")
-        percentile_clip = st.slider("Percentile Clip (low, high)", 0, 100, (2, 98), step=1, disabled=(norm_mode!='percentile'))
+        sun_cmap = st.selectbox("Field Colormap", EXTENDED_COLORMAPS, 
+                            index=EXTENDED_COLORMAPS.index(selected_colormap) if selected_colormap in EXTENDED_COLORMAPS else 0,
+                            key="sunburst_cmap")
 
-    # Hierarchy colormaps
+    # 🎨 Hierarchy Colormap Selectors
     st.markdown("### 🎨 Hierarchy Colormaps")
     c_cm1, c_cm2, c_cm3, c_cm4 = st.columns(4)
     with c_cm1:
@@ -628,26 +615,26 @@ def render_data_viewer(selected_colormap):
         cmap_tau = st.selectbox("Pulse Width Colormap", EXTENDED_COLORMAPS, index=EXTENDED_COLORMAPS.index('Blues') if 'Blues' in EXTENDED_COLORMAPS else 0, key="cmap_tau")
     with c_cm4:
         cmap_field_sim = st.selectbox("Simulation Colormap", EXTENDED_COLORMAPS, 
-                                    index=EXTENDED_COLORMAPS.index(selected_colormap) if selected_colormap in EXTENDED_COLORMAPS else 0,
+                                    index=EXTENDED_COLORMAPS.index(sun_cmap) if sun_cmap in EXTENDED_COLORMAPS else 0,
                                     key="cmap_field_sim")
 
-    # Label customization
-    st.markdown("### 🏷️ Label Customization (per hierarchy)")
-    col_l1, col_l2, col_l3, col_l4 = st.columns(4)
-    with col_l1:
-        show_root = st.checkbox("Show Root Label", True, key="show_root")
-        root_label = st.text_input("Root Label Format", "All Simulations", key="root_label")
-    with col_l2:
-        show_energy = st.checkbox("Show Energy Labels", True, key="show_energy")
-        energy_label = st.text_input("Energy Label Format", "E = {value:.1f} mJ", key="energy_label")
-    with col_l3:
-        show_tau = st.checkbox("Show Pulse Width Labels", True, key="show_tau")
-        tau_label = st.text_input("Pulse Width Format", "τ = {value:.1f} ns", key="tau_label")
-    with col_l4:
-        show_sim = st.checkbox("Show Simulation Labels", True, key="show_sim")
-        sim_label = st.text_input("Simulation Label Format (value only)", "{value:.3f}", key="sim_label")
+    # 🏷️ Label Customization & Visibility
+    st.markdown("### 🏷️ Label Customization & Visibility")
+    st.markdown("*(Use `{energy}`, `{tau}`, `{peak}` as placeholders for dynamic values)*")
+    
+    c_vis, c_fmt = st.columns([1, 3])
+    with c_vis:
+        vis_root = st.checkbox("Show Root Labels", value=True, key="vis_root")
+        vis_energy = st.checkbox("Show Energy Labels", value=True, key="vis_energy")
+        vis_tau = st.checkbox("Show Tau Labels", value=True, key="vis_tau")
+        vis_sim = st.checkbox("Show Sim Labels", value=True, key="vis_sim")
+    with c_fmt:
+        fmt_root = st.text_input("Root Format", value="All Simulations as FEM", key="fmt_root")
+        fmt_energy = st.text_input("Energy Format", value="E = {energy:.1f} mJ", key="fmt_energy")
+        fmt_tau = st.text_input("Tau Format", value="τ = {tau:.1f} ns", key="fmt_tau")
+        fmt_sim = st.text_input("Sim Format", value="Peak: {peak:.3f}", key="fmt_sim")
 
-    # Font sizes
+    # Font Size Controls
     st.markdown("### 🖋️ Label Font Sizes")
     c_fs1, c_fs2, c_fs3, c_fs4 = st.columns(4)
     with c_fs1:
@@ -659,51 +646,78 @@ def render_data_viewer(selected_colormap):
     with c_fs4:
         fs_sim = st.slider("Simulation", 8, 18, 10, key="fs_sim")
 
-    # Build cmaps dict
-    cmaps_dict = {
-        'root': cmap_root,
-        'energy': cmap_energy,
-        'duration': cmap_tau,
-        'name': cmap_field_sim
-    }
-    label_formats = {
-        'root': root_label,
-        'energy': energy_label,
-        'duration': tau_label,
-        'name': sim_label
-    }
-    show_labels_dict = {
-        'root': show_root,
-        'energy': show_energy,
-        'duration': show_tau,
-        'name': show_sim
-    }
-    font_sizes_dict = {
-        'root': fs_root,
-        'energy': fs_energy,
-        'duration': fs_tau,
-        'name': fs_sim
-    }
-
+    # ✅ Chart renders reactively with all customizations
     fig_sun = create_sunburst_chart(
-        summaries,
-        sun_field,
-        hierarchy=['energy', 'duration', 'name'],
-        cmaps=cmaps_dict,
-        norm_mode=norm_mode,
-        percentile_clip=percentile_clip,
-        label_formats=label_formats,
-        show_labels=show_labels_dict,
-        font_sizes=font_sizes_dict,
+        summaries, 
+        sun_field, 
+        cmap_root=cmap_root,
+        cmap_energy=cmap_energy,
+        cmap_tau=cmap_tau,
+        cmap_field=cmap_field_sim,
         highlight_sim=highlight_sim if highlight_sim != "None" else None,
-        leaf_value_as_label=True,
-        colorbar_side='split'
+        font_size_root=fs_root,
+        font_size_energy=fs_energy,
+        font_size_tau=fs_tau,
+        font_size_sim=fs_sim,
+        show_labels_root=vis_root,
+        show_labels_energy=vis_energy,
+        show_labels_tau=vis_tau,
+        show_labels_sim=vis_sim,
+        fmt_root=fmt_root,
+        fmt_energy=fmt_energy,
+        fmt_tau=fmt_tau,
+        fmt_sim=fmt_sim
     )
     st.plotly_chart(fig_sun, use_container_width=True)
 
-    # Side-by-side comparison (refactored)
-    st.markdown("### Compare Two Fields Side-by-Side")
-    if len(available_fields) >= 2 and st.checkbox("Show two sunbursts", key="show_compare"):
+    # ==========================================
+    # 📥 HD EXPORT SECTION (PNG to JPG)
+    # ==========================================
+    with st.expander("📥 Export High-Resolution Image", expanded=False):
+        st.markdown("*(Note: Requires `kaleido` installed: `pip install kaleido`)*")
+        c_e1, c_e2, c_e3 = st.columns(3)
+        with c_e1:
+            img_width = st.number_input("Width (px)", value=1920, step=100, key="exp_w")
+        with c_e2:
+            img_height = st.number_input("Height (px)", value=1080, step=100, key="exp_h")
+        with c_e3:
+            scale_factor = st.slider("Scale Factor (HD Multiplier)", 1.0, 3.0, 2.0, key="exp_s")
+            
+        jpeg_quality = st.slider("JPG Quality", 70, 100, 95, key="exp_q")
+        
+        if st.button("📷 Render & Convert to JPG", type="primary", use_container_width=True):
+            with st.spinner("⚙️ Rendering HD image & converting..."):
+                try:
+                    # 1. Render to PNG at high resolution
+                    fig_sun.update_layout(margin=dict(l=150, r=150, t=40, b=10))
+                    png_bytes = fig_sun.to_image(format="png", scale=scale_factor, width=img_width, height=img_height)
+                    
+                    # 2. Convert PNG to JPG using Pillow
+                    img = Image.open(io.BytesIO(png_bytes))
+                    jpg_buffer = io.BytesIO()
+                    # Convert to RGB if RGBA (remove alpha for JPG compatibility)
+                    if img.mode == 'RGBA':
+                        img = img.convert('RGB')
+                    img.save(jpg_buffer, format="JPEG", quality=jpeg_quality, optimize=True)
+                    jpg_bytes = jpg_buffer.getvalue()
+                    
+                    st.success(f"✅ Rendered at {int(img_width*scale_factor)}x{int(img_height*scale_factor)} (Scale x{scale_factor})")
+                    st.download_button(
+                        label="📥 Download HD JPG",
+                        data=jpg_bytes,
+                        file_name="sunburst_chart_HD.jpg",
+                        mime="image/jpeg",
+                        use_container_width=True
+                    )
+                except ImportError:
+                    st.error("❌ Missing dependency. Please install `kaleido`: `pip install kaleido`")
+                except Exception as e:
+                    st.error(f"❌ Export failed. Make sure 'kaleido' is correctly installed.")
+                    st.code(f"Error: {str(e)}")
+
+    # Optional: Side-by-Side Comparison
+    st.markdown("### Compare Two Fields Side-by-Side (optional)")
+    if len(available_fields) >= 2 and st.checkbox("Show two sunbursts"):
         col_l, col_r = st.columns(2)
         with col_l:
             f1 = st.selectbox("Left Field", available_fields, key="sun_f1")
@@ -712,17 +726,16 @@ def render_data_viewer(selected_colormap):
             f2 = st.selectbox("Right Field", available_fields, index=1, key="sun_f2")
             c2 = st.selectbox("Right Colormap", EXTENDED_COLORMAPS, index=1, key="sun_c2")
         
-        cmaps_left = cmaps_dict.copy()
-        cmaps_left['name'] = c1
-        cmaps_right = cmaps_dict.copy()
-        cmaps_right['name'] = c2
-
-        fig1 = create_sunburst_chart(summaries, f1, cmaps=cmaps_left, norm_mode=norm_mode, percentile_clip=percentile_clip,
-                                     label_formats=label_formats, show_labels=show_labels_dict, font_sizes=font_sizes_dict,
-                                     leaf_value_as_label=True, colorbar_side='split')
-        fig2 = create_sunburst_chart(summaries, f2, cmaps=cmaps_right, norm_mode=norm_mode, percentile_clip=percentile_clip,
-                                     label_formats=label_formats, show_labels=show_labels_dict, font_sizes=font_sizes_dict,
-                                     leaf_value_as_label=True, colorbar_side='split')
+        fig1 = create_sunburst_chart(summaries, f1, cmap_root=cmap_root, cmap_energy=cmap_energy, cmap_tau=cmap_tau, cmap_field=c1,
+                                     highlight_sim=highlight_sim if highlight_sim != "None" else None,
+                                     font_size_root=fs_root, font_size_energy=fs_energy, font_size_tau=fs_tau, font_size_sim=fs_sim,
+                                     show_labels_root=vis_root, show_labels_energy=vis_energy, show_labels_tau=vis_tau, show_labels_sim=vis_sim,
+                                     fmt_root=fmt_root, fmt_energy=fmt_energy, fmt_tau=fmt_tau, fmt_sim=fmt_sim)
+        fig2 = create_sunburst_chart(summaries, f2, cmap_root=cmap_root, cmap_energy=cmap_energy, cmap_tau=cmap_tau, cmap_field=c2,
+                                     highlight_sim=highlight_sim if highlight_sim != "None" else None,
+                                     font_size_root=fs_root, font_size_energy=fs_energy, font_size_tau=fs_tau, font_size_sim=fs_sim,
+                                     show_labels_root=vis_root, show_labels_energy=vis_energy, show_labels_tau=vis_tau, show_labels_sim=vis_sim,
+                                     fmt_root=fmt_root, fmt_energy=fmt_energy, fmt_tau=fmt_tau, fmt_sim=fmt_sim)
         col_l.plotly_chart(fig1, use_container_width=True)
         col_r.plotly_chart(fig2, use_container_width=True)
 
