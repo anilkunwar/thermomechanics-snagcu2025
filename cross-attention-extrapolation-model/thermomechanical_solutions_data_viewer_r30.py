@@ -1,3 +1,12 @@
+The issue causing the "blank JPG" is a mismatch in how the Plotly figure data is passed to the JavaScript fallback. The previous code passed a JSON string instead of a JavaScript object, and the rendering container had 0 dimensions, preventing Plotly.js from calculating the layout correctly.
+
+Here is the **corrected, fully expanded code**. It fixes the client-side fallback by:
+1.  **Correctly serializing Data/Layout:** Converts the Python figure into clean JSON objects for JavaScript.
+2.  **Hidden Container:** Renders the chart in a hidden div with **actual dimensions** (`1920x1080` etc.) so Plotly.js can compute the image before capturing.
+3.  **Timing Delay:** Adds a 1-second delay to ensure complex elements like the Sunburst sectors are fully drawn before the image is taken.
+4.  **Error Logging:** Adds `console.error` inside the JS to help debug if issues persist (viewable in browser DevTools).
+
+```python
 import streamlit as st
 import streamlit.components.v1 as components
 import os
@@ -78,7 +87,7 @@ class UnifiedFEADataLoader:
             status_text.text(f"Loading {name}... ({len(vtu_files)} files)")
             try:
                 mesh0 = meshio.read(vtu_files[0])
-                if not mesh0.point_data:
+                if not mesh0.point_
                     st.warning(f"No point data in {name}")
                     continue
 
@@ -108,7 +117,7 @@ class UnifiedFEADataLoader:
                     try:
                         mesh = meshio.read(vtu_files[t])
                         for key in field_info:
-                            if key in mesh.point_data:
+                            if key in mesh.point_
                                 fields[key][t] = mesh.point_data[key].astype(np.float32)
                     except Exception as e:
                         st.warning(f"Error loading timestep {t} in {name}: {e}")
@@ -525,7 +534,6 @@ def render_data_viewer(selected_colormap):
         plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=700, margin=dict(l=0, r=0, t=50, b=0)
     )
     
-    # ✅ FIXED SYNTAX: iterate over fig.data
     for trace in fig.data:
         if hasattr(trace, 'colorbar') and trace.colorbar:
             trace.colorbar.title.font.color = font_color
@@ -632,7 +640,7 @@ def render_data_viewer(selected_colormap):
     st.plotly_chart(fig_sun, use_container_width=True)
 
     # ==========================================
-    # 📥 HD EXPORT SECTION (Kaleido + Client-Side Fallback)
+    # 📥 HD EXPORT SECTION (Fixed Client-Side Fallback)
     # ==========================================
     with st.expander("📥 Export High-Resolution Image", expanded=False):
         st.markdown("*(Server-side uses `kaleido`. Client-side fallback works everywhere without Chrome.)*")
@@ -670,35 +678,57 @@ def render_data_viewer(selected_colormap):
                         mime="image/jpeg",
                         use_container_width=True
                     )
-                except Exception:
-                    # METHOD 2: Client-side via Plotly.js (Zero Dependencies)
-                    st.warning("⚠️ Server renderer unavailable. Triggering browser download (may take 3s)...")
-                    fig_json = fig_sun.to_json()
+                except Exception as e:
+                    # METHOD 2: Client-side via Plotly.js (Fixed)
+                    st.warning("⚠️ Server renderer unavailable. Triggering browser download...")
+                    
+                    # FIX: Safely extract Data and Layout as JSON objects for JavaScript
+                    fig_dict = json.loads(fig_sun.to_json())
+                    js_data = json.dumps(fig_dict.get('data', []))
+                    js_layout = json.dumps(fig_dict.get('layout', {}))
+                    
                     html_code = f"""
                     <!DOCTYPE html>
                     <html>
                     <head>
+                        <meta charset="UTF-8">
                         <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
                     </head>
-                    <body style="margin:0; padding:0; height:0; width:0; overflow:hidden;">
-                        <div id="export-chart"></div>
+                    <body style="margin:0; padding:0;">
+                        <!-- Hidden container with ACTUAL dimensions so Plotly.js calculates correctly -->
+                        <div id="export-chart" style="width: {target_w}px; height: {target_h}px; position: absolute; left: -9999px; top: -9999px;"></div>
                         <script>
-                            var fig = {json.dumps(fig_json)};
-                            Plotly.newPlot('export-chart', fig.data, fig.layout, {{displayModeBar: false}}).then(function(gd) {{
-                                Plotly.toImage(gd, {{format: 'jpeg', width: {target_w}, height: {target_h}}}).then(function(dataUrl) {{
-                                    var a = document.createElement('a');
-                                    a.href = dataUrl;
-                                    a.download = 'sunburst_chart_HD.jpg';
-                                    document.body.appendChild(a);
-                                    a.click();
-                                    document.body.removeChild(a);
-                                }});
+                            var data = {js_data};
+                            var layout = {js_layout};
+                            
+                            // Force dimensions in layout
+                            layout.width = {target_w};
+                            layout.height = {target_h};
+
+                            Plotly.newPlot('export-chart', data, layout, {{responsive: false}}).then(function(gd) {{
+                                // Wait 1s for complex SVG (Sunburst) to fully render
+                                setTimeout(function() {{
+                                    Plotly.toImage(gd, {{format: 'jpeg', width: {target_w}, height: {target_h}}}).then(function(dataUrl) {{
+                                        var a = document.createElement('a');
+                                        a.href = dataUrl;
+                                        a.download = 'sunburst_chart_HD.jpg';
+                                        document.body.appendChild(a);
+                                        a.click();
+                                        document.body.removeChild(a);
+                                        Plotly.purge('export-chart');
+                                    }}).catch(function(err) {{
+                                        console.error("Image export failed:", err);
+                                    }});
+                                }}, 1000);
+                            }}).catch(function(err) {{
+                                console.error("Plotly newPlot failed:", err);
                             }});
                         </script>
                     </body>
                     </html>
                     """
-                    components.html(html_code, height=0, width=0)
+                    # Height=1 ensures the iframe is not blocked while remaining invisible
+                    components.html(html_code, height=1, width=1)
                     st.success("✅ Browser download triggered! Check your downloads folder.")
 
     st.markdown("### Compare Two Fields Side-by-Side (optional)")
@@ -726,3 +756,4 @@ def render_data_viewer(selected_colormap):
 
 if __name__ == "__main__":
     main()
+```
