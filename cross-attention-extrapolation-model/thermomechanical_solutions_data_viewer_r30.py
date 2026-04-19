@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import glob
 import re
@@ -8,6 +9,7 @@ import plotly.express as px
 import plotly.io as pio
 import meshio
 import io
+import json
 import warnings
 from datetime import datetime
 from collections import OrderedDict
@@ -76,7 +78,7 @@ class UnifiedFEADataLoader:
             status_text.text(f"Loading {name}... ({len(vtu_files)} files)")
             try:
                 mesh0 = meshio.read(vtu_files[0])
-                if not mesh0.point_data:
+                if not mesh0.point_
                     st.warning(f"No point data in {name}")
                     continue
 
@@ -106,7 +108,7 @@ class UnifiedFEADataLoader:
                     try:
                         mesh = meshio.read(vtu_files[t])
                         for key in field_info:
-                            if key in mesh.point_data:
+                            if key in mesh.point_
                                 fields[key][t] = mesh.point_data[key].astype(np.float32)
                     except Exception as e:
                         st.warning(f"Error loading timestep {t} in {name}: {e}")
@@ -179,20 +181,10 @@ def create_sunburst_chart(summaries, selected_field,
                           fmt_energy="E = {energy:.1f} mJ",
                           fmt_tau="τ = {tau:.1f} ns",
                           fmt_sim="Peak: {peak:.3f}"):
-    """
-    Fully customizable Sunburst with:
-    - Independent colormaps per hierarchy
-    - Split colorbars (2 left, 2 right)
-    - Custom label formatting per level
-    - Label visibility toggles per level
-    - Leaf nodes display actual peak values instead of filenames
-    - Strict ID mapping & branchvalues="total" compliance
-    """
     labels, parents, ids, values, colors, levels = [], [], [], [], [], []
     e_indices = {}
     d_indices = {}
     
-    # 1. Root Node
     ids.append("root")
     root_lbl = safe_format(fmt_root) if show_labels_root else ""
     labels.append(root_lbl)
@@ -202,7 +194,6 @@ def create_sunburst_chart(summaries, selected_field,
     levels.append(0)
     root_idx = 0
     
-    # 2. Data Collection for Normalization
     all_energies = [s['energy'] for s in summaries]
     all_taus = [s['duration'] for s in summaries]
     all_peaks = []
@@ -225,7 +216,6 @@ def create_sunburst_chart(summaries, selected_field,
     d_min, d_max = min(all_taus), max(all_taus)
     p_min, p_max = min(all_peaks), max(all_peaks)
 
-    # 3. Independent Color Map Sampling
     cmap_root_colors = px.colors.sample_colorscale(cmap_root, 101)
     cmap_e = px.colors.sample_colorscale(cmap_energy, 101)
     cmap_d = px.colors.sample_colorscale(cmap_tau, 101)
@@ -234,7 +224,6 @@ def create_sunburst_chart(summaries, selected_field,
     def norm_val(v, vmin, vmax):
         return max(0.0, min(1.0, (v - vmin) / (vmax - vmin))) if vmax > vmin else 0.5
 
-    # 4. Hierarchy Construction
     sorted_energies = sorted(set(all_energies))
     colors[root_idx] = cmap_root_colors[50]
     
@@ -243,7 +232,6 @@ def create_sunburst_chart(summaries, selected_field,
         e_id = f"E_{e}"
         e_idx = len(labels)
         
-        # Add Energy Node
         ids.append(e_id)
         labels.append(e_lbl)
         parents.append("root")
@@ -252,7 +240,6 @@ def create_sunburst_chart(summaries, selected_field,
         levels.append(1)
         e_indices[e] = e_idx
         
-        # Iterate only taus present for this energy
         if e in tree:
             sorted_taus_for_e = sorted(tree[e].keys())
             
@@ -261,7 +248,6 @@ def create_sunburst_chart(summaries, selected_field,
                 d_id = f"{e_id}_T_{d}"
                 d_idx = len(labels)
                 
-                # Add Tau Node
                 ids.append(d_id)
                 labels.append(d_lbl)
                 parents.append(e_id)
@@ -272,7 +258,6 @@ def create_sunburst_chart(summaries, selected_field,
                 
                 sims_for_d = tree[e][d]
                 for sim, peak in sims_for_d.items():
-                    # Add Simulation Node (Leaf)
                     s_lbl = safe_format(fmt_sim, peak=peak) if show_labels_sim else f"{peak:.3f}"
                     s_id = f"{d_id}_S_{sim}"
                     s_idx = len(labels)
@@ -284,7 +269,6 @@ def create_sunburst_chart(summaries, selected_field,
                     colors.append(cmap_p[int(norm_val(peak, p_min, p_max) * 100)])
                     levels.append(3)
 
-    # 5. CRITICAL FIX: Upward Aggregation (Strict branchvalues="total" compliance)
     for (e, d), d_idx in d_indices.items():
         if e in tree and d in tree[e]:
             values[d_idx] = sum(tree[e][d].values())
@@ -295,7 +279,6 @@ def create_sunburst_chart(summaries, selected_field,
         
     values[root_idx] = sum(values[e_idx] for e_idx in e_indices.values())
 
-    # 6. Font Size Assignment
     font_sizes = []
     for l in levels:
         if l == 0: font_sizes.append(font_size_root)
@@ -303,7 +286,6 @@ def create_sunburst_chart(summaries, selected_field,
         elif l == 2: font_sizes.append(font_size_tau)
         else: font_sizes.append(font_size_sim)
 
-    # 7. Create Figure
     fig = go.Figure(go.Sunburst(
         ids=ids,
         labels=labels,
@@ -315,18 +297,14 @@ def create_sunburst_chart(summaries, selected_field,
         hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'
     ))
     
-    # 8. Layout & Split Colorbars
     fig.update_layout(
         margin=dict(l=150, r=150, t=40, b=10),
         paper_bgcolor="rgba(0,0,0,0)"
     )
 
-    # 4 Independent Colorbars: 2 Left, 2 Right
     colorbar_positions = [
-        # Left Side
         ("Root", cmap_root, 0, 1, -0.12, 0.88, 'right'),
         ("Energy (mJ)", cmap_energy, e_min, e_max, -0.12, 0.62, 'right'),
-        # Right Side
         ("Pulse Width (ns)", cmap_tau, d_min, d_max, 1.12, 0.88, 'left'),
         (f"Peak {selected_field}", cmap_field, p_min, p_max, 1.12, 0.62, 'left')
     ]
@@ -380,7 +358,6 @@ def main():
 
     st.markdown('<h1 class="main-header">📊 FEA Data Viewer</h1>', unsafe_allow_html=True)
 
-    # Session State Initialization
     if 'data_loader' not in st.session_state:
         st.session_state.data_loader = UnifiedFEADataLoader()
     if 'data_loaded' not in st.session_state:
@@ -390,7 +367,6 @@ def main():
     if 'summaries' not in st.session_state:
         st.session_state.summaries = []
 
-    # Sidebar
     with st.sidebar:
         st.markdown("### ⚙️ Data Settings")
         load_full_data = st.checkbox("Load Full Mesh", value=True, help="Load complete mesh data for 3D visualization")
@@ -412,7 +388,6 @@ def main():
                 energies = [s['energy'] for s in st.session_state.summaries]
                 st.metric("Energy Range", f"{min(energies):.1f} - {max(energies):.1f} mJ")
 
-    # Main Content
     if not st.session_state.data_loaded:
         st.markdown("""
         <div class="control-box" style="border-left-color: #ff9800; background: #fff3e0;">
@@ -432,7 +407,6 @@ def render_data_viewer(selected_colormap):
     if not simulations:
         return
 
-    # Simulation Selection
     col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
         sim_name = st.selectbox("Select Simulation", sorted(simulations.keys()), key="viewer_sim_select")
@@ -447,7 +421,6 @@ def render_data_viewer(selected_colormap):
         st.error("No field data available.")
         return
 
-    # ================= VISUALIZATION CONTROLS =================
     st.markdown('<h4 class="sub-header">🎛️ 3D Visualization Controls</h4>', unsafe_allow_html=True)
     
     col1, col2, col3, col4 = st.columns(4)
@@ -470,7 +443,6 @@ def render_data_viewer(selected_colormap):
     with col4:
         lighting_preset = st.selectbox("💡 Lighting", ["Default", "Shiny", "Matte", "High Contrast"], index=0, key="lighting_preset")
 
-    # ================= THEME & LIGHTING SETUP =================
     lighting_map = {
         "Default": dict(ambient=0.8, diffuse=0.8, specular=0.5, roughness=0.5),
         "Shiny": dict(ambient=0.6, diffuse=0.9, specular=0.8, roughness=0.2),
@@ -493,7 +465,6 @@ def render_data_viewer(selected_colormap):
     else:
         plot_bgcolor, paper_bgcolor, grid_color, font_color = "white", "white", "lightgray", "black"
 
-    # ================= DATA PROCESSING =================
     pts = sim['points']
     kind, _ = sim['field_info'][field]
     raw = sim['fields'][field][timestep]
@@ -506,7 +477,6 @@ def render_data_viewer(selected_colormap):
         values = np.where(np.isnan(magnitude), 0, magnitude)
         label = f"{field} (magnitude)"
 
-    # ================= COLOR SCALE LIMITS =================
     st.markdown('<h5 class="sub-header">🌈 Color Scale Limits</h5>', unsafe_allow_html=True)
     data_min, data_max = float(np.min(values)), float(np.max(values))
     
@@ -521,7 +491,6 @@ def render_data_viewer(selected_colormap):
     if auto_scale:
         cmin, cmax = None, None
 
-    # ================= PLOTLY TRACE CONSTRUCTION =================
     tri = sim.get('triangles')
     trace_data = None
     
@@ -544,7 +513,6 @@ def render_data_viewer(selected_colormap):
             hovertemplate=f'<b>{label}:</b> %{{marker.color:.3f}}<br><b>X:</b> %{{x:.3f}}<br><b>Y:</b> %{{y:.3f}}<br><b>Z:</b> %{{z:.3f}}<extra></extra>'
         )
 
-    # ================= LAYOUT & RENDERING =================
     fig = go.Figure(data=trace_data)
     fig.update_layout(
         title=dict(text=f"{label} at Timestep {timestep + 1}", font=dict(size=18, color=font_color)),
@@ -557,6 +525,7 @@ def render_data_viewer(selected_colormap):
         plot_bgcolor=plot_bgcolor, paper_bgcolor=paper_bgcolor, height=700, margin=dict(l=0, r=0, t=50, b=0)
     )
     
+    # ✅ FIXED SYNTAX: iterate over fig.data
     for trace in fig.data:
         if hasattr(trace, 'colorbar') and trace.colorbar:
             trace.colorbar.title.font.color = font_color
@@ -564,7 +533,6 @@ def render_data_viewer(selected_colormap):
 
     st.plotly_chart(fig, use_container_width=True)
     
-    # Field Statistics
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1: st.metric("Min", f"{np.min(values):.3f}")
     with col2: st.metric("Max", f"{np.max(values):.3f}")
@@ -572,7 +540,6 @@ def render_data_viewer(selected_colormap):
     with col4: st.metric("Std Dev", f"{np.std(values):.3f}")
     with col5: st.metric("Range", f"{np.max(values) - np.min(values):.3f}")
 
-    # ================= SUNBURST SECTION (REACTIVE) =================
     st.markdown('<h2 class="sub-header">🌳 Comparative Sunburst – Peak Values</h2>', unsafe_allow_html=True)
     st.markdown("Hierarchy: **FEM Root → Energy → Pulse Duration → Simulation**")
 
@@ -580,7 +547,6 @@ def render_data_viewer(selected_colormap):
         st.warning("No summary data available.")
         return
 
-    # Get all available fields
     all_fields = set()
     for s in summaries:
         all_fields.update(s.get('field_stats', {}).keys())
@@ -590,7 +556,6 @@ def render_data_viewer(selected_colormap):
         st.warning("No fields found for sunburst.")
         return
 
-    # Controls
     col1, col2 = st.columns([3, 2])
     with col1:
         sun_field = st.selectbox("Select Field", available_fields, 
@@ -604,7 +569,6 @@ def render_data_viewer(selected_colormap):
                             index=EXTENDED_COLORMAPS.index(selected_colormap) if selected_colormap in EXTENDED_COLORMAPS else 0,
                             key="sunburst_cmap")
 
-    # 🎨 Hierarchy Colormap Selectors
     st.markdown("### 🎨 Hierarchy Colormaps")
     c_cm1, c_cm2, c_cm3, c_cm4 = st.columns(4)
     with c_cm1:
@@ -618,7 +582,6 @@ def render_data_viewer(selected_colormap):
                                     index=EXTENDED_COLORMAPS.index(sun_cmap) if sun_cmap in EXTENDED_COLORMAPS else 0,
                                     key="cmap_field_sim")
 
-    # 🏷️ Label Customization & Visibility
     st.markdown("### 🏷️ Label Customization & Visibility")
     st.markdown("*(Use `{energy}`, `{tau}`, `{peak}` as placeholders for dynamic values)*")
     
@@ -634,7 +597,6 @@ def render_data_viewer(selected_colormap):
         fmt_tau = st.text_input("Tau Format", value="τ = {tau:.1f} ns", key="fmt_tau")
         fmt_sim = st.text_input("Sim Format", value="Peak: {peak:.3f}", key="fmt_sim")
 
-    # Font Size Controls
     st.markdown("### 🖋️ Label Font Sizes")
     c_fs1, c_fs2, c_fs3, c_fs4 = st.columns(4)
     with c_fs1:
@@ -646,7 +608,6 @@ def render_data_viewer(selected_colormap):
     with c_fs4:
         fs_sim = st.slider("Simulation", 8, 18, 10, key="fs_sim")
 
-    # ✅ Chart renders reactively with all customizations
     fig_sun = create_sunburst_chart(
         summaries, 
         sun_field, 
@@ -671,10 +632,10 @@ def render_data_viewer(selected_colormap):
     st.plotly_chart(fig_sun, use_container_width=True)
 
     # ==========================================
-    # 📥 HD EXPORT SECTION (PNG to JPG)
+    # 📥 HD EXPORT SECTION (Kaleido + Client-Side Fallback)
     # ==========================================
     with st.expander("📥 Export High-Resolution Image", expanded=False):
-        st.markdown("*(Note: Requires `kaleido` installed: `pip install kaleido`)*")
+        st.markdown("*(Server-side uses `kaleido`. Client-side fallback works everywhere without Chrome.)*")
         c_e1, c_e2, c_e3 = st.columns(3)
         with c_e1:
             img_width = st.number_input("Width (px)", value=1920, step=100, key="exp_w")
@@ -685,37 +646,61 @@ def render_data_viewer(selected_colormap):
             
         jpeg_quality = st.slider("JPG Quality", 70, 100, 95, key="exp_q")
         
-        if st.button("📷 Render & Convert to JPG", type="primary", use_container_width=True):
-            with st.spinner("⚙️ Rendering HD image & converting..."):
+        if st.button("📷 Render & Download JPG", type="primary", use_container_width=True):
+            with st.spinner("⚙️ Preparing HD image..."):
+                target_w = int(img_width * scale_factor)
+                target_h = int(img_height * scale_factor)
+                fig_sun.update_layout(margin=dict(l=150, r=150, t=40, b=10), width=target_w, height=target_h)
+                
                 try:
-                    # 1. Render to PNG at high resolution
-                    fig_sun.update_layout(margin=dict(l=150, r=150, t=40, b=10))
-                    png_bytes = fig_sun.to_image(format="png", scale=scale_factor, width=img_width, height=img_height)
+                    # METHOD 1: Server-side via Kaleido (High Quality)
+                    png_bytes = fig_sun.to_image(format="png", scale=1.0, width=target_w, height=target_h)
                     
-                    # 2. Convert PNG to JPG using Pillow
                     img = Image.open(io.BytesIO(png_bytes))
                     jpg_buffer = io.BytesIO()
-                    # Convert to RGB if RGBA (remove alpha for JPG compatibility)
                     if img.mode == 'RGBA':
                         img = img.convert('RGB')
                     img.save(jpg_buffer, format="JPEG", quality=jpeg_quality, optimize=True)
-                    jpg_bytes = jpg_buffer.getvalue()
                     
-                    st.success(f"✅ Rendered at {int(img_width*scale_factor)}x{int(img_height*scale_factor)} (Scale x{scale_factor})")
+                    st.success(f"✅ Server-side rendered at {target_w}x{target_h}")
                     st.download_button(
                         label="📥 Download HD JPG",
-                        data=jpg_bytes,
+                        data=jpg_buffer.getvalue(),
                         file_name="sunburst_chart_HD.jpg",
                         mime="image/jpeg",
                         use_container_width=True
                     )
-                except ImportError:
-                    st.error("❌ Missing dependency. Please install `kaleido`: `pip install kaleido`")
-                except Exception as e:
-                    st.error(f"❌ Export failed. Make sure 'kaleido' is correctly installed.")
-                    st.code(f"Error: {str(e)}")
+                except Exception:
+                    # METHOD 2: Client-side via Plotly.js (Zero Dependencies)
+                    st.warning("⚠️ Server renderer unavailable. Triggering browser download (may take 3s)...")
+                    fig_json = fig_sun.to_json()
+                    html_code = f"""
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+                    </head>
+                    <body style="margin:0; padding:0; height:0; width:0; overflow:hidden;">
+                        <div id="export-chart"></div>
+                        <script>
+                            var fig = {json.dumps(fig_json)};
+                            Plotly.newPlot('export-chart', fig.data, fig.layout, {{displayModeBar: false}}).then(function(gd) {{
+                                Plotly.toImage(gd, {{format: 'jpeg', width: {target_w}, height: {target_h}}}).then(function(dataUrl) {{
+                                    var a = document.createElement('a');
+                                    a.href = dataUrl;
+                                    a.download = 'sunburst_chart_HD.jpg';
+                                    document.body.appendChild(a);
+                                    a.click();
+                                    document.body.removeChild(a);
+                                }});
+                            }});
+                        </script>
+                    </body>
+                    </html>
+                    """
+                    components.html(html_code, height=0, width=0)
+                    st.success("✅ Browser download triggered! Check your downloads folder.")
 
-    # Optional: Side-by-Side Comparison
     st.markdown("### Compare Two Fields Side-by-Side (optional)")
     if len(available_fields) >= 2 and st.checkbox("Show two sunbursts"):
         col_l, col_r = st.columns(2)
