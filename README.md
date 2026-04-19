@@ -86,7 +86,12 @@
 
    [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionviewer26-streamlit-red)](https://thermomechanical-solutions-data-viewer26.streamlit.app/) (customizable color bars and controllable opacity, color bars edge values setting function and color maps perform correctly, hierarchical radar/sunburst chart as solution viewer  with provisions of field peak values, working)
 
-   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionviewer27-streamlit-red)](https://thermomechanical-solutions-data-viewer27.streamlit.app/) (customizable color bars and controllable opacity, color bars edge values setting function and color maps perform correctly, hierarchical radar/sunburst chart as solution viewer, r23v1 )
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionviewer27-streamlit-red)](https://thermomechanical-solutions-data-viewer27.streamlit.app/) (customizable color bars and controllable opacity, color bars edge values setting function and color maps perform correctly, hierarchical radar/sunburst chart as solution viewer, r23v1 - robust, single colormap )
+
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionviewer28-streamlit-red)](https://thermomechanical-solutions-data-viewer28.streamlit.app/) (customizable color bars and controllable opacity, color bars edge values setting function and color maps perform correctly, hierarchical radar/sunburst chart as solution viewer, r23v1 -robust , multiple colormaps for multiple hierarchy )
+
+   [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionviewer29-streamlit-red)](https://thermomechanical-solutions-data-viewer29.streamlit.app/) (customizable color bars and controllable opacity, color bars edge values setting function and color maps perform correctly, hierarchical radar/sunburst chart as solution viewer, r23v1 -robust , multiple colormaps for multiple hierarchy, editable labels )
+
 
    
   
