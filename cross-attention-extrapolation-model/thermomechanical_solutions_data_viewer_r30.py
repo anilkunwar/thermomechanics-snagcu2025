@@ -1,12 +1,3 @@
-The issue causing the "blank JPG" is a mismatch in how the Plotly figure data is passed to the JavaScript fallback. The previous code passed a JSON string instead of a JavaScript object, and the rendering container had 0 dimensions, preventing Plotly.js from calculating the layout correctly.
-
-Here is the **corrected, fully expanded code**. It fixes the client-side fallback by:
-1.  **Correctly serializing Data/Layout:** Converts the Python figure into clean JSON objects for JavaScript.
-2.  **Hidden Container:** Renders the chart in a hidden div with **actual dimensions** (`1920x1080` etc.) so Plotly.js can compute the image before capturing.
-3.  **Timing Delay:** Adds a 1-second delay to ensure complex elements like the Sunburst sectors are fully drawn before the image is taken.
-4.  **Error Logging:** Adds `console.error` inside the JS to help debug if issues persist (viewable in browser DevTools).
-
-```python
 import streamlit as st
 import streamlit.components.v1 as components
 import os
@@ -756,4 +747,4 @@ def render_data_viewer(selected_colormap):
 
 if __name__ == "__main__":
     main()
-```
+
