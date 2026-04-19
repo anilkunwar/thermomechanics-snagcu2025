@@ -339,7 +339,7 @@ def create_sunburst_chart(
         hovertemplate='<b>%{label}</b><br>Value: %{value:.3f}<extra></extra>'
     ))
 
-    # Colorbars
+    # Colorbars - fixed duplicate marker argument
     colorbar_data = []
     if colorbar_side == 'split':
         # Left: root and energy
@@ -355,7 +355,7 @@ def create_sunburst_chart(
         cmap_list = [cmaps.get('root', 'Greys'), cmaps.get('energy', 'YlOrRd'), cmaps.get('duration', 'Blues'), cmaps.get('name', 'Viridis')]
         cmin_list = [0, e_min, d_min, p_min]
         cmax_list = [1, e_max, d_max, p_max]
-        for (title, cmap, cmin, cmax, ypos) in zip(titles, cmap_list, cmin_list, cmax_list, y_positions):
+        for title, cmap, cmin, cmax, ypos in zip(titles, cmap_list, cmin_list, cmax_list, y_positions):
             colorbar_data.append((title, cmap, cmin, cmax, ypos, 'right'))
 
     for title, cmap, cmin, cmax, y_pos, side in colorbar_data:
@@ -379,10 +379,11 @@ def create_sunburst_chart(
                 ),
                 colorscale=cmap,
                 cmin=cmin,
-                cmax=cmax
+                cmax=cmax,
+                size=0,          # make marker invisible
+                opacity=0        # make marker invisible
             ),
-            showlegend=False,
-            marker=dict(size=0, opacity=0)  # invisible
+            showlegend=False
         ))
 
     return fig
