@@ -96,9 +96,8 @@
 
  [![continuummodellaserprocessing3d](https://img.shields.io/badge/solutionviewer31-streamlit-red)](https://thermomechanical-solutions-data-viewer31.streamlit.app/) (customizable color bars and controllable opacity, color bars edge values setting function and color maps perform correctly, hierarchical radar/sunburst chart as solution viewer,untested )
 
-   
   
-   Robust Visualizations 
+Robust Visualizations 
 
     [![continuummodellaserprocessing3d](https://img.shields.io/badge/sankeydemo-v1-brightgreen.svg)](https://thermomechanical-demo-data-interpolation-sankey-visualization1.streamlit.app/) (Sankey visualization for demo data)
 
