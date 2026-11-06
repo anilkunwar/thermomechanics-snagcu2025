@@ -1,0 +1,13 @@
+TITLE-ABS-KEY(
+  "pulsed laser"
+  AND
+  (fluence OR "laser fluence" OR "energy density" OR "pulse energy")
+  AND
+  ("pulse width" OR "pulse duration" OR "pulse on time" OR "irradiation time")
+  AND
+  ("SAC305" OR "Sn-3.0Ag-0.5Cu" OR "SnAgCu" OR "Sn-Ag-Cu")
+  AND
+  (microstructure OR "grain structure" OR "β-Sn" OR "intermetallic" OR "IMC")
+  AND
+  ("thermomechanical" OR "thermo-mechanical" OR "thermal stress" OR "thermal strain" OR "stress-strain" OR deformation OR "constitutive model" OR "viscoplastic" OR "creep")
+)
