@@ -1,0 +1,3 @@
+TITLE-ABS-KEY ( ( "pulsed laser*" OR "pulse laser*" OR "nanosecond laser*" OR "laser soldering" OR "laser reflow" OR "selective laser soldering" ) AND ( "SAC305" OR "Sn-3.0Ag-0.5Cu" OR "SnAgCu" OR "Sn-Ag-Cu" OR "lead-free solder" OR "Sn-Ag" ) AND ( microstructur* OR "grain structure" OR "β-Sn" OR intermetallic* OR IMC OR "phase-field" OR "phase field" ) AND ( thermomechan* OR "thermal stress" OR "thermal strain" OR deformation OR "constitutive model" OR viscoplastic* OR creep OR "finite element" OR FEA OR reliabil* OR "thermal fatigue" ) )
+
+29 results
